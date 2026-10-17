@@ -1,0 +1,1814 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kalshi Bitcoin Scanner, Quant Prediction Engine & 15M Paper Trading Bot</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              400: '#34d399',
+              500: '#10b981',
+              600: '#059669',
+            },
+            btc: '#f7931a',
+            dark: {
+              950: '#050811',
+              900: '#090e1a',
+              850: '#0d1527',
+              800: '#131e36',
+              750: '#182747',
+              700: '#1e325c'
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background-color: #050811; color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .glass-panel { background: rgba(13, 21, 39, 0.88); backdrop-filter: blur(14px); border: 1px solid rgba(255, 255, 255, 0.08); }
+    .glass-card { background: rgba(9, 14, 26, 0.92); border: 1px solid rgba(255, 255, 255, 0.07); transition: all 0.2s ease; }
+    .glass-card:hover { border-color: rgba(16, 185, 129, 0.4); box-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.6); }
+    .tick-up { animation: flashGreen 0.7s ease-out; }
+    .tick-down { animation: flashRed 0.7s ease-out; }
+    @keyframes flashGreen {
+      0% { color: #34d399; text-shadow: 0 0 16px rgba(52, 211, 153, 0.9); }
+      100% { color: inherit; text-shadow: none; }
+    }
+    @keyframes flashRed {
+      0% { color: #f87171; text-shadow: 0 0 16px rgba(248, 113, 113, 0.9); }
+      100% { color: inherit; text-shadow: none; }
+    }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #050811; }
+    ::-webkit-scrollbar-thumb { background: #182747; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #10b981; }
+    .tab-btn.active { background-color: #10b981; color: #050811; font-weight: 700; box-shadow: 0 0 15px rgba(16, 185, 129, 0.35); }
+    .tab-btn:not(.active):hover { background-color: rgba(255, 255, 255, 0.06); color: #fff; }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col selection:bg-emerald-500 selection:text-black">
+
+  <!-- Top Real-time Header -->
+  <header class="sticky top-0 z-50 glass-panel border-b border-slate-800/80 px-4 lg:px-8 py-3">
+    <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
+      
+      <!-- Brand & Title -->
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-400 via-amber-500 to-orange-600 text-black font-black text-2xl flex items-center justify-center shadow-lg shadow-amber-500/20">
+          ₿
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="text-base lg:text-lg font-black tracking-tight text-white flex items-center gap-2">
+              KALSHI BTC QUANT ENGINE
+              <span class="text-xs px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/30 font-mono font-bold">
+                PRO TERMINAL
+              </span>
+            </h1>
+          </div>
+          <p class="text-xs text-slate-400">Institutional Black-Scholes, Monte Carlo Engine & Automated 15M Paper Bot</p>
+        </div>
+      </div>
+
+      <!-- Paper Account Quick Widget -->
+      <div class="hidden sm:flex items-center gap-3 bg-slate-900/90 border border-slate-800 px-3.5 py-1.5 rounded-xl font-mono text-xs">
+        <div class="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></div>
+        <div>
+          <div class="text-[9px] uppercase text-slate-400 font-bold">Paper Equity ($50 start)</div>
+          <div id="headerPaperEquity" class="text-sm font-black text-emerald-400">$50.00</div>
+        </div>
+        <div class="pl-2 border-l border-slate-800">
+          <div class="text-[9px] uppercase text-slate-400 font-bold">Bot Status</div>
+          <div id="headerBotStatus" class="text-xs font-bold text-cyan-400">RUNNING</div>
+        </div>
+      </div>
+
+      <!-- Live Spot Price & Core Tickers -->
+      <div class="flex items-center gap-4 lg:gap-6">
+        <div class="flex flex-col items-end">
+          <div class="flex items-center gap-2">
+            <span class="text-[10px] uppercase font-mono text-slate-400 font-semibold">BTC SPOT (BRTI Ref):</span>
+            <span id="spotPriceDisplay" class="text-xl lg:text-2xl font-black font-mono tracking-tight text-white">$0.00</span>
+          </div>
+          <div class="flex items-center gap-2 text-xs font-mono">
+            <span id="spotChangeDisplay" class="font-bold text-slate-400">+0.00%</span>
+            <span class="text-slate-600">•</span>
+            <span class="text-slate-400">24h H: <span id="high24Display" class="text-slate-300">--</span></span>
+            <span class="text-slate-600">•</span>
+            <span class="text-slate-400">24h L: <span id="low24Display" class="text-slate-300">--</span></span>
+          </div>
+        </div>
+
+        <!-- Live Status Controls -->
+        <div class="flex items-center gap-2 pl-3 border-l border-slate-800">
+          <span id="streamStatusBadge" class="text-[11px] px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-mono font-semibold flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+            LIVE STREAM
+          </span>
+          <button id="rescanBtn" onclick="triggerManualRescan()" title="Force immediate Kalshi re-scan" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 border border-slate-700 font-mono flex items-center gap-1">
+            🔄 Scan
+          </button>
+          <button id="soundToggleBtn" onclick="toggleAudio()" title="Sound alert on +EV discoveries" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 border border-slate-700 font-mono">
+            🔔 <span id="soundLabel">On</span>
+          </button>
+        </div>
+
+      </div>
+
+    </div>
+  </header>
+
+  <!-- KPI Overview Strip -->
+  <div class="border-b border-slate-800/80 bg-dark-900/60 px-4 lg:px-8 py-3">
+    <div class="max-w-7xl mx-auto grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs font-mono">
+      
+      <!-- KPI 1: Realized Volatility -->
+      <div class="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800">
+        <div class="text-[10px] text-slate-400 uppercase font-bold flex justify-between">
+          <span>24h Realized Vol (σ)</span>
+          <span class="text-cyan-400">Kraken</span>
+        </div>
+        <div class="mt-1 text-base font-bold text-cyan-400" id="kpiVol">--%</div>
+        <div class="text-[10px] text-slate-500 flex justify-between mt-0.5">
+          <span>Parkinson: <span id="kpiParkinson" class="text-slate-300">--%</span></span>
+        </div>
+      </div>
+
+      <!-- KPI 2: RSI & Momentum -->
+      <div class="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800">
+        <div class="text-[10px] text-slate-400 uppercase font-bold flex justify-between">
+          <span>RSI (14) Momentum</span>
+          <span id="kpiRsiStatus" class="text-slate-400">Neutral</span>
+        </div>
+        <div class="mt-1 text-base font-bold text-white" id="kpiRsi">--</div>
+        <div class="text-[10px] text-slate-500 flex justify-between mt-0.5">
+          <span>MACD Hist: <span id="kpiMacd" class="text-slate-300">--</span></span>
+        </div>
+      </div>
+
+      <!-- KPI 3: 15m Candle Delta -->
+      <div class="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800">
+        <div class="text-[10px] text-slate-400 uppercase font-bold flex justify-between">
+          <span>Current 15m Delta</span>
+          <span class="text-amber-400">KXBTC15M</span>
+        </div>
+        <div class="mt-1 text-base font-bold text-slate-200" id="kpiDelta">--</div>
+        <div class="text-[10px] text-slate-500 flex justify-between mt-0.5">
+          <span>Open: <span id="kpiOpen" class="text-slate-300">$0</span></span>
+        </div>
+      </div>
+
+      <!-- KPI 4: Hyperliquid Funding -->
+      <div class="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800">
+        <div class="text-[10px] text-slate-400 uppercase font-bold flex justify-between">
+          <span>BTC Funding Rate</span>
+          <span class="text-emerald-400">Annualized</span>
+        </div>
+        <div class="mt-1 text-base font-bold text-emerald-400" id="kpiFunding">--%</div>
+        <div class="text-[10px] text-slate-500 flex justify-between mt-0.5">
+          <span>8h Rate: <span id="kpiFunding8h" class="text-slate-300">--%</span></span>
+        </div>
+      </div>
+
+      <!-- KPI 5: Open Interest -->
+      <div class="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800">
+        <div class="text-[10px] text-slate-400 uppercase font-bold flex justify-between">
+          <span>Open Interest</span>
+          <span class="text-purple-400">Hyperliquid</span>
+        </div>
+        <div class="mt-1 text-base font-bold text-purple-400" id="kpiOi">-- BTC</div>
+        <div class="text-[10px] text-slate-500 flex justify-between mt-0.5">
+          <span>USD: <span id="kpiOiUsd" class="text-slate-300">$0</span></span>
+        </div>
+      </div>
+
+      <!-- KPI 6: Markets Scanned & Best Edge -->
+      <div class="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800">
+        <div class="text-[10px] text-slate-400 uppercase font-bold flex justify-between">
+          <span>Kalshi Coverage</span>
+          <span class="text-emerald-400" id="kpiTopEv">--</span>
+        </div>
+        <div class="mt-1 text-base font-bold text-emerald-400" id="kpiTotalMarkets">0 Markets</div>
+        <div class="text-[10px] text-slate-500 flex justify-between mt-0.5">
+          <span>+EV Found: <span id="kpiEvCount" class="text-emerald-400 font-bold">0</span></span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Navigation Tab Bar -->
+  <div class="px-4 lg:px-8 border-b border-slate-800 bg-dark-950">
+    <div class="max-w-7xl mx-auto flex items-center overflow-x-auto gap-2 py-2.5 scrollbar-none">
+      <button onclick="switchTab('tab-bot')" id="btn-tab-bot" class="tab-btn active px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold whitespace-nowrap flex items-center gap-1.5 transition">
+        🤖 15M Trading Bot & Audit
+      </button>
+      <button onclick="switchTab('tab-scalp')" id="btn-tab-scalp" class="tab-btn px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-slate-400 whitespace-nowrap flex items-center gap-1.5 transition">
+        ⚡ 15M Scalp Sniper
+      </button>
+      <button onclick="switchTab('tab-radar')" id="btn-tab-radar" class="tab-btn px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-slate-400 whitespace-nowrap flex items-center gap-1.5 transition">
+        🎯 Top +EV Radar (<span id="radarCountBadge">0</span>)
+      </button>
+      <button onclick="switchTab('tab-ladder')" id="btn-tab-ladder" class="tab-btn px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-slate-400 whitespace-nowrap flex items-center gap-1.5 transition">
+        📊 Strike Ladder Curve
+      </button>
+      <button onclick="switchTab('tab-range')" id="btn-tab-range" class="tab-btn px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-slate-400 whitespace-nowrap flex items-center gap-1.5 transition">
+        📈 Price Range Brackets
+      </button>
+      <button onclick="switchTab('tab-macro')" id="btn-tab-macro" class="tab-btn px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-slate-400 whitespace-nowrap flex items-center gap-1.5 transition">
+        🏔️ Macro & Yearly Targets
+      </button>
+      <button onclick="switchTab('tab-mc')" id="btn-tab-mc" class="tab-btn px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-slate-400 whitespace-nowrap flex items-center gap-1.5 transition">
+        🎲 Monte Carlo Sim Lab
+      </button>
+      <button onclick="switchTab('tab-tech')" id="btn-tab-tech" class="tab-btn px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-slate-400 whitespace-nowrap flex items-center gap-1.5 transition">
+        🔬 Technicals & Microstructure
+      </button>
+    </div>
+  </div>
+
+  <!-- Main Content Container -->
+  <main class="flex-1 max-w-7xl w-full mx-auto p-4 lg:p-8 space-y-6">
+
+    <!-- Arbitrage Banner -->
+    <div id="arbitrageBanner" class="hidden p-4 rounded-xl bg-amber-500/10 border-2 border-amber-500/40 text-amber-200 shadow-xl shadow-amber-500/10">
+      <div class="flex items-start justify-between">
+        <div class="flex items-center gap-3">
+          <span class="text-2xl animate-bounce">🚨</span>
+          <div>
+            <h3 class="font-bold text-amber-300 text-sm font-mono flex items-center gap-2">
+              MONOTONICITY ARBITRAGE / STRIKE INVERSION DETECTED!
+            </h3>
+            <p id="arbitrageBannerText" class="text-xs text-amber-200 mt-0.5">Discrepancy found between strikes.</p>
+          </div>
+        </div>
+        <span class="text-xs font-mono font-bold px-2.5 py-1 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+          RISK-FREE EDGE
+        </span>
+      </div>
+    </div>
+
+    <!-- ================================================================= -->
+    <!-- TAB 0: 15-MINUTE PAPER TRADING BOT & AUDIT TERMINAL               -->
+    <!-- ================================================================= -->
+    <section id="tab-bot" class="space-y-6">
+      
+      <!-- Account Performance Banner -->
+      <div class="glass-card p-6 rounded-2xl relative overflow-hidden">
+        <div class="absolute -top-24 -right-24 w-80 h-80 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+        <div class="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-800">
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-xs font-mono font-bold">SIMULATED PAPER TRADING</span>
+              <h2 class="text-xl font-black text-white">15-Minute Dynamic Bitcoin Bot</h2>
+            </div>
+            <p class="text-xs text-slate-400 mt-1">Autonomous execution engine betting 15m price action with dynamic profit securing, risk cuts, and mid-candle re-entry.</p>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <button onclick="downloadAuditCsv()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono text-xs font-bold flex items-center gap-1.5 transition">
+              📥 Export Audit CSV
+            </button>
+            <button onclick="resetPaperAccount()" class="px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 font-mono text-xs font-bold transition">
+              🔄 Reset Account ($50.00)
+            </button>
+          </div>
+        </div>
+
+        <!-- Account Balance Cards -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-6 font-mono text-xs">
+          
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Initial Capital</span>
+            <div class="text-lg font-black text-white mt-1">$50.00</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">Fixed Bankroll</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Available Cash</span>
+            <div id="botCashVal" class="text-lg font-black text-emerald-400 mt-1">$50.00</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">Unallocated</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-emerald-950/20 border border-emerald-500/30">
+            <span class="text-emerald-400 text-[10px] uppercase font-bold">Total Portfolio Equity</span>
+            <div id="botEquityVal" class="text-xl font-black text-emerald-400 mt-1">$50.00</div>
+            <div id="botReturnPct" class="text-[10px] text-emerald-400 font-bold mt-0.5">+0.00% Return</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Realized PnL</span>
+            <div id="botRealizedPnl" class="text-lg font-black text-slate-300 mt-1">$0.00</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">Locked In Bank</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Unrealized PnL</span>
+            <div id="botUnrealizedPnl" class="text-lg font-black text-slate-300 mt-1">$0.00</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">Floating Position</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Win Rate</span>
+            <div id="botWinRate" class="text-lg font-black text-cyan-400 mt-1">--%</div>
+            <div id="botTradesCount" class="text-[10px] text-slate-500 mt-0.5">0 Trades Completed</div>
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- Bot Active Trade Monitor & Config Grid -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        
+        <!-- Column 1 & 2: Active Trade Card -->
+        <div class="lg:col-span-2 glass-card p-6 rounded-2xl flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-bold font-mono text-white flex items-center gap-2">
+                  <span id="activePositionDot" class="w-2.5 h-2.5 rounded-full bg-slate-500"></span>
+                  Active Trade Monitor
+                </span>
+                <span id="activePositionStatusBadge" class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-bold">
+                  SEARCHING FOR SETUP
+                </span>
+              </div>
+              <div class="text-xs font-mono text-slate-400">
+                15M Window: <span id="botCandleCountdown" class="text-amber-400 font-bold">--:--</span>
+              </div>
+            </div>
+
+            <!-- Position Details Display -->
+            <div id="activePositionContent" class="py-6">
+              <!-- When No Position -->
+              <div id="noPositionView" class="text-center py-6 space-y-2">
+                <div class="w-12 h-12 mx-auto rounded-full bg-slate-800/80 border border-slate-700 flex items-center justify-center text-xl text-slate-400 animate-pulse">
+                  📡
+                </div>
+                <div class="text-sm font-bold text-slate-300 font-mono">Autonomous Scanner Standing By</div>
+                <p class="text-xs text-slate-500 max-w-md mx-auto">
+                  Monitoring live KXBTC15M candlestick momentum, Z-score, and orderbook pricing. Will automatically enter when edge &ge; 4.0% with positive EV.
+                </p>
+              </div>
+
+              <!-- When Position Is Active -->
+              <div id="hasPositionView" class="hidden space-y-4">
+                <div class="flex items-start justify-between">
+                  <div>
+                    <span id="posSideBadge" class="text-xs font-mono font-bold px-2.5 py-1 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
+                      BUY YES
+                    </span>
+                    <h3 id="posTickerTitle" class="text-base font-black text-white mt-2 font-mono">KXBTC15M</h3>
+                    <p id="posRationaleText" class="text-xs text-slate-400 mt-1 max-w-xl font-sans"></p>
+                  </div>
+                  <div class="text-right">
+                    <div class="text-[10px] font-mono text-slate-400 uppercase">Live Floating PnL</div>
+                    <div id="posPnlDollars" class="text-2xl font-black font-mono text-emerald-400">+$0.00</div>
+                    <div id="posPnlPct" class="text-xs font-bold font-mono text-emerald-400">+0.0%</div>
+                  </div>
+                </div>
+
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 p-3 rounded-xl bg-slate-900/90 border border-slate-800 font-mono text-xs">
+                  <div>
+                    <div class="text-slate-500 text-[10px] uppercase">Entry Price</div>
+                    <div id="posEntryPrice" class="text-sm font-bold text-white mt-0.5">--¢</div>
+                  </div>
+                  <div>
+                    <div class="text-slate-500 text-[10px] uppercase">Current Market Bid</div>
+                    <div id="posCurrentBid" class="text-sm font-bold text-cyan-400 mt-0.5">--¢</div>
+                  </div>
+                  <div>
+                    <div class="text-slate-500 text-[10px] uppercase">Position Size</div>
+                    <div id="posSizeContracts" class="text-sm font-bold text-white mt-0.5">-- contracts</div>
+                  </div>
+                  <div>
+                    <div class="text-slate-500 text-[10px] uppercase">Cost Basis</div>
+                    <div id="posCostBasis" class="text-sm font-bold text-slate-300 mt-0.5">$0.00</div>
+                  </div>
+                </div>
+
+                <!-- Targets Bar -->
+                <div class="grid grid-cols-2 gap-3 font-mono text-xs">
+                  <div class="p-3 rounded-xl bg-emerald-950/20 border border-emerald-500/30 flex justify-between items-center">
+                    <div>
+                      <div class="text-[10px] text-emerald-400 uppercase font-bold">🎯 Take Profit Target (+25%)</div>
+                      <div id="posTpTarget" class="text-sm font-bold text-emerald-300 mt-0.5">--¢</div>
+                    </div>
+                    <span class="text-[10px] text-emerald-400 font-bold px-2 py-0.5 rounded bg-emerald-500/10">Lock Profits</span>
+                  </div>
+                  <div class="p-3 rounded-xl bg-rose-950/20 border border-rose-500/30 flex justify-between items-center">
+                    <div>
+                      <div class="text-[10px] text-rose-400 uppercase font-bold">🛑 Stop Loss Cut (-25%)</div>
+                      <div id="posSlTarget" class="text-sm font-bold text-rose-300 mt-0.5">--¢</div>
+                    </div>
+                    <span class="text-[10px] text-rose-400 font-bold px-2 py-0.5 rounded bg-rose-500/10">Protect Capital</span>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          </div>
+
+          <!-- Bottom Action Controls -->
+          <div id="hasPositionActions" class="hidden pt-3 border-t border-slate-800 flex justify-end">
+            <button onclick="emergencyClosePosition()" class="py-2.5 px-5 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-black text-xs font-mono transition shadow-lg shadow-amber-500/20 flex items-center gap-2">
+              ⚡ CLOSE POSITION NOW TO LOCK IN PROFIT
+            </button>
+          </div>
+        </div>
+
+        <!-- Column 3: Bot Dynamic Rules & Settings -->
+        <div class="glass-card p-6 rounded-2xl flex flex-col justify-between space-y-4">
+          <div>
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 class="text-sm font-bold font-mono text-white flex items-center gap-1.5">
+                ⚙️ Strategy Configuration
+              </h3>
+              <button onclick="toggleBotPower()" id="botToggleBtn" class="px-2.5 py-1 rounded text-xs font-mono font-bold bg-emerald-500 text-black">
+                BOT: ENABLED
+              </button>
+            </div>
+
+            <div class="space-y-4 mt-4 font-mono text-xs">
+              
+              <div>
+                <div class="flex justify-between text-slate-400 mb-1">
+                  <span>Take Profit Target:</span>
+                  <span id="cfgTpLabel" class="text-emerald-400 font-bold">+25%</span>
+                </div>
+                <input type="range" id="cfgTpInput" min="10" max="60" step="5" value="25" oninput="document.getElementById('cfgTpLabel').innerText = '+' + this.value + '%'" class="w-full accent-emerald-500" />
+                <span class="text-[10px] text-slate-500">Exits trade early when contract gains +25%</span>
+              </div>
+
+              <div>
+                <div class="flex justify-between text-slate-400 mb-1">
+                  <span>Stop Loss Threshold:</span>
+                  <span id="cfgSlLabel" class="text-rose-400 font-bold">-25%</span>
+                </div>
+                <input type="range" id="cfgSlInput" min="10" max="50" step="5" value="25" oninput="document.getElementById('cfgSlLabel').innerText = '-' + this.value + '%'" class="w-full accent-rose-500" />
+                <span class="text-[10px] text-slate-500">Cuts trade if momentum reverses against it</span>
+              </div>
+
+              <div>
+                <div class="flex justify-between text-slate-400 mb-1">
+                  <span>Max Allocation / Trade:</span>
+                  <span id="cfgAllocLabel" class="text-cyan-400 font-bold">15% ($7.50)</span>
+                </div>
+                <input type="range" id="cfgAllocInput" min="5" max="30" step="5" value="15" oninput="document.getElementById('cfgAllocLabel').innerText = this.value + '% ($' + ((50 * this.value)/100).toFixed(2) + ')'" class="w-full accent-cyan-500" />
+                <span class="text-[10px] text-slate-500">Limits risk on a $50 bankroll</span>
+              </div>
+
+              <div>
+                <div class="flex justify-between text-slate-400 mb-1">
+                  <span>Minimum Model Edge:</span>
+                  <span id="cfgEdgeLabel" class="text-amber-400 font-bold">+4.0%</span>
+                </div>
+                <input type="range" id="cfgEdgeInput" min="2" max="10" step="1" value="4" oninput="document.getElementById('cfgEdgeLabel').innerText = '+' + this.value + '.0%'" class="w-full accent-amber-500" />
+                <span class="text-[10px] text-slate-500">Filter out low-conviction noise</span>
+              </div>
+
+            </div>
+          </div>
+
+          <button onclick="saveBotSettings()" class="w-full py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs font-mono transition border border-slate-700">
+            💾 Save Strategy Parameters
+          </button>
+        </div>
+
+      </div>
+
+      <!-- Execution Activity & Audit Log Table -->
+      <div class="glass-card rounded-2xl overflow-hidden border border-slate-800">
+        <div class="p-4 border-b border-slate-800 flex justify-between items-center">
+          <div>
+            <h3 class="text-sm font-bold font-mono text-white flex items-center gap-2">
+              📜 Audit Trail & Trade History Log
+            </h3>
+            <p class="text-xs text-slate-400 mt-0.5">Every trade, entry rationale, exit reason, and PnL stored in SQLite for auditing.</p>
+          </div>
+          <button onclick="downloadAuditCsv()" class="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 font-mono font-bold border border-slate-700">
+            Download CSV 📥
+          </button>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs font-mono">
+            <thead class="bg-slate-900/90 text-slate-400 border-b border-slate-800">
+              <tr>
+                <th class="p-3">ID</th>
+                <th class="p-3">Time</th>
+                <th class="p-3">Contract / Ticker</th>
+                <th class="p-3">Side</th>
+                <th class="p-3">Entry Price</th>
+                <th class="p-3">Contracts</th>
+                <th class="p-3">Cost Basis</th>
+                <th class="p-3">Exit Price</th>
+                <th class="p-3">Exit Reason</th>
+                <th class="p-3">PnL ($)</th>
+                <th class="p-3">PnL (%)</th>
+                <th class="p-3">Audit Rationale</th>
+              </tr>
+            </thead>
+            <tbody id="botTradeHistoryBody" class="divide-y divide-slate-800/60 text-slate-300">
+              <tr>
+                <td colspan="12" class="p-6 text-center text-slate-500 font-mono">No trades executed yet. Bot is scanning...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ================================================================= -->
+    <!-- TAB 1: 15-MINUTE SCALP SNIPER (KXBTC15M)                          -->
+    <!-- ================================================================= -->
+    <section id="tab-scalp" class="hidden space-y-6">
+      <div class="glass-card p-6 rounded-2xl relative overflow-hidden">
+        
+        <!-- Background Gradient Glow -->
+        <div class="absolute -top-24 -right-24 w-80 h-80 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+        <div class="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-800">
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-xs font-mono font-bold">SERIES: KXBTC15M</span>
+              <h2 class="text-xl font-black text-white">15-Minute Candlestick Scalper</h2>
+            </div>
+            <p class="text-xs text-slate-400 mt-1">High-frequency sub-second drift-diffusion prediction model against live Kalshi 15m orderbook.</p>
+          </div>
+
+          <!-- Countdown Box -->
+          <div class="flex items-center gap-3 bg-slate-900/90 border border-slate-800 px-4 py-2 rounded-xl font-mono">
+            <div>
+              <div class="text-[10px] text-slate-400 uppercase font-semibold">Window Closes In:</div>
+              <div id="scalpCountdown" class="text-xl font-black text-amber-400">--:--</div>
+            </div>
+            <div class="w-10 h-10 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 font-bold">
+              ⏳
+            </div>
+          </div>
+        </div>
+
+        <!-- Candle Progress Bar -->
+        <div class="mt-5 space-y-1.5">
+          <div class="flex justify-between text-xs font-mono text-slate-400">
+            <span>Candle Start</span>
+            <span id="candleProgressLabel">0% Elapsed</span>
+            <span>Resolution Expiration</span>
+          </div>
+          <div class="w-full h-3 rounded-full bg-slate-800 overflow-hidden relative">
+            <div id="candleProgressBar" class="h-full bg-gradient-to-r from-emerald-500 via-teal-400 to-cyan-400 transition-all duration-300" style="width: 0%;"></div>
+          </div>
+        </div>
+
+        <!-- Core Scalp Metrics Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-6">
+          
+          <!-- Box 1: Reference Candle Open vs Spot -->
+          <div class="p-4 rounded-xl bg-slate-900/80 border border-slate-800/80">
+            <span class="text-xs text-slate-400 uppercase font-mono font-semibold">15M Candle Open:</span>
+            <div id="scalpOpenPrice" class="text-xl font-mono font-bold text-white mt-1">$0.00</div>
+            <div class="mt-2 text-xs font-mono flex items-center justify-between">
+              <span class="text-slate-400">Live Delta:</span>
+              <span id="scalpDeltaVal" class="font-bold text-slate-200">$0.00 (+0.0%)</span>
+            </div>
+          </div>
+
+          <!-- Box 2: Model Prediction Probability -->
+          <div class="p-4 rounded-xl bg-slate-900/80 border border-slate-800/80">
+            <span class="text-xs text-slate-400 uppercase font-mono font-semibold">Model True Probability:</span>
+            <div class="flex items-baseline gap-2 mt-1">
+              <span id="scalpModelProbYes" class="text-2xl font-mono font-black text-emerald-400">--%</span>
+              <span class="text-xs text-slate-400 font-mono">YES</span>
+            </div>
+            <div class="mt-2 text-xs font-mono flex items-center justify-between text-slate-400">
+              <span>Z-Score: <span id="scalpZScore" class="text-slate-200">--</span></span>
+              <span>NO: <span id="scalpModelProbNo" class="text-slate-200">--%</span></span>
+            </div>
+          </div>
+
+          <!-- Box 3: Kalshi Orderbook Price -->
+          <div class="p-4 rounded-xl bg-slate-900/80 border border-slate-800/80">
+            <span class="text-xs text-slate-400 uppercase font-mono font-semibold">Kalshi Live Orderbook:</span>
+            <div class="grid grid-cols-2 gap-2 mt-2 font-mono text-center">
+              <div class="p-2 rounded bg-emerald-500/10 border border-emerald-500/20">
+                <div class="text-[10px] text-emerald-400 uppercase font-bold">YES Ask</div>
+                <div id="scalpYesAsk" class="text-lg font-black text-white">--¢</div>
+                <div class="text-[10px] text-slate-400 mt-0.5">Bid: <span id="scalpYesBid">--¢</span></div>
+              </div>
+              <div class="p-2 rounded bg-rose-500/10 border border-rose-500/20">
+                <div class="text-[10px] text-rose-400 uppercase font-bold">NO Ask</div>
+                <div id="scalpNoAsk" class="text-lg font-black text-white">--¢</div>
+                <div class="text-[10px] text-slate-400 mt-0.5">Bid: <span id="scalpNoBid">--¢</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Box 4: Action & Sizing Recommendation -->
+          <div class="p-4 rounded-xl bg-slate-900/80 border border-slate-800/80 flex flex-col justify-between">
+            <div>
+              <span class="text-xs text-slate-400 uppercase font-mono font-semibold">Engine Recommendation:</span>
+              <div id="scalpSignalBadge" class="mt-1 text-sm font-bold font-mono px-3 py-1 rounded inline-block bg-slate-800 text-slate-300">
+                AWAITING DATA
+              </div>
+              <div class="mt-2 text-xs font-mono text-slate-300 flex justify-between">
+                <span>Net EV: <span id="scalpEvVal" class="font-bold text-emerald-400">+0.0¢</span></span>
+                <span>ROI: <span id="scalpRoiVal" class="font-bold text-emerald-400">+0.0%</span></span>
+              </div>
+              <div class="text-[11px] font-mono text-slate-400 mt-1">
+                Half-Kelly Stake: <span id="scalpKellyVal" class="text-cyan-400 font-bold">--%</span>
+              </div>
+            </div>
+
+            <a id="scalpExecuteLink" href="https://kalshi.com" target="_blank" class="mt-3 w-full py-2 px-3 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-xs font-mono text-center block transition shadow-lg shadow-emerald-500/20">
+              TRADE ON KALSHI ↗
+            </a>
+          </div>
+
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ================================================================= -->
+    <!-- TAB 2: TOP +EV & MISPRICING RADAR                                 -->
+    <!-- ================================================================= -->
+    <section id="tab-radar" class="hidden space-y-4">
+      <div class="flex flex-wrap items-center justify-between gap-4 p-4 glass-card rounded-xl">
+        <div>
+          <h2 class="text-lg font-black text-white flex items-center gap-2">
+            🎯 +EV & Mispricing Opportunities Radar
+          </h2>
+          <p class="text-xs text-slate-400">Contracts across all Bitcoin series ranked by net expected value after Kalshi taker fees.</p>
+        </div>
+
+        <!-- Filter Controls -->
+        <div class="flex flex-wrap items-center gap-2">
+          <button onclick="filterRadar('all')" id="rf-all" class="px-3 py-1 rounded text-xs font-mono font-bold bg-emerald-500 text-black">All</button>
+          <button onclick="filterRadar('YES')" id="rf-yes" class="px-3 py-1 rounded text-xs font-mono font-bold bg-slate-800 text-slate-300 hover:bg-slate-700">Bullish YES</button>
+          <button onclick="filterRadar('NO')" id="rf-no" class="px-3 py-1 rounded text-xs font-mono font-bold bg-slate-800 text-slate-300 hover:bg-slate-700">Bearish NO</button>
+          <button onclick="filterRadar('ARB')" id="rf-arb" class="px-3 py-1 rounded text-xs font-mono font-bold bg-slate-800 text-slate-300 hover:bg-slate-700">Arbitrage</button>
+        </div>
+      </div>
+
+      <!-- Opportunities Container -->
+      <div id="radarCardsContainer" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="p-8 text-center text-slate-500 font-mono text-xs col-span-2 glass-card rounded-xl">
+          Scanning all 600+ Kalshi Bitcoin contracts...
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================= -->
+    <!-- TAB 3: STRIKE LADDER & PROBABILITY CURVE (KXBTCD)                 -->
+    <!-- ================================================================= -->
+    <section id="tab-ladder" class="hidden space-y-6">
+      
+      <!-- Ladder Controls & Expiration Selector -->
+      <div class="flex flex-wrap items-center justify-between gap-4 glass-card p-4 rounded-xl">
+        <div>
+          <h2 class="text-lg font-black text-white flex items-center gap-2">
+            📊 Bitcoin Strike Ladder Probability Distribution
+          </h2>
+          <p class="text-xs text-slate-400">Comparison of Black-Scholes Risk-Neutral Fair Value vs. Kalshi Orderbook Implied Probabilities.</p>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <label class="text-xs text-slate-400 font-mono">Select Expiry:</label>
+          <select id="ladderExpirySelect" onchange="renderSelectedLadder()" class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-emerald-500">
+            <!-- Injected via JS -->
+          </select>
+        </div>
+      </div>
+
+      <!-- Visual Strike Curve (Interactive SVG Chart) -->
+      <div class="glass-card p-6 rounded-2xl">
+        <div class="flex items-center justify-between mb-4">
+          <div class="text-xs font-mono text-slate-300 font-bold flex items-center gap-3">
+            <span class="flex items-center gap-1.5">
+              <span class="w-3 h-0.5 bg-cyan-400"></span> Model Probability Curve
+            </span>
+            <span class="flex items-center gap-1.5">
+              <span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span> Kalshi Implied Asks
+            </span>
+            <span class="flex items-center gap-1.5">
+              <span class="w-2.5 h-0.5 bg-emerald-400 border-dashed border-t"></span> Spot Price Marker
+            </span>
+          </div>
+          <div class="text-[11px] font-mono text-slate-500">X: Strike Price ($) | Y: Probability (%)</div>
+        </div>
+
+        <!-- SVG Curve Canvas -->
+        <div class="w-full h-64 overflow-hidden rounded-xl bg-slate-950/80 border border-slate-800/80 relative" id="strikeChartContainer">
+          <svg id="strikeChartSvg" class="w-full h-full" viewBox="0 0 800 240" preserveAspectRatio="none">
+            <!-- Injected dynamically -->
+          </svg>
+        </div>
+      </div>
+
+      <!-- Strike Table -->
+      <div class="glass-card rounded-2xl overflow-hidden border border-slate-800">
+        <div class="p-4 border-b border-slate-800 flex justify-between items-center">
+          <h3 class="text-sm font-bold font-mono text-white">Full Strike Ladder Table</h3>
+          <span class="text-xs font-mono text-slate-400" id="ladderStrikeCount">0 strikes</span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs font-mono">
+            <thead class="bg-slate-900/90 text-slate-400 border-b border-slate-800">
+              <tr>
+                <th class="p-3">Strike Price</th>
+                <th class="p-3">Distance from Spot</th>
+                <th class="p-3">Model Prob</th>
+                <th class="p-3">Kalshi YES</th>
+                <th class="p-3">Kalshi NO</th>
+                <th class="p-3">Spread</th>
+                <th class="p-3">Signal</th>
+                <th class="p-3">Net Edge</th>
+                <th class="p-3">EV / ROI</th>
+                <th class="p-3">Action</th>
+              </tr>
+            </thead>
+            <tbody id="strikeTableBody" class="divide-y divide-slate-800/60 text-slate-300">
+              <!-- Injected via JS -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ================================================================= -->
+    <!-- TAB 4: PRICE RANGE BRACKETS (KXBTC)                               -->
+    <!-- ================================================================= -->
+    <section id="tab-range" class="hidden space-y-4">
+      <div class="glass-card p-4 rounded-xl">
+        <h2 class="text-lg font-black text-white flex items-center gap-2">
+          📈 Kalshi Bitcoin Price Range Brackets (KXBTC)
+        </h2>
+        <p class="text-xs text-slate-400">Contracts where Bitcoin must settle within an upper and lower interval ($K_1 \le S_T \le K_2)$.</p>
+      </div>
+
+      <div id="rangeCardsContainer" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <!-- Injected via JS -->
+      </div>
+    </section>
+
+    <!-- ================================================================= -->
+    <!-- TAB 5: MACRO & YEARLY TARGETS                                     -->
+    <!-- ================================================================= -->
+    <section id="tab-macro" class="hidden space-y-4">
+      <div class="glass-card p-4 rounded-xl">
+        <h2 class="text-lg font-black text-white flex items-center gap-2">
+          🏔️ Macro Barrier Targets, Floors & Strategic Reserve
+        </h2>
+        <p class="text-xs text-slate-400">One-touch barrier option analytical models for yearly high targets ($100k, $125k, $150k) and downside floors.</p>
+      </div>
+
+      <div id="macroCardsContainer" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <!-- Injected via JS -->
+      </div>
+    </section>
+
+    <!-- ================================================================= -->
+    <!-- TAB 6: INTERACTIVE MONTE CARLO SIMULATION LAB                     -->
+    <!-- ================================================================= -->
+    <section id="tab-mc" class="hidden space-y-6">
+      <div class="glass-card p-6 rounded-2xl">
+        <div class="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-800">
+          <div>
+            <h2 class="text-lg font-black text-white flex items-center gap-2">
+              🎲 Merton Jump-Diffusion Monte Carlo Simulation Engine
+            </h2>
+            <p class="text-xs text-slate-400 mt-1">Simulate 10,000 to 20,000 stochastic price paths with discontinuous jumps to price any custom binary strike.</p>
+          </div>
+          <span class="text-xs font-mono px-3 py-1 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 font-bold">
+            Vectorized NumPy (< 5ms)
+          </span>
+        </div>
+
+        <!-- Simulation Parameter Controls -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4 mt-6 font-mono text-xs">
+          <div>
+            <label class="text-slate-400 uppercase font-semibold">Spot Price ($):</label>
+            <input type="number" id="mcSpotInput" class="w-full mt-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-white font-bold" />
+          </div>
+          <div>
+            <label class="text-slate-400 uppercase font-semibold">Target Strike ($):</label>
+            <input type="number" id="mcStrikeInput" class="w-full mt-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-white font-bold" />
+          </div>
+          <div>
+            <label class="text-slate-400 uppercase font-semibold">Time Horizon (Hours):</label>
+            <input type="number" id="mcHoursInput" value="2.0" step="0.5" class="w-full mt-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-white font-bold" />
+          </div>
+          <div>
+            <label class="text-slate-400 uppercase font-semibold">Annualized Vol (σ %):</label>
+            <input type="number" id="mcVolInput" value="45.0" step="1.0" class="w-full mt-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-white font-bold" />
+          </div>
+          <div class="flex items-end">
+            <button onclick="runCustomSimulation()" class="w-full py-2.5 px-4 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-black font-bold font-mono transition shadow-lg shadow-cyan-500/20">
+              ⚡ SIMULATE 10K PATHS
+            </button>
+          </div>
+        </div>
+
+        <!-- Simulation Results Section -->
+        <div id="mcResultsArea" class="mt-8 space-y-6">
+          
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div class="p-4 rounded-xl bg-slate-900/90 border border-slate-800">
+              <span class="text-xs text-slate-400 uppercase font-mono font-semibold">Monte Carlo Win Probability:</span>
+              <div id="mcTargetProb" class="text-3xl font-black font-mono text-cyan-400 mt-1">--%</div>
+              <div class="text-[11px] font-mono text-slate-500 mt-1">Empirical frequency across simulated paths</div>
+            </div>
+
+            <div class="p-4 rounded-xl bg-slate-900/90 border border-slate-800">
+              <span class="text-xs text-slate-400 uppercase font-mono font-semibold">Black-Scholes Closed Form:</span>
+              <div id="mcBsProb" class="text-3xl font-black font-mono text-white mt-1">--%</div>
+              <div class="text-[11px] font-mono text-slate-500 mt-1">Risk-neutral analytical probability N(d2)</div>
+            </div>
+
+            <div class="p-4 rounded-xl bg-slate-900/90 border border-slate-800">
+              <span class="text-xs text-slate-400 uppercase font-mono font-semibold">Simulated Terminal Median (P50):</span>
+              <div id="mcMedianPrice" class="text-2xl font-black font-mono text-emerald-400 mt-1">$0.00</div>
+              <div class="text-[11px] font-mono text-slate-500 mt-1">Expected terminal price at expiration</div>
+            </div>
+          </div>
+
+          <!-- Probability Density Histogram -->
+          <div class="glass-card p-4 rounded-xl">
+            <div class="flex justify-between items-center mb-3">
+              <span class="text-xs font-mono font-bold text-slate-300">Terminal Price Probability Density Function (PDF)</span>
+              <span class="text-[11px] font-mono text-slate-500">Distribution of 10,000 terminal paths</span>
+            </div>
+            <div class="w-full h-48 bg-slate-950/80 rounded-lg p-2 border border-slate-800/80 flex items-end gap-1.5" id="mcHistContainer"></div>
+          </div>
+
+          <!-- Percentiles Table -->
+          <div class="glass-card rounded-xl p-4">
+            <span class="text-xs font-mono font-bold text-slate-300 uppercase">Simulated Price Distribution Percentiles</span>
+            <div class="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9 gap-2 mt-3 font-mono text-center text-xs" id="mcPercentilesGrid"></div>
+          </div>
+
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ================================================================= -->
+    <!-- TAB 7: TECHNICALS & MARKET MICROSTRUCTURE TERMINAL                -->
+    <!-- ================================================================= -->
+    <section id="tab-tech" class="hidden space-y-6">
+      
+      <!-- Volatility Matrix -->
+      <div class="glass-card p-6 rounded-2xl">
+        <h3 class="text-base font-black text-white flex items-center gap-2 mb-4">
+          📈 Comprehensive Realized Volatility Spectrum
+        </h3>
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 font-mono text-xs">
+          <div class="p-3 rounded-lg bg-slate-900 border border-slate-800">
+            <div class="text-slate-400 text-[10px] uppercase">15-Min Vol ($)</div>
+            <div id="techVol15m" class="text-lg font-bold text-amber-400 mt-1">--</div>
+          </div>
+          <div class="p-3 rounded-lg bg-slate-900 border border-slate-800">
+            <div class="text-slate-400 text-[10px] uppercase">1-Hour Ann. Vol</div>
+            <div id="techVol1h" class="text-lg font-bold text-cyan-400 mt-1">--%</div>
+          </div>
+          <div class="p-3 rounded-lg bg-slate-900 border border-slate-800">
+            <div class="text-slate-400 text-[10px] uppercase">24-Hour Ann. Vol</div>
+            <div id="techVol24h" class="text-lg font-bold text-cyan-400 mt-1">--%</div>
+          </div>
+          <div class="p-3 rounded-lg bg-slate-900 border border-slate-800">
+            <div class="text-slate-400 text-[10px] uppercase">7-Day Ann. Vol</div>
+            <div id="techVol7d" class="text-lg font-bold text-cyan-400 mt-1">--%</div>
+          </div>
+          <div class="p-3 rounded-lg bg-slate-900 border border-slate-800">
+            <div class="text-slate-400 text-[10px] uppercase">Parkinson High/Low</div>
+            <div id="techVolParkinson" class="text-lg font-bold text-emerald-400 mt-1">--%</div>
+          </div>
+          <div class="p-3 rounded-lg bg-slate-900 border border-slate-800">
+            <div class="text-slate-400 text-[10px] uppercase">Garman-Klass Vol</div>
+            <div id="techVolGarman" class="text-lg font-bold text-emerald-400 mt-1">--%</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Technical Momentum & Oscillators -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        
+        <div class="glass-card p-6 rounded-2xl">
+          <h3 class="text-base font-black text-white flex items-center gap-2 mb-4">
+            🎯 Trend & Momentum Indicators
+          </h3>
+          <div class="space-y-3 font-mono text-xs">
+            <div class="flex justify-between p-2 rounded bg-slate-900/80 border border-slate-800">
+              <span class="text-slate-400">RSI (14 Period):</span>
+              <span id="techRsi" class="font-bold text-white">--</span>
+            </div>
+            <div class="flex justify-between p-2 rounded bg-slate-900/80 border border-slate-800">
+              <span class="text-slate-400">MACD Line / Signal:</span>
+              <span id="techMacdLine" class="font-bold text-slate-200">-- / --</span>
+            </div>
+            <div class="flex justify-between p-2 rounded bg-slate-900/80 border border-slate-800">
+              <span class="text-slate-400">MACD Histogram:</span>
+              <span id="techMacdHist" class="font-bold text-white">--</span>
+            </div>
+            <div class="flex justify-between p-2 rounded bg-slate-900/80 border border-slate-800">
+              <span class="text-slate-400">Average True Range (ATR 14):</span>
+              <span id="techAtr" class="font-bold text-slate-200">--</span>
+            </div>
+            <div class="flex justify-between p-2 rounded bg-slate-900/80 border border-slate-800">
+              <span class="text-slate-400">Bollinger Bands (20, 2):</span>
+              <span id="techBbBands" class="font-bold text-slate-200">$0 / $0 / $0</span>
+            </div>
+            <div class="flex justify-between p-2 rounded bg-slate-900/80 border border-slate-800">
+              <span class="text-slate-400">Bollinger %B / Bandwidth:</span>
+              <span id="techBbPct" class="font-bold text-cyan-400">--</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="glass-card p-6 rounded-2xl">
+          <h3 class="text-base font-black text-white flex items-center gap-2 mb-4">
+            🏛️ Moving Averages & Perpetuals Market
+          </h3>
+          <div class="space-y-3 font-mono text-xs">
+            <div class="flex justify-between p-2 rounded bg-slate-900/80 border border-slate-800">
+              <span class="text-slate-400">EMA 9 / EMA 21:</span>
+              <span id="techEmas" class="font-bold text-slate-200">$0 / $0</span>
+            </div>
+            <div class="flex justify-between p-2 rounded bg-slate-900/80 border border-slate-800">
+              <span class="text-slate-400">SMA 50 / SMA 200:</span>
+              <span id="techSmas" class="font-bold text-slate-200">$0 / $0</span>
+            </div>
+            <div class="flex justify-between p-2 rounded bg-slate-900/80 border border-slate-800">
+              <span class="text-slate-400">Hyperliquid Funding (8h / Ann.):</span>
+              <span id="techFundingDetail" class="font-bold text-emerald-400">--% / --%</span>
+            </div>
+            <div class="flex justify-between p-2 rounded bg-slate-900/80 border border-slate-800">
+              <span class="text-slate-400">Open Interest (BTC / USD):</span>
+              <span id="techOiDetail" class="font-bold text-purple-400">-- BTC ($0)</span>
+            </div>
+            <div class="flex justify-between p-2 rounded bg-slate-900/80 border border-slate-800">
+              <span class="text-slate-400">24h VWAP Reference:</span>
+              <span id="techVwap" class="font-bold text-slate-200">$0.00</span>
+            </div>
+            <div class="flex justify-between p-2 rounded bg-slate-900/80 border border-slate-800">
+              <span class="text-slate-400">Multi-Exchange Spot Comparison:</span>
+              <span id="techExchangeSpots" class="font-bold text-amber-400">CB: $0 | KR: $0 | HL: $0</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- Audio Alert Beep -->
+  <audio id="alertAudio" preload="auto">
+    <source src="data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU"+Array(200).join("120") />
+  </audio>
+
+  <!-- Application Logic & SSE Streaming -->
+  <script>
+    // State
+    let latestData = null;
+    let activeRadarFilter = 'all';
+    let soundEnabled = true;
+    let prevSpot = 0.0;
+    let audioCtx = null;
+
+    function playBeep() {
+      if (!soundEnabled) return;
+      try {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+        gain.gain.setValueAtTime(0.05, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.15);
+      } catch (e) {}
+    }
+
+    function toggleAudio() {
+      soundEnabled = !soundEnabled;
+      document.getElementById('soundLabel').innerText = soundEnabled ? 'On' : 'Off';
+    }
+
+    function switchTab(tabId) {
+      document.querySelectorAll('main > section').forEach(el => el.classList.add('hidden'));
+      document.getElementById(tabId).classList.remove('hidden');
+
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+      document.getElementById('btn-' + tabId).classList.add('active');
+
+      if (tabId === 'tab-ladder') renderSelectedLadder();
+      if (tabId === 'tab-mc') populateMcDefaults();
+    }
+
+    // Connect Server-Sent Events (SSE)
+    function connectSse() {
+      const sse = new EventSource('/api/stream');
+      const statusBadge = document.getElementById('streamStatusBadge');
+
+      sse.onopen = () => {
+        statusBadge.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> LIVE STREAM';
+        statusBadge.className = 'text-[11px] px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-mono font-semibold flex items-center gap-1.5';
+      };
+
+      sse.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          updateDashboard(data);
+        } catch (e) {
+          console.error("Error parsing SSE:", e);
+        }
+      };
+
+      sse.onerror = () => {
+        statusBadge.innerHTML = '<span class="w-2 h-2 rounded-full bg-rose-500"></span> RECONNECTING';
+        statusBadge.className = 'text-[11px] px-2.5 py-1 rounded-full bg-rose-500/15 text-rose-400 border border-rose-500/30 font-mono font-semibold flex items-center gap-1.5';
+        setTimeout(connectSse, 3000);
+      };
+    }
+
+    async function triggerManualRescan() {
+      const btn = document.getElementById('rescanBtn');
+      btn.innerText = 'Scanning...';
+      try {
+        await fetch('/api/trigger', { method: 'POST' });
+      } catch (e) {}
+      btn.innerText = '🔄 Scan';
+    }
+
+    // Render Master Update
+    function updateDashboard(data) {
+      latestData = data;
+      const m = data.metrics || {};
+      const stats = data.stats || {};
+      const scalp = data.kxbtc15m || {};
+      const bot = data.bot || {};
+
+      // 1. Spot Price with Tick Flash
+      const spotEl = document.getElementById('spotPriceDisplay');
+      const currSpot = m.spot_price || 0.0;
+      if (prevSpot > 0 && currSpot !== prevSpot) {
+        spotEl.classList.remove('tick-up', 'tick-down');
+        void spotEl.offsetWidth;
+        spotEl.classList.add(currSpot > prevSpot ? 'tick-up' : 'tick-down');
+      }
+      prevSpot = currSpot;
+      spotEl.innerText = '$' + currSpot.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+      // 24h metrics
+      const chgEl = document.getElementById('spotChangeDisplay');
+      const chgVal = m.change_24h_pct || 0.0;
+      chgEl.innerText = (chgVal >= 0 ? '+' : '') + chgVal.toFixed(2) + '%';
+      chgEl.className = 'font-bold ' + (chgVal >= 0 ? 'text-emerald-400' : 'text-rose-400');
+      document.getElementById('high24Display').innerText = '$' + (m.high_24h || 0).toLocaleString();
+      document.getElementById('low24Display').innerText = '$' + (m.low_24h || 0).toLocaleString();
+
+      // 2. KPI Bar
+      document.getElementById('kpiVol').innerText = (m.vol_24h_ann_pct || 0).toFixed(1) + '%';
+      document.getElementById('kpiParkinson').innerText = (m.vol_parkinson_pct || 0).toFixed(1) + '%';
+      
+      const rsiVal = m.rsi_14 || 50;
+      document.getElementById('kpiRsi').innerText = rsiVal.toFixed(1);
+      const rsiStatusEl = document.getElementById('kpiRsiStatus');
+      if (rsiVal >= 70) { rsiStatusEl.innerText = 'Overbought'; rsiStatusEl.className = 'text-rose-400 font-bold'; }
+      else if (rsiVal <= 30) { rsiStatusEl.innerText = 'Oversold'; rsiStatusEl.className = 'text-emerald-400 font-bold'; }
+      else { rsiStatusEl.innerText = 'Neutral'; rsiStatusEl.className = 'text-slate-400'; }
+      document.getElementById('kpiMacd').innerText = (m.macd_hist || 0).toFixed(1);
+
+      const deltaVal = m.candle_15m_delta || 0.0;
+      const deltaPct = m.candle_15m_delta_pct || 0.0;
+      const deltaEl = document.getElementById('kpiDelta');
+      deltaEl.innerText = (deltaVal >= 0 ? '+' : '') + deltaVal.toFixed(1) + ' (' + (deltaPct >= 0 ? '+' : '') + deltaPct.toFixed(2) + '%)';
+      deltaEl.className = 'mt-1 text-base font-bold ' + (deltaVal >= 0 ? 'text-emerald-400' : 'text-rose-400');
+      document.getElementById('kpiOpen').innerText = '$' + (m.candle_15m_open || 0).toLocaleString('en-US', { minimumFractionDigits: 1 });
+
+      document.getElementById('kpiFunding').innerText = (m.funding_rate_ann_pct || 0).toFixed(2) + '%';
+      document.getElementById('kpiFunding8h').innerText = (m.funding_rate_8h_pct || 0).toFixed(4) + '%';
+      document.getElementById('kpiOi').innerText = (m.open_interest_btc || 0).toLocaleString('en-US', { maximumFractionDigits: 0 }) + ' BTC';
+      document.getElementById('kpiOiUsd').innerText = '$' + ((m.open_interest_usd || 0) / 1e6).toFixed(1) + 'M';
+
+      document.getElementById('kpiTotalMarkets').innerText = (stats.total_scanned || 0) + ' Markets';
+      document.getElementById('kpiEvCount').innerText = (stats.ev_opportunities_count || 0);
+      document.getElementById('kpiTopEv').innerText = 'Top EV: +' + (stats.highest_ev_cents || 0).toFixed(1) + '¢';
+      document.getElementById('radarCountBadge').innerText = (data.top_ev_opportunities || []).length;
+
+      // 3. Update Paper Bot UI
+      updateBotUI(bot, scalp);
+
+      // 4. Scalp Sniper Update
+      if (scalp && scalp.ticker) {
+        document.getElementById('scalpCountdown').innerText = scalp.countdown_str || '--';
+        const prog = scalp.time_elapsed_pct || 0;
+        document.getElementById('candleProgressBar').style.width = prog + '%';
+        document.getElementById('candleProgressLabel').innerText = prog.toFixed(0) + '% Elapsed (' + scalp.seconds_left + 's remaining)';
+
+        document.getElementById('scalpOpenPrice').innerText = '$' + (scalp.candle_open || 0).toLocaleString('en-US', { minimumFractionDigits: 2 });
+        const sDeltaEl = document.getElementById('scalpDeltaVal');
+        sDeltaEl.innerText = (scalp.delta >= 0 ? '+' : '') + scalp.delta.toFixed(2) + ' (' + (scalp.delta_pct >= 0 ? '+' : '') + scalp.delta_pct.toFixed(2) + '%)';
+        sDeltaEl.className = 'font-bold ' + (scalp.delta >= 0 ? 'text-emerald-400' : 'text-rose-400');
+
+        document.getElementById('scalpModelProbYes').innerText = (scalp.model_prob_yes_pct || 50).toFixed(1) + '%';
+        document.getElementById('scalpModelProbNo').innerText = (scalp.model_prob_no_pct || 50).toFixed(1) + '%';
+        document.getElementById('scalpZScore').innerText = (scalp.z_score || 0).toFixed(2);
+
+        document.getElementById('scalpYesAsk').innerText = (scalp.yes_ask_cents || 0) + '¢';
+        document.getElementById('scalpYesBid').innerText = (scalp.yes_bid_cents || 0) + '¢';
+        document.getElementById('scalpNoAsk').innerText = (scalp.no_ask_cents || 0) + '¢';
+        document.getElementById('scalpNoBid').innerText = (scalp.no_bid_cents || 0) + '¢';
+
+        const sigBadge = document.getElementById('scalpSignalBadge');
+        sigBadge.innerText = scalp.trade_signal || 'NEUTRAL';
+        if (scalp.trade_signal && scalp.trade_signal.includes('BUY YES')) {
+          sigBadge.className = 'mt-1 text-sm font-bold font-mono px-3 py-1 rounded inline-block bg-emerald-500/20 text-emerald-400 border border-emerald-500/40';
+        } else if (scalp.trade_signal && scalp.trade_signal.includes('BUY NO')) {
+          sigBadge.className = 'mt-1 text-sm font-bold font-mono px-3 py-1 rounded inline-block bg-rose-500/20 text-rose-400 border border-rose-500/40';
+        } else {
+          sigBadge.className = 'mt-1 text-sm font-bold font-mono px-3 py-1 rounded inline-block bg-slate-800 text-slate-300';
+        }
+
+        document.getElementById('scalpEvVal').innerText = (scalp.best_ev_cents >= 0 ? '+' : '') + (scalp.best_ev_cents || 0).toFixed(1) + '¢';
+        document.getElementById('scalpRoiVal').innerText = (scalp.best_roi_pct >= 0 ? '+' : '') + (scalp.best_roi_pct || 0).toFixed(1) + '%';
+        document.getElementById('scalpKellyVal').innerText = (scalp.half_kelly_pct || 0).toFixed(1) + '%';
+        if (scalp.url) document.getElementById('scalpExecuteLink').href = scalp.url;
+      }
+
+      // 5. Arbitrage Banner
+      const arbs = data.arbitrage_alerts || [];
+      const arbBanner = document.getElementById('arbitrageBanner');
+      if (arbs.length > 0) {
+        arbBanner.classList.remove('hidden');
+        document.getElementById('arbitrageBannerText').innerText = arbs[0].description || 'Strike inversion detected!';
+        playBeep();
+      } else {
+        arbBanner.classList.add('hidden');
+      }
+
+      // 6. Render Top EV Radar
+      renderRadar();
+
+      // 7. Populate Expiry Dropdown if empty
+      populateExpiryDropdown();
+
+      // 8. Render Range Brackets
+      renderRangeBrackets();
+
+      // 9. Render Macro Targets
+      renderMacroTargets();
+
+      // 10. Update Technicals Tab
+      renderTechnicalsTab(m);
+    }
+
+    // Update Paper Bot UI
+    function updateBotUI(bot, scalp) {
+      if (!bot) return;
+
+      const equity = bot.total_equity || 50.0;
+      const cash = bot.cash || 50.0;
+      const realized = bot.realized_pnl || 0.0;
+      const unrealized = bot.unrealized_pnl || 0.0;
+      const retPct = bot.total_return_pct || 0.0;
+
+      // Header widget
+      document.getElementById('headerPaperEquity').innerText = '$' + equity.toFixed(2);
+      document.getElementById('headerBotStatus').innerText = bot.enabled ? 'ACTIVE' : 'PAUSED';
+      document.getElementById('headerBotStatus').className = 'text-xs font-bold ' + (bot.enabled ? 'text-emerald-400' : 'text-amber-400');
+
+      // Bot Tab Balances
+      document.getElementById('botCashVal').innerText = '$' + cash.toFixed(2);
+      document.getElementById('botEquityVal').innerText = '$' + equity.toFixed(2);
+      
+      const retEl = document.getElementById('botReturnPct');
+      retEl.innerText = (retPct >= 0 ? '+' : '') + retPct.toFixed(2) + '% Return';
+      retEl.className = 'text-[10px] font-bold mt-0.5 ' + (retPct >= 0 ? 'text-emerald-400' : 'text-rose-400');
+
+      const rPnlEl = document.getElementById('botRealizedPnl');
+      rPnlEl.innerText = (realized >= 0 ? '+' : '') + '$' + realized.toFixed(2);
+      rPnlEl.className = 'text-lg font-black mt-1 ' + (realized >= 0 ? 'text-emerald-400' : 'text-rose-400');
+
+      const uPnlEl = document.getElementById('botUnrealizedPnl');
+      uPnlEl.innerText = (unrealized >= 0 ? '+' : '') + '$' + unrealized.toFixed(2);
+      uPnlEl.className = 'text-lg font-black mt-1 ' + (unrealized >= 0 ? 'text-emerald-400' : 'text-rose-400');
+
+      document.getElementById('botWinRate').innerText = (bot.win_rate_pct || 0).toFixed(1) + '%';
+      document.getElementById('botTradesCount').innerText = (bot.total_trades || 0) + ' Trades Completed';
+
+      // Bot Toggle Button
+      const toggleBtn = document.getElementById('botToggleBtn');
+      toggleBtn.innerText = bot.enabled ? 'BOT: ENABLED' : 'BOT: PAUSED';
+      toggleBtn.className = 'px-2.5 py-1 rounded text-xs font-mono font-bold ' + (bot.enabled ? 'bg-emerald-500 text-black' : 'bg-amber-500 text-black');
+
+      document.getElementById('botCandleCountdown').innerText = scalp?.countdown_str || '--:--';
+
+      // Active Position Monitor
+      const pos = bot.active_position;
+      const noPosView = document.getElementById('noPositionView');
+      const hasPosView = document.getElementById('hasPositionView');
+      const hasPosActions = document.getElementById('hasPositionActions');
+      const dot = document.getElementById('activePositionDot');
+      const badge = document.getElementById('activePositionStatusBadge');
+
+      if (pos) {
+        noPosView.classList.add('hidden');
+        hasPosView.classList.remove('hidden');
+        hasPosActions.classList.remove('hidden');
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping';
+        badge.innerText = 'IN ACTIVE TRADE (' + pos.side + ')';
+        badge.className = 'text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30';
+
+        document.getElementById('posSideBadge').innerText = pos.side === 'YES' ? 'BULLISH (BUY YES)' : 'BEARISH (BUY NO)';
+        document.getElementById('posSideBadge').className = 'text-xs font-mono font-bold px-2.5 py-1 rounded ' + (pos.side === 'YES' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40' : 'bg-rose-500/20 text-rose-400 border border-rose-500/40');
+
+        document.getElementById('posTickerTitle').innerText = pos.ticker;
+        document.getElementById('posRationaleText').innerText = pos.rationale || '';
+
+        const uPnlDol = pos.unrealized_pnl_dollars || 0.0;
+        const uPnlPct = pos.unrealized_pnl_pct || 0.0;
+        const pDolEl = document.getElementById('posPnlDollars');
+        const pPctEl = document.getElementById('posPnlPct');
+        pDolEl.innerText = (uPnlDol >= 0 ? '+' : '') + '$' + uPnlDol.toFixed(2);
+        pPctEl.innerText = (uPnlPct >= 0 ? '+' : '') + uPnlPct.toFixed(1) + '%';
+        pDolEl.className = 'text-2xl font-black font-mono ' + (uPnlDol >= 0 ? 'text-emerald-400' : 'text-rose-400');
+        pPctEl.className = 'text-xs font-bold font-mono ' + (uPnlDol >= 0 ? 'text-emerald-400' : 'text-rose-400');
+
+        document.getElementById('posEntryPrice').innerText = pos.entry_price_cents + '¢';
+        document.getElementById('posCurrentBid').innerText = pos.current_bid_cents + '¢';
+        document.getElementById('posSizeContracts').innerText = pos.contracts + ' contracts';
+        document.getElementById('posCostBasis').innerText = '$' + pos.cost_dollars.toFixed(2);
+
+        document.getElementById('posTpTarget').innerText = pos.take_profit_target_cents + '¢';
+        document.getElementById('posSlTarget').innerText = pos.stop_loss_target_cents + '¢';
+      } else {
+        noPosView.classList.remove('hidden');
+        hasPosView.classList.add('hidden');
+        hasPosActions.classList.add('hidden');
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-slate-500';
+        badge.innerText = 'SEARCHING FOR SETUP';
+        badge.className = 'text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-bold';
+      }
+
+      // Render Recent Trades Table
+      renderBotTradeHistory(bot.recent_trades || []);
+    }
+
+    function renderBotTradeHistory(trades) {
+      const tbody = document.getElementById('botTradeHistoryBody');
+      if (!trades.length) {
+        tbody.innerHTML = '<tr><td colspan="12" class="p-6 text-center text-slate-500 font-mono">No trades executed yet. Bot is scanning 15m price action...</td></tr>';
+        return;
+      }
+
+      let html = '';
+      trades.forEach(t => {
+        const isWin = (t.pnl_dollars || 0) > 0;
+        const color = isWin ? 'text-emerald-400' : ((t.pnl_dollars || 0) < 0 ? 'text-rose-400' : 'text-slate-400');
+        const dt = new Date(t.timestamp * 1000).toLocaleTimeString();
+        const sideColor = t.side === 'YES' ? 'emerald' : 'rose';
+
+        html += `
+          <tr class="hover:bg-slate-800/40 transition">
+            <td class="p-3 text-slate-500 font-bold">#${t.id}</td>
+            <td class="p-3 text-slate-400">${dt}</td>
+            <td class="p-3 font-bold text-white">${t.ticker}</td>
+            <td class="p-3"><span class="px-2 py-0.5 rounded text-[10px] font-bold bg-${sideColor}-500/15 text-${sideColor}-400 border border-${sideColor}-500/30">${t.side}</span></td>
+            <td class="p-3 text-white">${(t.entry_price*100).toFixed(0)}¢</td>
+            <td class="p-3 text-slate-300">${t.contracts}</td>
+            <td class="p-3 text-slate-400">$${t.cost_dollars.toFixed(2)}</td>
+            <td class="p-3 text-cyan-400 font-bold">${t.exit_price !== null ? (t.exit_price*100).toFixed(0) + '¢' : '--'}</td>
+            <td class="p-3"><span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300">${t.exit_reason || t.status}</span></td>
+            <td class="p-3 font-bold ${color}">${t.pnl_dollars !== null ? (t.pnl_dollars >= 0 ? '+' : '') + '$' + t.pnl_dollars.toFixed(2) : '--'}</td>
+            <td class="p-3 font-bold ${color}">${t.pnl_pct !== null ? (t.pnl_pct >= 0 ? '+' : '') + t.pnl_pct.toFixed(1) + '%' : '--'}</td>
+            <td class="p-3 text-slate-400 max-w-xs truncate" title="${t.rationale}">${t.rationale}</td>
+          </tr>
+        `;
+      });
+      tbody.innerHTML = html;
+    }
+
+    async function toggleBotPower() {
+      const curr = latestData?.bot?.enabled ?? true;
+      try {
+        await fetch('/api/bot/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !curr })
+        });
+      } catch (e) {}
+    }
+
+    async function saveBotSettings() {
+      const tp = parseFloat(document.getElementById('cfgTpInput').value) || 25.0;
+      const sl = parseFloat(document.getElementById('cfgSlInput').value) || 25.0;
+      const alloc = parseFloat(document.getElementById('cfgAllocInput').value) || 15.0;
+      const edge = parseFloat(document.getElementById('cfgEdgeInput').value) || 4.0;
+
+      try {
+        const resp = await fetch('/api/bot/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            take_profit_roi_pct: tp,
+            stop_loss_roi_pct: sl,
+            max_allocation_pct: alloc,
+            min_edge_pct: edge
+          })
+        });
+        if (resp.ok) alert("Bot Strategy Parameters successfully saved!");
+      } catch (e) {
+        alert("Error saving settings: " + e);
+      }
+    }
+
+    async function emergencyClosePosition() {
+      if (!confirm("Are you sure you want to close the active position early to lock in profits/cut risk?")) return;
+      try {
+        const resp = await fetch('/api/bot/close_position', { method: 'POST' });
+        const res = await resp.json();
+        alert(res.message);
+      } catch (e) {
+        alert("Error closing position: " + e);
+      }
+    }
+
+    async function resetPaperAccount() {
+      if (!confirm("Reset simulated paper account back to $50.00?")) return;
+      try {
+        await fetch('/api/bot/reset', { method: 'POST' });
+      } catch (e) {}
+    }
+
+    function downloadAuditCsv() {
+      window.open('/api/audit/export', '_blank');
+    }
+
+    // Render Radar Cards
+    function renderRadar() {
+      const container = document.getElementById('radarCardsContainer');
+      const opps = latestData?.top_ev_opportunities || [];
+      if (!opps.length) {
+        container.innerHTML = '<div class="p-8 text-center text-slate-500 font-mono text-xs col-span-2 glass-card rounded-xl">No +EV discrepancies currently meeting threshold. Scanner is active...</div>';
+        return;
+      }
+
+      const filtered = opps.filter(o => {
+        if (activeRadarFilter === 'all') return true;
+        if (activeRadarFilter === 'YES') return o.side === 'YES';
+        if (activeRadarFilter === 'NO') return o.side === 'NO';
+        if (activeRadarFilter === 'ARB') return o.signal.includes('ARBITRAGE') || o.signal.includes('SNIPER');
+        return true;
+      });
+
+      if (!filtered.length) {
+        container.innerHTML = '<div class="p-8 text-center text-slate-500 font-mono text-xs col-span-2 glass-card rounded-xl">No trades matching filter.</div>';
+        return;
+      }
+
+      let html = '';
+      filtered.forEach(o => {
+        const isYes = o.side === 'YES';
+        const badgeColor = isYes ? 'emerald' : (o.side === 'NO' ? 'rose' : 'amber');
+
+        html += `
+          <div class="glass-card p-5 rounded-2xl flex flex-col justify-between space-y-4">
+            <div>
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <div class="flex items-center gap-2">
+                    <span class="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-${badgeColor}-500/15 text-${badgeColor}-400 border border-${badgeColor}-500/30">
+                      ${o.signal}
+                    </span>
+                    <span class="text-xs font-mono text-slate-400">Expires: ${o.countdown}</span>
+                  </div>
+                  <h4 class="text-sm font-bold text-white mt-1.5 leading-snug">${o.title}</h4>
+                </div>
+                <div class="text-right">
+                  <div class="text-[10px] font-mono text-slate-400 uppercase">Book Price</div>
+                  <div class="text-lg font-black font-mono text-white">${o.book_price_cents}¢</div>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-4 gap-2 mt-4 p-2.5 rounded-xl bg-slate-900/80 border border-slate-800 text-center font-mono text-xs">
+                <div>
+                  <div class="text-[10px] text-slate-400 uppercase">Model Prob</div>
+                  <div class="font-bold text-cyan-400 mt-0.5">${o.model_prob_pct}%</div>
+                </div>
+                <div>
+                  <div class="text-[10px] text-slate-400 uppercase">Net Edge</div>
+                  <div class="font-bold text-emerald-400 mt-0.5">+${o.edge_pct}%</div>
+                </div>
+                <div>
+                  <div class="text-[10px] text-slate-400 uppercase">Net EV</div>
+                  <div class="font-bold text-emerald-400 mt-0.5">+${o.ev_cents}¢</div>
+                </div>
+                <div>
+                  <div class="text-[10px] text-slate-400 uppercase">Half-Kelly</div>
+                  <div class="font-bold text-amber-400 mt-0.5">${o.half_kelly_pct}%</div>
+                </div>
+              </div>
+
+              <p class="text-xs text-slate-300 mt-3 bg-dark-950/60 p-3 rounded-lg border border-slate-800/80 leading-relaxed font-sans">
+                💡 <span class="text-slate-400">Rationale:</span> ${o.why}
+              </p>
+            </div>
+
+            <div class="flex items-center justify-between pt-2 border-t border-slate-800/80">
+              <span class="text-[10px] font-mono text-slate-500">${o.ticker}</span>
+              <a href="${o.url}" target="_blank" class="px-3 py-1.5 rounded-lg bg-${badgeColor}-500/20 hover:bg-${badgeColor}-500/30 text-${badgeColor}-300 border border-${badgeColor}-500/40 text-xs font-mono font-bold transition flex items-center gap-1">
+                EXECUTE ORDER ↗
+              </a>
+            </div>
+          </div>
+        `;
+      });
+      container.innerHTML = html;
+    }
+
+    function filterRadar(type) {
+      activeRadarFilter = type;
+      ['all', 'yes', 'no', 'arb'].forEach(k => {
+        const btn = document.getElementById('rf-' + k);
+        if (k === type.toLowerCase()) {
+          btn.className = 'px-3 py-1 rounded text-xs font-mono font-bold bg-emerald-500 text-black';
+        } else {
+          btn.className = 'px-3 py-1 rounded text-xs font-mono font-bold bg-slate-800 text-slate-300 hover:bg-slate-700';
+        }
+      });
+      renderRadar();
+    }
+
+    // Populate Expiration Dropdown for Strike Ladder
+    let lastExpiriesHash = '';
+    function populateExpiryDropdown() {
+      const select = document.getElementById('ladderExpirySelect');
+      const expiries = Object.keys(latestData?.strike_ladders_by_expiry || {});
+      const hash = expiries.join(',');
+      if (hash === lastExpiriesHash || !expiries.length) return;
+      lastExpiriesHash = hash;
+
+      const currentVal = select.value;
+      select.innerHTML = '';
+      expiries.forEach((exp, idx) => {
+        const opt = document.createElement('option');
+        opt.value = exp;
+        const count = latestData.strike_ladders_by_expiry[exp].length;
+        opt.innerText = exp.replace('T', ' ').replace('Z', ' UTC') + ` (${count} strikes)`;
+        select.appendChild(opt);
+      });
+      if (currentVal && expiries.includes(currentVal)) select.value = currentVal;
+      renderSelectedLadder();
+    }
+
+    // Render Strike Ladder Table and SVG Curve
+    function renderSelectedLadder() {
+      const select = document.getElementById('ladderExpirySelect');
+      const expKey = select.value;
+      const ladder = latestData?.strike_ladders_by_expiry?.[expKey] || [];
+      const tbody = document.getElementById('strikeTableBody');
+      const countEl = document.getElementById('ladderStrikeCount');
+      countEl.innerText = ladder.length + ' strikes tracked';
+
+      if (!ladder.length) {
+        tbody.innerHTML = '<tr><td colspan="10" class="p-4 text-center text-slate-500">No strikes found for this expiration.</td></tr>';
+        return;
+      }
+
+      ladder.sort((a, b) => a.strike - b.strike);
+
+      let rows = '';
+      ladder.forEach(row => {
+        const isItm = row.distance_dollars <= 0;
+        const sigColor = row.signal.includes('BUY YES') ? 'emerald' : (row.signal.includes('BUY NO') ? 'rose' : 'slate');
+        
+        rows += `
+          <tr class="hover:bg-slate-800/40 transition ${isItm ? 'bg-emerald-950/10' : ''}">
+            <td class="p-3 font-bold text-white flex items-center gap-2">
+              $${row.strike.toLocaleString()}
+              ${isItm ? '<span class="text-[9px] px-1 rounded bg-emerald-500/20 text-emerald-400 font-bold">ITM</span>' : ''}
+            </td>
+            <td class="p-3 ${row.distance_dollars <= 0 ? 'text-emerald-400' : 'text-slate-400'}">
+              ${row.distance_dollars > 0 ? '+' : ''}${row.distance_dollars.toLocaleString()} (${row.distance_pct}%)
+            </td>
+            <td class="p-3 font-bold text-cyan-400">${row.model_prob_pct}%</td>
+            <td class="p-3 text-emerald-400 font-bold">${row.yes_ask_cents}¢ <span class="text-slate-500 text-[10px]">(${row.yes_bid_cents}b)</span></td>
+            <td class="p-3 text-rose-400 font-bold">${row.no_ask_cents}¢ <span class="text-slate-500 text-[10px]">(${row.no_bid_cents}b)</span></td>
+            <td class="p-3 text-slate-400">${row.spread_cents}¢</td>
+            <td class="p-3">
+              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-${sigColor}-500/15 text-${sigColor}-400 border border-${sigColor}-500/30">
+                ${row.signal}
+              </span>
+            </td>
+            <td class="p-3 font-bold ${row.best_edge_pct >= 3 ? 'text-emerald-400' : 'text-slate-400'}">
+              +${row.best_edge_pct}%
+            </td>
+            <td class="p-3 font-bold ${row.best_ev_cents >= 1 ? 'text-emerald-400' : 'text-slate-400'}">
+              +${row.best_ev_cents}¢ (+${row.best_roi_pct}%)
+            </td>
+            <td class="p-3">
+              <a href="${row.url}" target="_blank" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-bold">
+                Order ↗
+              </a>
+            </td>
+          </tr>
+        `;
+      });
+      tbody.innerHTML = rows;
+      drawStrikeCurve(ladder);
+    }
+
+    // Draw Smooth SVG Probability Curve
+    function drawStrikeCurve(ladder) {
+      const svg = document.getElementById('strikeChartSvg');
+      if (ladder.length < 2) return;
+
+      const strikes = ladder.map(l => l.strike);
+      const minStrike = strikes[0];
+      const maxStrike = strikes[strikes.length - 1];
+      const spot = latestData?.metrics?.spot_price || 81500;
+
+      const w = 800;
+      const h = 240;
+      const padX = 40;
+      const padY = 20;
+
+      const mapX = (s) => padX + ((s - minStrike) / (maxStrike - minStrike || 1)) * (w - 2 * padX);
+      const mapY = (p) => (h - padY) - (p / 100.0) * (h - 2 * padY);
+
+      let pathD = `M ${mapX(ladder[0].strike)} ${mapY(ladder[0].model_prob_pct)}`;
+      ladder.forEach(l => {
+        pathD += ` L ${mapX(l.strike)} ${mapY(l.model_prob_pct)}`;
+      });
+
+      let dotsHtml = '';
+      ladder.forEach(l => {
+        if (l.yes_ask_cents > 0) {
+          const cx = mapX(l.strike);
+          const cy = mapY(l.yes_ask_cents);
+          dotsHtml += `<circle cx="${cx}" cy="${cy}" r="3" fill="#f59e0b" opacity="0.8" />`;
+        }
+      });
+
+      let spotLineHtml = '';
+      if (spot >= minStrike && spot <= maxStrike) {
+        const spotX = mapX(spot);
+        spotLineHtml = `
+          <line x1="${spotX}" y1="${padY}" x2="${spotX}" y2="${h - padY}" stroke="#10b981" stroke-width="1.5" stroke-dasharray="4" />
+          <text x="${spotX + 4}" y="${padY + 12}" fill="#10b981" font-size="10" font-family="monospace">Spot: $${spot.toLocaleString()}</text>
+        `;
+      }
+
+      svg.innerHTML = `
+        <defs>
+          <linearGradient id="curveGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#06b6d4" stop-opacity="0.3"/>
+            <stop offset="100%" stop-color="#06b6d4" stop-opacity="0.0"/>
+          </linearGradient>
+        </defs>
+        <line x1="${padX}" y1="${mapY(50)}" x2="${w - padX}" y2="${mapY(50)}" stroke="#1e293b" stroke-width="1" stroke-dasharray="2" />
+        <text x="${padX - 30}" y="${mapY(50) + 3}" fill="#64748b" font-size="9" font-family="monospace">50%</text>
+
+        <path d="${pathD} L ${mapX(ladder[ladder.length-1].strike)} ${h - padY} L ${mapX(ladder[0].strike)} ${h - padY} Z" fill="url(#curveGrad)" />
+        <path d="${pathD}" fill="none" stroke="#22d3ee" stroke-width="2.5" />
+        ${dotsHtml}
+        ${spotLineHtml}
+      `;
+    }
+
+    // Render Price Range Brackets (Tab 4)
+    function renderRangeBrackets() {
+      const container = document.getElementById('rangeCardsContainer');
+      const brackets = latestData?.range_brackets || [];
+      if (!brackets.length) {
+        container.innerHTML = '<div class="p-8 text-center text-slate-500 font-mono text-xs col-span-3 glass-card rounded-xl">No active range bracket markets found.</div>';
+        return;
+      }
+
+      let html = '';
+      brackets.forEach(b => {
+        html += `
+          <div class="glass-card p-4 rounded-xl space-y-3">
+            <div class="flex justify-between items-start">
+              <div>
+                <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 font-bold">RANGE BRACKET</span>
+                <h4 class="text-base font-black text-white mt-1">${b.range_label}</h4>
+                <div class="text-[11px] font-mono text-slate-400">Expires: ${b.countdown_str}</div>
+              </div>
+              <div class="text-right">
+                <div class="text-[10px] font-mono text-slate-400 uppercase">Book YES</div>
+                <div class="text-base font-black font-mono text-white">${b.yes_ask_cents}¢</div>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-3 gap-2 p-2 rounded-lg bg-slate-900 border border-slate-800 text-center font-mono text-xs">
+              <div>
+                <div class="text-[10px] text-slate-400">Model Prob</div>
+                <div class="font-bold text-cyan-400">${b.model_prob_pct}%</div>
+              </div>
+              <div>
+                <div class="text-[10px] text-slate-400">Net EV</div>
+                <div class="font-bold ${b.best_ev_cents > 0 ? 'text-emerald-400' : 'text-slate-400'}">${b.best_ev_cents >= 0 ? '+' : ''}${b.best_ev_cents}¢</div>
+              </div>
+              <div>
+                <div class="text-[10px] text-slate-400">ROI</div>
+                <div class="font-bold ${b.best_roi_pct > 0 ? 'text-emerald-400' : 'text-slate-400'}">${b.best_roi_pct >= 0 ? '+' : ''}${b.best_roi_pct}%</div>
+              </div>
+            </div>
+
+            <a href="${b.url}" target="_blank" class="block w-full py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-center text-xs font-mono font-bold text-slate-200 transition">
+              Trade Bracket ↗
+            </a>
+          </div>
+        `;
+      });
+      container.innerHTML = html;
+    }
+
+    // Render Macro Targets (Tab 5)
+    function renderMacroTargets() {
+      const container = document.getElementById('macroCardsContainer');
+      const targets = latestData?.barrier_targets || [];
+      if (!targets.length) {
+        container.innerHTML = '<div class="p-8 text-center text-slate-500 font-mono text-xs col-span-2 glass-card rounded-xl">No barrier targets found.</div>';
+        return;
+      }
+
+      let html = '';
+      targets.forEach(t => {
+        const isHigh = t.barrier_type === 'HIGH TARGET';
+        const color = isHigh ? 'emerald' : 'rose';
+
+        html += `
+          <div class="glass-card p-5 rounded-2xl flex flex-col justify-between space-y-4">
+            <div>
+              <div class="flex items-start justify-between">
+                <div>
+                  <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-${color}-500/10 text-${color}-400 border border-${color}-500/20 font-bold">
+                    ${t.barrier_type}
+                  </span>
+                  <h4 class="text-base font-black text-white mt-1.5">${t.title}</h4>
+                  <div class="text-xs font-mono text-slate-400 mt-0.5">Expires in: ${t.countdown_str}</div>
+                </div>
+                <div class="text-right">
+                  <div class="text-[10px] font-mono text-slate-400 uppercase">Kalshi Ask</div>
+                  <div class="text-lg font-black font-mono text-white">${t.yes_ask_cents}¢</div>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-4 gap-2 mt-4 p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-center font-mono text-xs">
+                <div>
+                  <div class="text-[10px] text-slate-400 uppercase">Target</div>
+                  <div class="font-bold text-white mt-0.5">$${t.barrier_price.toLocaleString()}</div>
+                </div>
+                <div>
+                  <div class="text-[10px] text-slate-400 uppercase">Barrier Prob</div>
+                  <div class="font-bold text-cyan-400 mt-0.5">${t.model_prob_pct}%</div>
+                </div>
+                <div>
+                  <div class="text-[10px] text-slate-400 uppercase">Net EV</div>
+                  <div class="font-bold ${t.best_ev_cents > 0 ? 'text-emerald-400' : 'text-slate-400'} mt-0.5">${t.best_ev_cents >= 0 ? '+' : ''}${t.best_ev_cents}¢</div>
+                </div>
+                <div>
+                  <div class="text-[10px] text-slate-400 uppercase">Distance</div>
+                  <div class="font-bold text-slate-300 mt-0.5">${t.distance_pct > 0 ? '+' : ''}${t.distance_pct}%</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="flex items-center justify-between pt-2 border-t border-slate-800/80">
+              <span class="text-[10px] font-mono text-slate-500">${t.ticker}</span>
+              <a href="${t.url}" target="_blank" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-mono font-bold transition">
+                View on Kalshi ↗
+              </a>
+            </div>
+          </div>
+        `;
+      });
+      container.innerHTML = html;
+    }
+
+    // Render Technicals Tab (Tab 7)
+    function renderTechnicalsTab(m) {
+      document.getElementById('techVol15m').innerText = '$' + (m.vol_15m_dollar || 95).toFixed(1);
+      document.getElementById('techVol1h').innerText = (m.vol_1h_ann_pct || 48).toFixed(1) + '%';
+      document.getElementById('techVol24h').innerText = (m.vol_24h_ann_pct || 45).toFixed(1) + '%';
+      document.getElementById('techVol7d').innerText = (m.vol_7d_ann_pct || 50).toFixed(1) + '%';
+      document.getElementById('techVolParkinson').innerText = (m.vol_parkinson_pct || 46).toFixed(1) + '%';
+      document.getElementById('techVolGarman').innerText = (m.vol_garman_klass_pct || 45).toFixed(1) + '%';
+
+      document.getElementById('techRsi').innerText = (m.rsi_14 || 50).toFixed(1);
+      document.getElementById('techMacdLine').innerText = (m.macd_line || 0).toFixed(1) + ' / ' + (m.macd_signal || 0).toFixed(1);
+      const hist = m.macd_hist || 0;
+      const histEl = document.getElementById('techMacdHist');
+      histEl.innerText = (hist >= 0 ? '+' : '') + hist.toFixed(2);
+      histEl.className = 'font-bold ' + (hist >= 0 ? 'text-emerald-400' : 'text-rose-400');
+
+      document.getElementById('techAtr').innerText = '$' + (m.atr_14 || 120).toFixed(1);
+      document.getElementById('techBbBands').innerText = '$' + (m.bb_lower || 0).toLocaleString() + ' / $' + (m.bb_mid || 0).toLocaleString() + ' / $' + (m.bb_upper || 0).toLocaleString();
+      document.getElementById('techBbPct').innerText = (m.bb_pct_b || 0.5).toFixed(2) + ' (' + (m.bb_bandwidth || 1.0).toFixed(2) + '% width)';
+
+      document.getElementById('techEmas').innerText = '$' + (m.ema_9 || 0).toLocaleString() + ' / $' + (m.ema_21 || 0).toLocaleString();
+      document.getElementById('techSmas').innerText = '$' + (m.sma_50 || 0).toLocaleString() + ' / $' + (m.sma_200 || 0).toLocaleString();
+      document.getElementById('techFundingDetail').innerText = (m.funding_rate_8h_pct || 0).toFixed(4) + '% / ' + (m.funding_rate_ann_pct || 0).toFixed(2) + '%';
+      document.getElementById('techOiDetail').innerText = (m.open_interest_btc || 0).toLocaleString() + ' BTC ($' + ((m.open_interest_usd || 0)/1e6).toFixed(1) + 'M)';
+      document.getElementById('techVwap').innerText = '$' + (m.vwap_24h || 0).toLocaleString('en-US', { minimumFractionDigits: 2 });
+      document.getElementById('techExchangeSpots').innerText = `CB: $${m.coinbase_spot?.toLocaleString() || 0} | KR: $${m.kraken_spot?.toLocaleString() || 0} | HL: $${m.hyperliquid_spot?.toLocaleString() || 0}`;
+    }
+
+    // Interactive Monte Carlo Simulation Logic (Tab 6)
+    function populateMcDefaults() {
+      const spot = latestData?.metrics?.spot_price || 81500;
+      if (!document.getElementById('mcSpotInput').value) {
+        document.getElementById('mcSpotInput').value = spot.toFixed(0);
+        document.getElementById('mcStrikeInput').value = (spot + 250).toFixed(0);
+      }
+    }
+
+    async function runCustomSimulation() {
+      const spot = parseFloat(document.getElementById('mcSpotInput').value) || 81500;
+      const strike = parseFloat(document.getElementById('mcStrikeInput').value) || 81750;
+      const hours = parseFloat(document.getElementById('mcHoursInput').value) || 2.0;
+      const vol_pct = parseFloat(document.getElementById('mcVolInput').value) || 45.0;
+
+      try {
+        const resp = await fetch('/api/simulate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ spot, strike, hours, vol_pct, num_paths: 10000 })
+        });
+        const res = await resp.json();
+        
+        document.getElementById('mcTargetProb').innerText = (res.target_strike_prob_pct || 0) + '%';
+        document.getElementById('mcBsProb').innerText = (res.bs_probability_pct || 0) + '%';
+        document.getElementById('mcMedianPrice').innerText = '$' + (res.percentiles?.median || spot).toLocaleString();
+
+        const histContainer = document.getElementById('mcHistContainer');
+        const bins = res.histogram?.bins || [];
+        const probs = res.histogram?.probabilities || [];
+        const maxProb = Math.max(...probs, 0.001);
+
+        let histHtml = '';
+        bins.forEach((b, i) => {
+          const p = probs[i] || 0;
+          const hPct = (p / maxProb) * 100;
+          const isAbove = b >= strike;
+          const barColor = isAbove ? 'bg-cyan-400' : 'bg-slate-700';
+
+          histHtml += `
+            <div class="flex-1 flex flex-col items-center h-full justify-end group relative" title="$${b.toLocaleString()} (${(p*100).toFixed(1)}%)">
+              <div class="w-full ${barColor} rounded-t transition-all" style="height: ${Math.max(4, hPct)}%;"></div>
+            </div>
+          `;
+        });
+        histContainer.innerHTML = histHtml;
+
+        const pGrid = document.getElementById('mcPercentilesGrid');
+        const pObj = res.percentiles || {};
+        pGrid.innerHTML = `
+          <div class="p-2 rounded bg-slate-900 border border-slate-800"><div class="text-slate-500 text-[10px]">P1</div><div class="font-bold text-slate-300">$${(pObj.p1||0).toLocaleString()}</div></div>
+          <div class="p-2 rounded bg-slate-900 border border-slate-800"><div class="text-slate-500 text-[10px]">P5</div><div class="font-bold text-slate-300">$${(pObj.p5||0).toLocaleString()}</div></div>
+          <div class="p-2 rounded bg-slate-900 border border-slate-800"><div class="text-slate-500 text-[10px]">P10</div><div class="font-bold text-slate-300">$${(pObj.p10||0).toLocaleString()}</div></div>
+          <div class="p-2 rounded bg-slate-900 border border-slate-800"><div class="text-slate-500 text-[10px]">P25</div><div class="font-bold text-slate-300">$${(pObj.p25||0).toLocaleString()}</div></div>
+          <div class="p-2 rounded bg-emerald-500/10 border border-emerald-500/30"><div class="text-emerald-400 text-[10px] font-bold">MEDIAN</div><div class="font-black text-emerald-400">$${(pObj.median||0).toLocaleString()}</div></div>
+          <div class="p-2 rounded bg-slate-900 border border-slate-800"><div class="text-slate-500 text-[10px]">P75</div><div class="font-bold text-slate-300">$${(pObj.p75||0).toLocaleString()}</div></div>
+          <div class="p-2 rounded bg-slate-900 border border-slate-800"><div class="text-slate-500 text-[10px]">P90</div><div class="font-bold text-slate-300">$${(pObj.p90||0).toLocaleString()}</div></div>
+          <div class="p-2 rounded bg-slate-900 border border-slate-800"><div class="text-slate-500 text-[10px]">P95</div><div class="font-bold text-slate-300">$${(pObj.p95||0).toLocaleString()}</div></div>
+          <div class="p-2 rounded bg-slate-900 border border-slate-800"><div class="text-slate-500 text-[10px]">P99</div><div class="font-bold text-slate-300">$${(pObj.p99||0).toLocaleString()}</div></div>
+        `;
+
+      } catch (e) {
+        console.error("Simulation error:", e);
+      }
+    }
+
+    // Start on DOM load
+    window.addEventListener('DOMContentLoaded', () => {
+      connectSse();
+      fetch('/api/scan')
+        .then(r => r.json())
+        .then(data => updateDashboard(data))
+        .catch(e => console.error(e));
+    });
+  </script>
+
+</body>
+</html>
