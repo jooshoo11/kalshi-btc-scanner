@@ -11,6 +11,17 @@ def normal_pdf(x: float) -> float:
     """Standard normal probability density function (PDF)."""
     return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
 
+def calculate_kalshi_fee(contracts: int, price: float) -> float:
+    """
+    Official Kalshi Taker Fee Schedule:
+    fee = ceil(0.07 * count * price * (1.0 - price) * 100) / 100
+    Where price is in dollars [0.01 - 0.99] and rounded UP to the nearest cent.
+    Settlement at expiration carries $0.00 fee.
+    """
+    if contracts <= 0 or price <= 0.0 or price >= 1.0:
+        return 0.0
+    return math.ceil(0.07 * float(contracts) * float(price) * (1.0 - float(price)) * 100.0) / 100.0
+
 class QuantPredictionEngine:
     """
     Quantitative Pricing & Prediction Engine for Kalshi Bitcoin Contracts.
@@ -212,17 +223,95 @@ class QuantPredictionEngine:
             "strike_probs": strike_probs
         }
 
+    def evaluate_15m_brti_accumulator(
+        self,
+        spot: float,
+        open_price: float,
+        seconds_left: float,
+        accumulated_samples: Optional[List[float]] = None,
+        dollar_vol_15m: float = 95.0,
+        momentum_bias: float = 0.0
+    ) -> Dict[str, Any]:
+        """
+        CF Benchmarks BRTI 60-Second Simple Average Accumulator for the final minute
+        of KXBTC15M contracts.
+        
+        Kalshi KXBTC15M settles on the 60-second simple arithmetic average of 1-second
+        spot samples during the final 60 seconds (seconds_left <= 60).
+        
+        Variance collapses at cubic rate:
+        Var(S_settle | F_m) = (1/3) * (sigma_1s^2) * (T_rem^3) / 3600
+        """
+        samples = list(accumulated_samples or [])
+        m = len(samples)
+        # Ensure m + t_rem == 60 samples total in 60-second settlement window
+        if m > 0:
+            t_rem = max(0.0, float(60 - m))
+            sum_m = sum(samples)
+        else:
+            t_rem = max(0.0, min(60.0, float(seconds_left)))
+            sum_m = (60.0 - t_rem) * spot
+
+        # Conditional expected final settlement price under martingale dynamics
+        mu_settle = (sum_m + t_rem * spot) / 60.0
+
+        # 1-second dollar standard deviation derived from 15m volatility
+        sigma_1s = max(1.0, dollar_vol_15m / 30.0)
+
+        # Conditional standard deviation of the 60-second arithmetic average
+        if t_rem > 0.0:
+            var_settle = (1.0 / 3.0) * (sigma_1s ** 2) * (t_rem ** 3) / 3600.0
+            sigma_settle = max(0.001, math.sqrt(var_settle))
+        else:
+            sigma_settle = 0.001
+
+        drift_dollar = momentum_bias * (t_rem / 900.0)
+        z_score = (mu_settle + drift_dollar - open_price) / sigma_settle
+
+        prob_yes = normal_cdf(z_score)
+        prob_no = 1.0 - prob_yes
+        delta = spot - open_price
+
+        return {
+            "delta": round(delta, 2),
+            "delta_pct": round((delta / (open_price + 1e-9)) * 100.0, 3),
+            "seconds_left": int(seconds_left),
+            "time_elapsed_pct": round(((900.0 - seconds_left) / 900.0) * 100.0, 1),
+            "z_score": round(z_score, 2),
+            "prob_yes": round(prob_yes, 4),
+            "prob_yes_pct": round(prob_yes * 100.0, 1),
+            "prob_no": round(prob_no, 4),
+            "prob_no_pct": round(prob_no * 100.0, 1),
+            "mu_settle": round(mu_settle, 2),
+            "sigma_settle": round(sigma_settle, 2),
+            "accumulated_samples_count": m,
+            "is_brti_accumulator": True
+        }
+
     def evaluate_15m_scalp(
         self,
         spot: float,
         open_price: float,
         seconds_left: float,
         dollar_vol_15m: float,
-        momentum_bias: float = 0.0
+        momentum_bias: float = 0.0,
+        accumulated_samples: Optional[List[float]] = None
     ) -> Dict[str, Any]:
         """
         High-frequency Drift-Diffusion model for 15-minute Kalshi candlestick contracts (KXBTC15M).
+        In the final 60 seconds, automatically routes to the CF Benchmarks BRTI 60-second accumulator
+        where variance collapses proportionally.
         """
+        if seconds_left <= 60.0:
+            return self.evaluate_15m_brti_accumulator(
+                spot=spot,
+                open_price=open_price,
+                seconds_left=seconds_left,
+                accumulated_samples=accumulated_samples,
+                dollar_vol_15m=dollar_vol_15m,
+                momentum_bias=momentum_bias
+            )
+
         delta = spot - open_price
         delta_pct = (delta / (open_price + 1e-9)) * 100.0
         time_fraction = max(0.001, min(1.0, seconds_left / 900.0))
@@ -246,7 +335,8 @@ class QuantPredictionEngine:
             "prob_yes": round(prob_yes, 4),
             "prob_yes_pct": round(prob_yes * 100.0, 1),
             "prob_no": round(prob_no, 4),
-            "prob_no_pct": round(prob_no * 100.0, 1)
+            "prob_no_pct": round(prob_no * 100.0, 1),
+            "is_brti_accumulator": False
         }
 
     def calculate_trade_metrics(
@@ -255,78 +345,103 @@ class QuantPredictionEngine:
         yes_ask: float,
         yes_bid: float,
         no_ask: float,
-        no_bid: float
+        no_bid: float,
+        slippage_penalty_cents: float = 3.0
     ) -> Dict[str, Any]:
         """
-        Calculate mathematical edge, fee-adjusted expected value (EV),
-        return on investment (ROI %), and Kelly Criterion position sizing.
+        Calculate mathematical edge, net post-fee expected value (EV),
+        and Net Post-Fee Half-Kelly position sizing.
+        
+        Deducts:
+        - 3¢ adverse market execution slippage penalty
+        - Official Kalshi non-linear quadratic taker fee schedule
         """
         eff_yes_ask = yes_ask if yes_ask > 0 else (1.0 - no_bid if no_bid > 0 else 0.99)
         eff_no_ask = no_ask if no_ask > 0 else (1.0 - yes_bid if yes_bid > 0 else 0.99)
+        slip = slippage_penalty_cents / 100.0
 
-        # 1. Buy YES Evaluation
-        edge_yes = model_prob - eff_yes_ask
-        ev_yes_cents = (model_prob * (1.0 - self.taker_fee) - eff_yes_ask) * 100.0
-        roi_yes_pct = (ev_yes_cents / (eff_yes_ask * 100.0)) * 100.0 if eff_yes_ask > 0 else 0.0
+        # 1. Buy YES Evaluation (with 3c adverse slippage + Kalshi taker fee)
+        fill_yes_ask = min(0.99, eff_yes_ask + slip)
+        fee_yes_in = calculate_kalshi_fee(1, fill_yes_ask)
+        net_cost_yes = fill_yes_ask + fee_yes_in
+        # Settlement at expiry carries $0 fee; net win = $1.00 - net_cost_yes
+        net_win_yes = 1.0 - net_cost_yes
+        b_yes = net_win_yes / max(0.01, net_cost_yes)
 
-        # Kelly for YES: b = (1 - ask) / ask, f* = (p*b - q) / b
-        b_yes = (1.0 - eff_yes_ask) / max(0.01, eff_yes_ask)
+        ev_yes_cents = (model_prob * 1.0 - net_cost_yes) * 100.0
+        edge_yes = model_prob - net_cost_yes
+        roi_yes_pct = (ev_yes_cents / (net_cost_yes * 100.0)) * 100.0 if net_cost_yes > 0 else 0.0
+
+        # Net Half-Kelly for YES
         q_yes = 1.0 - model_prob
-        kelly_yes = max(0.0, (model_prob * b_yes - q_yes) / b_yes) if b_yes > 0 else 0.0
+        kelly_yes_full = max(0.0, (model_prob * b_yes - q_yes) / b_yes) if b_yes > 0 else 0.0
+        half_kelly_yes = kelly_yes_full * 0.5
 
-        # 2. Buy NO Evaluation
+        # 2. Buy NO Evaluation (with 3c adverse slippage + Kalshi taker fee)
         model_prob_no = 1.0 - model_prob
-        edge_no = model_prob_no - eff_no_ask
-        ev_no_cents = (model_prob_no * (1.0 - self.taker_fee) - eff_no_ask) * 100.0
-        roi_no_pct = (ev_no_cents / (eff_no_ask * 100.0)) * 100.0 if eff_no_ask > 0 else 0.0
+        fill_no_ask = min(0.99, eff_no_ask + slip)
+        fee_no_in = calculate_kalshi_fee(1, fill_no_ask)
+        net_cost_no = fill_no_ask + fee_no_in
+        net_win_no = 1.0 - net_cost_no
+        b_no = net_win_no / max(0.01, net_cost_no)
 
-        b_no = (1.0 - eff_no_ask) / max(0.01, eff_no_ask)
+        ev_no_cents = (model_prob_no * 1.0 - net_cost_no) * 100.0
+        edge_no = model_prob_no - net_cost_no
+        roi_no_pct = (ev_no_cents / (net_cost_no * 100.0)) * 100.0 if net_cost_no > 0 else 0.0
+
+        # Net Half-Kelly for NO
         q_no = 1.0 - model_prob_no
-        kelly_no = max(0.0, (model_prob_no * b_no - q_no) / b_no) if b_no > 0 else 0.0
+        kelly_no_full = max(0.0, (model_prob_no * b_no - q_no) / b_no) if b_no > 0 else 0.0
+        half_kelly_no = kelly_no_full * 0.5
 
         # Spread & Maker Edge
         spread_cents = round(abs(eff_yes_ask - yes_bid) * 100.0, 1)
 
-        # Determine optimal recommendation
-        if edge_yes >= 0.05 and ev_yes_cents > 3.0:
+        # Determine optimal recommendation strictly after fees & slippage
+        if edge_yes >= 0.04 and ev_yes_cents >= 1.5:
             signal = "🟢 STRONG BUY YES"
             side = "YES"
             best_edge = edge_yes
             best_ev = ev_yes_cents
             best_roi = roi_yes_pct
-            best_kelly = kelly_yes
-            price = eff_yes_ask
-        elif edge_yes >= 0.02 and ev_yes_cents > 1.0:
+            best_half_kelly = half_kelly_yes
+            best_full_kelly = kelly_yes_full
+            price = fill_yes_ask
+        elif edge_yes >= 0.02 and ev_yes_cents >= 0.5:
             signal = "🟢 BUY YES"
             side = "YES"
             best_edge = edge_yes
             best_ev = ev_yes_cents
             best_roi = roi_yes_pct
-            best_kelly = kelly_yes
-            price = eff_yes_ask
-        elif edge_no >= 0.05 and ev_no_cents > 3.0:
+            best_half_kelly = half_kelly_yes
+            best_full_kelly = kelly_yes_full
+            price = fill_yes_ask
+        elif edge_no >= 0.04 and ev_no_cents >= 1.5:
             signal = "🔴 STRONG BUY NO"
             side = "NO"
             best_edge = edge_no
             best_ev = ev_no_cents
             best_roi = roi_no_pct
-            best_kelly = kelly_no
-            price = eff_no_ask
-        elif edge_no >= 0.02 and ev_no_cents > 1.0:
+            best_half_kelly = half_kelly_no
+            best_full_kelly = kelly_no_full
+            price = fill_no_ask
+        elif edge_no >= 0.02 and ev_no_cents >= 0.5:
             signal = "🔴 BUY NO"
             side = "NO"
             best_edge = edge_no
             best_ev = ev_no_cents
             best_roi = roi_no_pct
-            best_kelly = kelly_no
-            price = eff_no_ask
+            best_half_kelly = half_kelly_no
+            best_full_kelly = kelly_no_full
+            price = fill_no_ask
         elif spread_cents >= 15.0:
             signal = "🎯 SPREAD SNIPER"
             side = "MAKER"
             best_edge = spread_cents / 100.0
             best_ev = round(spread_cents * 0.4, 1)
             best_roi = 12.0
-            best_kelly = 0.05
+            best_half_kelly = 0.03
+            best_full_kelly = 0.06
             price = round((eff_yes_ask + yes_bid) / 2.0, 2)
         else:
             signal = "⚖️ FAIR VALUE"
@@ -334,7 +449,8 @@ class QuantPredictionEngine:
             best_edge = 0.0
             best_ev = 0.0
             best_roi = 0.0
-            best_kelly = 0.0
+            best_half_kelly = 0.0
+            best_full_kelly = 0.0
             price = eff_yes_ask
 
         return {
@@ -343,15 +459,19 @@ class QuantPredictionEngine:
             "best_edge_pct": round(best_edge * 100.0, 1),
             "best_ev_cents": round(best_ev, 1),
             "best_roi_pct": round(best_roi, 1),
-            "half_kelly_pct": round((best_kelly * 0.5) * 100.0, 1),
-            "full_kelly_pct": round(best_kelly * 100.0, 1),
+            "half_kelly_pct": round(best_half_kelly * 100.0, 1),
+            "full_kelly_pct": round(best_full_kelly * 100.0, 1),
             "price_cents": int(round(price * 100)),
             "spread_cents": spread_cents,
             "edge_yes_pct": round(edge_yes * 100.0, 1),
             "edge_no_pct": round(edge_no * 100.0, 1),
             "ev_yes_cents": round(ev_yes_cents, 1),
-            "ev_no_cents": round(ev_no_cents, 1)
+            "ev_no_cents": round(ev_no_cents, 1),
+            "slippage_deducted_cents": round(slippage_penalty_cents, 1),
+            "fee_yes_cents": round(fee_yes_in * 100.0, 1),
+            "fee_no_cents": round(fee_no_in * 100.0, 1)
         }
+
 
     def detect_monotonicity_violations(self, strike_ladder: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """

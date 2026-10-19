@@ -1,13 +1,15 @@
 import time
 from typing import Dict, Any, List, Optional
 from bot_database import AuditDatabase
+from prediction_engine import calculate_kalshi_fee
 
 class PaperTradingBot:
     """
     Simulated Paper Trading Bot for Kalshi Bitcoin Markets.
     Initial balance: $50.00.
     Trades 15-minute Bitcoin candlestick markets (KXBTC15M) dynamically with:
-    - Drift-diffusion momentum entry
+    - Drift-diffusion momentum & BRTI 60-second variance collapse entry
+    - Net Post-Fee Half-Kelly position sizing with 3¢ adverse slippage haircut
     - Active profit-taking (securing profits before resolution)
     - Stop-loss capital preservation
     - Mid-candle re-entry capability
@@ -24,9 +26,10 @@ class PaperTradingBot:
         self.enabled = True
         self.take_profit_roi_pct = 25.0    # Take profit when up 25%
         self.stop_loss_roi_pct = 25.0      # Cut loss when down 25%
-        self.max_allocation_pct = 15.0     # Max 15% of equity per trade (~$7.50 on $50)
+        self.max_allocation_pct = 15.0     # Max 15% of equity per trade
         self.min_edge_pct = 4.0            # Minimum model edge required to enter
-        self.taker_fee_cents = 0.5         # 0.5 cents per contract Kalshi taker fee
+        self.slippage_penalty_cents = 3.0  # 3¢ adverse slippage haircut
+        self.taker_fee_cents = 0.5         # Reference baseline taker fee
 
         # Candle & Re-entry tracking
         self.current_candle_id: str = ""
@@ -125,7 +128,7 @@ class PaperTradingBot:
 
             # A. Check for Resolution (Time expired or <= 3s)
             if seconds_left <= 3 or pos.get("ticker") != ticker:
-                self._settle_at_expiration(pos, spot_price, candle_open)
+                self._settle_at_expiration(pos, spot_price, candle_open, metrics)
                 return
 
             # B. Dynamic Profit Securing (Take Profit Exit)
@@ -164,8 +167,8 @@ class PaperTradingBot:
         if time.time() - self.last_exit_ts < 8.0:
             return # 8-second cooldown after exit
 
-        # Timing constraints: Avoid first 45s (noise) and last 60s (illiquidity/expiration freeze)
-        if seconds_left < 70 or seconds_left > 850:
+        # Timing constraints: Avoid first 50s (noise) but allow down to 10s for BRTI variance collapse!
+        if seconds_left < 10 or seconds_left > 850:
             return
 
         # Evaluate Signal & Edge
@@ -189,26 +192,33 @@ class PaperTradingBot:
         if not target_side or target_price <= 0.05:
             return
 
-        # Position Sizing
-        equity = self.get_equity()
-        max_alloc = equity * (self.max_allocation_pct / 100.0)
-        budget = min(self.cash, max_alloc)
+        # Net Post-Fee Half-Kelly Position Sizing
+        half_kelly_frac = float(scalp_data.get("half_kelly_pct", 0.0)) / 100.0
+        if half_kelly_frac <= 0.01:
+            return # Zero allocation if edge is insufficient after fees & 3¢ slippage
 
-        # Minimum trade size
-        contracts = int(budget / (target_price + (self.taker_fee_cents / 100.0)))
+        # Allocate between Half-Kelly and max_allocation_pct safety ceiling
+        alloc_pct = min(self.max_allocation_pct / 100.0, half_kelly_frac)
+        equity = self.get_equity()
+        budget = min(self.cash, equity * alloc_pct)
+
+        # Apply 3¢ adverse slippage penalty to fill price
+        fill_price = min(0.99, target_price + (self.slippage_penalty_cents / 100.0))
+        fee_per_contract = calculate_kalshi_fee(1, fill_price)
+        contracts = int(budget / (fill_price + fee_per_contract))
         if contracts < 1:
             return
 
-        cost = contracts * target_price
-        fees = contracts * (self.taker_fee_cents / 100.0)
+        cost = contracts * fill_price
+        fees = calculate_kalshi_fee(contracts, fill_price)
         total_debit = cost + fees
 
         if total_debit > self.cash:
-            contracts = int((self.cash - fees) / target_price)
+            contracts = int((self.cash - fees) / fill_price)
             if contracts < 1:
                 return
-            cost = contracts * target_price
-            fees = contracts * (self.taker_fee_cents / 100.0)
+            cost = contracts * fill_price
+            fees = calculate_kalshi_fee(contracts, fill_price)
             total_debit = cost + fees
 
         # Deduct cash and open position
@@ -217,15 +227,15 @@ class PaperTradingBot:
         self.total_trades_count += 1
 
         rationale = (
-            f"Bot entered {target_side} on {ticker} at {int(target_price*100)}¢ ({contracts} contracts). "
-            f"BTC is {delta:+.1f} from candle open. Model probability is {model_prob}% with +{edge_pct}% edge."
+            f"Bot entered {target_side} on {ticker} at {int(fill_price*100)}¢ ({contracts} contracts, Net Half-Kelly {half_kelly_frac*100:.1f}%). "
+            f"BTC is {delta:+.1f} from open. Model prob {model_prob}% with +{edge_pct}% net edge."
         )
 
         trade_id = self.db.record_trade_open(
             ticker=ticker,
             series="KXBTC15M",
             side=target_side,
-            entry_price=target_price,
+            entry_price=fill_price,
             contracts=contracts,
             cost_dollars=cost,
             fee_dollars=fees,
@@ -239,7 +249,7 @@ class PaperTradingBot:
             "trade_id": trade_id,
             "ticker": ticker,
             "side": target_side,
-            "entry_price": target_price,
+            "entry_price": fill_price,
             "contracts": contracts,
             "cost_dollars": cost,
             "fee_dollars": fees,
@@ -252,10 +262,10 @@ class PaperTradingBot:
         }
 
     def _close_position(self, pos: Dict[str, Any], exit_price: float, reason: str, rationale: str):
-        """Sell position to close early (securing profit or taking stop)."""
+        """Sell position to close early (securing profit or taking stop). Subject to Kalshi taker fee."""
         contracts = pos["contracts"]
         gross_proceeds = contracts * exit_price
-        fees = contracts * (self.taker_fee_cents / 100.0)
+        fees = calculate_kalshi_fee(contracts, exit_price)
         net_proceeds = gross_proceeds - fees
 
         self.cash += net_proceeds
@@ -277,14 +287,25 @@ class PaperTradingBot:
         self.last_exit_ts = time.time()
         self.open_position = None
 
-    def _settle_at_expiration(self, pos: Dict[str, Any], final_spot: float, candle_open: float):
-        """Settle contract at expiration (pays $1.00 or $0.00)."""
+    def _settle_at_expiration(
+        self,
+        pos: Dict[str, Any],
+        final_spot: float,
+        candle_open: float,
+        metrics: Optional[Any] = None
+    ):
+        """
+        Settle contract at expiration against CF Benchmarks BRTI 60-second simple average.
+        Kalshi settlement at expiration carries $0.00 fee.
+        """
         contracts = pos["contracts"]
-        won = False
-        if pos["side"] == "YES":
-            won = final_spot >= candle_open
-        else:
-            won = final_spot < candle_open
+        settle_price = final_spot
+        if metrics and hasattr(metrics, "brti_accumulator") and metrics.brti_accumulator.has_samples():
+            settle_price = metrics.brti_accumulator.get_mean()
+        elif isinstance(metrics, dict) and metrics.get("brti_mean"):
+            settle_price = float(metrics["brti_mean"])
+
+        won = (settle_price >= candle_open) if pos["side"] == "YES" else (settle_price < candle_open)
 
         payout_per_contract = 1.00 if won else 0.00
         gross_proceeds = contracts * payout_per_contract

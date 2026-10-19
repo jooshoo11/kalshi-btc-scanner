@@ -10,6 +10,47 @@ COINBASE_SPOT_URL = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
 KRAKEN_TICKER_URL = "https://api.kraken.com/0/public/Ticker?pair=XBTUSD"
 KRAKEN_OHLC_URL = "https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=15"
 
+class BRTIAccumulator:
+    """
+    CF Benchmarks BRTI 60-Second Simple Average Accumulator.
+    Kalshi KXBTC15M contracts settle on the 60-second simple arithmetic
+    average of 1-second sampled spot prices in the final minute of the candle.
+    """
+    def __init__(self):
+        self.samples: List[float] = [] # 1-second price samples in final 60s
+        self.candle_id: str = ""
+        self.last_sample_ts: float = 0.0
+
+    def reset_for_candle(self, candle_id: str):
+        if self.candle_id != candle_id:
+            self.candle_id = candle_id
+            self.samples.clear()
+            self.last_sample_ts = 0.0
+
+    def add_sample(self, spot: float, seconds_left: float, candle_id: str = "") -> bool:
+        """Add spot sample if within final 60 seconds (sampling at ~1Hz)."""
+        now = time.time()
+        if candle_id and candle_id != self.candle_id:
+            self.reset_for_candle(candle_id)
+
+        # Accumulate during final 60 seconds
+        if seconds_left <= 60.0 and (now - self.last_sample_ts >= 0.85):
+            self.samples.append(spot)
+            self.last_sample_ts = now
+            if len(self.samples) > 60:
+                self.samples.pop(0)
+            return True
+        return False
+
+    def get_mean(self) -> float:
+        return (sum(self.samples) / len(self.samples)) if self.samples else 0.0
+
+    def get_samples(self) -> List[float]:
+        return list(self.samples)
+
+    def has_samples(self) -> bool:
+        return len(self.samples) > 0
+
 class BitcoinMetricsProvider:
     """
     Comprehensive live Bitcoin data aggregator.
@@ -21,6 +62,7 @@ class BitcoinMetricsProvider:
         self.coinbase_spot: float = 81500.0
         self.kraken_spot: float = 81500.0
         self.hyperliquid_spot: float = 81500.0
+        self.brti_accumulator = BRTIAccumulator()
         
         # 24h metrics
         self.high_24h: float = 81800.0
@@ -283,12 +325,14 @@ class BitcoinMetricsProvider:
             "open_interest_btc": round(self.open_interest_btc, 2),
             "open_interest_usd": round(self.open_interest_btc * self.spot_price, 0),
             
-            # 15m Candle
+            # 15m Candle & BRTI Accumulator
             "candle_15m_open": round(self.current_15m_candle_open, 2),
             "candle_15m_high": round(self.current_15m_candle_high, 2),
             "candle_15m_low": round(self.current_15m_candle_low, 2),
             "candle_15m_delta": round(self.spot_price - self.current_15m_candle_open, 2),
             "candle_15m_delta_pct": round(((self.spot_price - self.current_15m_candle_open) / (self.current_15m_candle_open + 1e-9)) * 100.0, 3),
+            "brti_mean": round(self.brti_accumulator.get_mean(), 2) if self.brti_accumulator.has_samples() else None,
+            "brti_samples_count": len(self.brti_accumulator.samples),
 
             # Latency & Timestamps
             "latency_ms": self.latency_ms,

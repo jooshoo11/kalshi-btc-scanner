@@ -149,11 +149,17 @@ class KalshiBitcoinScanner:
             # -----------------------------------------------------------------
             if series_ticker == "KXBTC15M":
                 candle_open = self.metrics.current_15m_candle_open
+                accumulated = None
+                if hasattr(self.metrics, "brti_accumulator"):
+                    self.metrics.brti_accumulator.add_sample(spot, seconds_left, candle_id=close_time_iso)
+                    accumulated = self.metrics.brti_accumulator.get_samples()
+
                 scalp_res = self.engine.evaluate_15m_scalp(
                     spot=spot,
                     open_price=candle_open,
                     seconds_left=seconds_left,
-                    dollar_vol_15m=self.metrics.vol_15m_dollar
+                    dollar_vol_15m=self.metrics.vol_15m_dollar,
+                    accumulated_samples=accumulated
                 )
                 model_prob = scalp_res["prob_yes"]
                 trade_metrics = self.engine.calculate_trade_metrics(model_prob, y_ask, y_bid, n_ask, n_bid)
