@@ -267,10 +267,14 @@ class PaperTradingBot:
         }
 
     def _close_position(self, pos: Dict[str, Any], exit_price: float, reason: str, rationale: str):
-        """Sell position to close early (securing profit or taking stop). Subject to Kalshi taker fee."""
+        """Sell position to close early (securing profit or taking stop). Subject to Kalshi taker fee & adverse slippage."""
         contracts = pos["contracts"]
-        gross_proceeds = contracts * exit_price
-        fees = calculate_kalshi_fee(contracts, exit_price)
+        # Apply adverse slippage haircut to early market exits (selling into bid - slippage)
+        slip = self.slippage_penalty_cents / 100.0
+        fill_exit_price = max(0.01, round(exit_price - slip, 2))
+
+        gross_proceeds = contracts * fill_exit_price
+        fees = calculate_kalshi_fee(contracts, fill_exit_price)
         net_proceeds = gross_proceeds - fees
 
         self.cash += net_proceeds
@@ -283,7 +287,7 @@ class PaperTradingBot:
 
         self.db.record_trade_close(
             trade_id=pos["trade_id"],
-            exit_price=exit_price,
+            exit_price=fill_exit_price,
             exit_reason=reason,
             pnl_dollars=round(pnl, 2),
             pnl_pct=round(pnl_pct, 1)
