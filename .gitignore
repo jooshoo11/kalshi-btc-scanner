@@ -6,4 +6,6 @@ venv/
 *.log
 *.pid
 *.db
+*.csv
 .DS_Store
+
