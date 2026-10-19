@@ -57,7 +57,8 @@ class BitcoinMetricsProvider:
     Pulls spot prices, multi-window realized volatilities, technical indicators,
     and derivatives microstructure from Hyperliquid, Coinbase, and Kraken.
     """
-    def __init__(self):
+    def __init__(self, watchdog: Optional[Any] = None):
+        self.watchdog = watchdog
         self.spot_price: float = 81500.0
         self.coinbase_spot: float = 81500.0
         self.kraken_spot: float = 81500.0
@@ -140,6 +141,8 @@ class BitcoinMetricsProvider:
 
             self.latency_ms = round((time.time() - t0) * 1000.0, 1)
             self.last_update_ts = time.time()
+            if self.watchdog:
+                self.watchdog.record_tick(feed_timestamp=self.last_update_ts, reported_latency_ms=self.latency_ms)
         except Exception as e:
             # print(f"Error updating subsecond spot: {e}")
             pass
@@ -334,7 +337,8 @@ class BitcoinMetricsProvider:
             "brti_mean": round(self.brti_accumulator.get_mean(), 2) if self.brti_accumulator.has_samples() else None,
             "brti_samples_count": len(self.brti_accumulator.samples),
 
-            # Latency & Timestamps
+            # Latency, Timestamps & Watchdog
             "latency_ms": self.latency_ms,
-            "last_update_ts": self.last_update_ts
+            "last_update_ts": self.last_update_ts,
+            "watchdog": self.watchdog.get_status() if self.watchdog else None
         }

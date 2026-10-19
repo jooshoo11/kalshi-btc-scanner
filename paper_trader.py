@@ -16,11 +16,12 @@ class PaperTradingBot:
     - Settlement resolution at expiry
     - Full SQLite audit trail
     """
-    def __init__(self, db: AuditDatabase, initial_balance: float = 50.0):
+    def __init__(self, db: AuditDatabase, initial_balance: float = 50.0, watchdog: Optional[Any] = None):
         self.db = db
         self.initial_balance = initial_balance
         self.cash = initial_balance
         self.open_position: Optional[Dict[str, Any]] = None
+        self.watchdog = watchdog
         
         # Bot Configuration Settings
         self.enabled = True
@@ -159,6 +160,10 @@ class PaperTradingBot:
         # STEP 2: Evaluate New Entry or Re-entry
         # -------------------------------------------------------------
         if not self.enabled:
+            return
+
+        # Check Stale-Tick Watchdog safety circuit breaker
+        if self.watchdog and not self.watchdog.is_safe_to_trade():
             return
 
         # Check re-entry limit & cooldown
@@ -393,5 +398,6 @@ class PaperTradingBot:
                 "max_allocation_pct": self.max_allocation_pct,
                 "min_edge_pct": self.min_edge_pct
             },
+            "watchdog": self.watchdog.get_status() if self.watchdog else None,
             "recent_trades": self.db.get_recent_trades(limit=20)
         }

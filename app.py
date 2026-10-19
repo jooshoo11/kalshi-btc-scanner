@@ -17,13 +17,16 @@ from prediction_engine import QuantPredictionEngine
 from kalshi_btc_scanner import KalshiBitcoinScanner
 from bot_database import AuditDatabase
 from paper_trader import PaperTradingBot
+from live_executor import StaleTickWatchdog, KalshiStateReconciler
 
-# Global instances
-metrics_provider = BitcoinMetricsProvider()
+# Global safety and execution instances
+watchdog = StaleTickWatchdog(max_allowed_delta_ms=1500.0, recovery_threshold_ms=800.0, recovery_ticks=3)
+metrics_provider = BitcoinMetricsProvider(watchdog=watchdog)
 prediction_engine = QuantPredictionEngine(risk_free_rate=0.045, taker_fee_cents=0.5)
 scanner = KalshiBitcoinScanner(metrics_provider, prediction_engine)
 db = AuditDatabase()
-paper_bot = PaperTradingBot(db, initial_balance=50.0)
+paper_bot = PaperTradingBot(db, initial_balance=50.0, watchdog=watchdog)
+startup_reconciliation_report: Dict[str, Any] = {}
 
 async def fast_spot_loop():
     """High-frequency sub-second loop: updates live spot, evaluates paper trading bot."""
@@ -97,6 +100,15 @@ async def technicals_loop():
 
 @asynccontextmanager
 async def lifespan(app):
+    global startup_reconciliation_report
+    # Phase 3: Cold-Boot State Reconciliation with Kalshi
+    try:
+        reconciler = KalshiStateReconciler(dry_run=True)
+        startup_reconciliation_report = await reconciler.reconcile_with_db(db)
+        print(f"[Lifespan] Cold-boot exchange state reconciliation complete: {startup_reconciliation_report.get('status')}")
+    except Exception as e:
+        print(f"[Lifespan] Reconciliation notice: {e}")
+
     # Initial bootstrap
     async with httpx.AsyncClient() as client:
         await metrics_provider.update_subsecond_spot(client)
@@ -260,6 +272,13 @@ async def serve_dashboard(request):
         return HTMLResponse(content)
     return HTMLResponse("<h1>Loading Bitcoin Kalshi Engine...</h1>")
 
+async def get_safety_status(request):
+    """Get Stale-Tick Watchdog and Startup Reconciliation telemetry."""
+    return JSONResponse({
+        "watchdog": watchdog.get_status(),
+        "reconciliation": startup_reconciliation_report
+    })
+
 routes = [
     Route("/", serve_dashboard, methods=["GET"]),
     Route("/api/scan", get_live_scan, methods=["GET"]),
@@ -274,6 +293,7 @@ routes = [
     Route("/api/bot/reset", post_bot_reset, methods=["POST"]),
     Route("/api/audit/export", export_audit_csv, methods=["GET"]),
     Route("/api/audit/history", get_audit_history, methods=["GET"]),
+    Route("/api/safety/status", get_safety_status, methods=["GET"]),
 ]
 
 app = Starlette(
