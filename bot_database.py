@@ -215,3 +215,28 @@ class AuditDatabase:
             for r in rows:
                 writer.writerow(list(r))
             return output.getvalue()
+
+    def get_portfolio_summary_stats(self) -> Dict[str, Any]:
+        """Calculate aggregated portfolio statistics from closed trades."""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_trades,
+                    COALESCE(SUM(pnl_dollars), 0.0) as realized_pnl,
+                    COALESCE(SUM(CASE WHEN pnl_dollars > 0 THEN 1 ELSE 0 END), 0) as winning_trades
+                FROM trades
+                WHERE status = 'CLOSED'
+            """)
+            row = cursor.fetchone()
+            total = row["total_trades"] or 0
+            realized = row["realized_pnl"] or 0.0
+            wins = row["winning_trades"] or 0
+            win_rate = round((wins / total * 100.0), 1) if total > 0 else 0.0
+            return {
+                "total_trades": total,
+                "realized_pnl": round(realized, 2),
+                "winning_trades": wins,
+                "win_rate_pct": win_rate
+            }
+

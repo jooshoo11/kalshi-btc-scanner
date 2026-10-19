@@ -39,6 +39,20 @@ class PaperTradingBot:
         self.winning_trades_count: int = 0
         self.realized_pnl: float = 0.0
 
+        # Restore persistent state from DB if available
+        self._restore_from_db()
+
+    def _restore_from_db(self):
+        try:
+            stats = self.db.get_portfolio_summary_stats()
+            if stats["total_trades"] > 0:
+                self.total_trades_count = stats["total_trades"]
+                self.winning_trades_count = stats["winning_trades"]
+                self.realized_pnl = stats["realized_pnl"]
+                self.cash = round(self.initial_balance + self.realized_pnl, 2)
+        except Exception as e:
+            print(f"[PaperTrader] Error restoring from DB: {e}")
+
     def get_equity(self) -> float:
         """Calculate total current equity: Cash + Position Market Value."""
         if not self.open_position:
