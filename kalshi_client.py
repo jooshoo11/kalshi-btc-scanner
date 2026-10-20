@@ -516,7 +516,14 @@ class AsyncOrderManager:
                 if self.client.auth and self.client.auth.is_configured:
                     headers = self.client.auth.sign_request("GET", "/trade-api/ws/v2")
 
-                async with websockets.connect(self.ws_url, extra_headers=headers, ping_interval=20, ping_timeout=10) as ws:
+                connect_kwargs = {"ping_interval": 20, "ping_timeout": 10}
+                import inspect
+                if "additional_headers" in inspect.signature(websockets.connect).parameters:
+                    connect_kwargs["additional_headers"] = headers
+                else:
+                    connect_kwargs["extra_headers"] = headers
+
+                async with websockets.connect(self.ws_url, **connect_kwargs) as ws:
                     self._ws = ws
                     self._reconnect_delay = 1.0
                     logger.info("[AsyncOrderManager] Connected to Kalshi WebSocket.")
@@ -549,13 +556,21 @@ class AsyncOrderManager:
         await self._ws.send(json.dumps(msg))
         logger.info(f"[AsyncOrderManager] Subscribed to channels for: {tickers}")
 
+    @property
+    def is_ws_connected(self) -> bool:
+        if self._ws is None:
+            return False
+        if hasattr(self._ws, "state"):
+            return getattr(self._ws.state, "name", "") == "OPEN"
+        return getattr(self._ws, "open", not getattr(self._ws, "closed", True))
+
     async def subscribe(self, tickers: List[str] | str):
         ticker_list = [tickers] if isinstance(tickers, str) else tickers
         for t in ticker_list:
             self.subscribed_tickers.add(t)
             self.get_or_create_book(t)
 
-        if self._ws and self._ws.open:
+        if self.is_ws_connected:
             await self._send_subscribe(ticker_list)
 
     async def _handle_ws_message(self, raw_msg: str):

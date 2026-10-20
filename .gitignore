@@ -8,4 +8,6 @@ venv/
 *.db
 *.csv
 .DS_Store
+.env
+*.pem
 

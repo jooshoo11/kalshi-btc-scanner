@@ -241,7 +241,14 @@ class KalshiWebSocketClient:
                 if self.auth and self.auth.is_configured:
                     headers = self.auth.sign_request("GET", "/trade-api/ws/v2")
 
-                async with websockets.connect(self.ws_url, extra_headers=headers, ping_interval=20, ping_timeout=10) as ws:
+                connect_kwargs = {"ping_interval": 20, "ping_timeout": 10}
+                import inspect
+                if "additional_headers" in inspect.signature(websockets.connect).parameters:
+                    connect_kwargs["additional_headers"] = headers
+                else:
+                    connect_kwargs["extra_headers"] = headers
+
+                async with websockets.connect(self.ws_url, **connect_kwargs) as ws:
                     self._ws = ws
                     self._reconnect_delay = 1.0
                     logger.info("Connected to Kalshi WebSocket.")
@@ -276,10 +283,18 @@ class KalshiWebSocketClient:
         await self._ws.send(json.dumps(msg))
         logger.info(f"Subscribed to WebSocket channels for: {tickers}")
 
+    @property
+    def is_ws_connected(self) -> bool:
+        if self._ws is None:
+            return False
+        if hasattr(self._ws, "state"):
+            return getattr(self._ws.state, "name", "") == "OPEN"
+        return getattr(self._ws, "open", not getattr(self._ws, "closed", True))
+
     async def subscribe_ticker(self, ticker: str):
         self.subscribed_tickers.add(ticker)
         self.get_or_create_book(ticker)
-        if self._ws and self._ws.open:
+        if self.is_ws_connected:
             await self._send_subscribe([ticker])
 
     async def _handle_message(self, raw_msg: str):
