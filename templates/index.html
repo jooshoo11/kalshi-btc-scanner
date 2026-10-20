@@ -207,6 +207,10 @@
   <!-- Navigation Tab Bar -->
   <div class="px-4 lg:px-8 border-b border-slate-800 bg-dark-950">
     <div class="max-w-7xl mx-auto flex items-center overflow-x-auto gap-2 py-2.5 scrollbar-none">
+      <button onclick="switchTab('tab-live')" id="btn-tab-live" class="tab-btn px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-rose-300 border border-rose-500/40 bg-rose-500/10 whitespace-nowrap flex items-center gap-1.5 transition">
+        <span class="w-2 h-2 rounded-full bg-rose-400 animate-pulse"></span>
+        🔴 Live Kalshi Demo & OMS
+      </button>
       <button onclick="switchTab('tab-bot')" id="btn-tab-bot" class="tab-btn active px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold whitespace-nowrap flex items-center gap-1.5 transition">
         🤖 15M Trading Bot & Audit
       </button>
@@ -530,6 +534,266 @@
     </section>
 
     <!-- ================================================================= -->
+    <!-- TAB: LIVE KALSHI DEMO EXECUTION & WEBSOCKET OMS                   -->
+    <!-- ================================================================= -->
+    <section id="tab-live" class="space-y-6 hidden">
+      
+      <!-- Live Demo Account & Mode Controller Banner -->
+      <div class="glass-card p-6 rounded-2xl relative overflow-hidden border border-rose-500/20">
+        <div class="absolute -top-24 -right-24 w-80 h-80 bg-rose-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+        <div class="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-800">
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="px-2.5 py-0.5 rounded bg-rose-500/20 text-rose-300 text-xs font-mono font-bold border border-rose-500/40 flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-rose-400 animate-pulse"></span>
+                LIVE KALSHI DEMO ENVIRONMENT
+              </span>
+              <span id="liveExecutionModeBadge" class="px-2.5 py-0.5 rounded bg-slate-800 text-slate-300 text-xs font-mono font-bold">
+                PAPER MODE (SAFE)
+              </span>
+            </div>
+            <h2 class="text-xl font-black text-white mt-1">Kalshi V2 WebSocket OMS & Live Scalper</h2>
+            <p class="text-xs text-slate-400 mt-0.5">Direct execution against <span class="font-mono text-slate-300">demo-api.kalshi.co</span> with microsecond L2 book sweeps and cold-boot safety state reconciliation.</p>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2">
+            <button onclick="toggleLiveExecutionMode()" id="liveModeToggleBtn" class="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-mono text-xs font-black transition flex items-center gap-1.5 shadow-lg shadow-emerald-500/20">
+              ⚡ Arm Live Demo Execution
+            </button>
+            <button onclick="triggerLiveReconcile()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono text-xs font-bold transition flex items-center gap-1">
+              🔄 Cold-Boot Reconcile
+            </button>
+            <button onclick="refreshLiveBalance()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono text-xs font-bold transition flex items-center gap-1">
+              💰 Sync Balance
+            </button>
+            <button onclick="cancelAllLiveOrders()" class="px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 font-mono text-xs font-bold transition">
+              🛑 Cancel All Resting
+            </button>
+          </div>
+        </div>
+
+        <!-- Live Demo KPI Cards -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-6 font-mono text-xs">
+          
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Demo Account Balance</span>
+            <div id="liveDemoCashVal" class="text-xl font-black text-emerald-400 mt-1">$50.00</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">Live On-Exchange</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">API Key ID</span>
+            <div id="liveApiKeyVal" class="text-xs font-black text-slate-200 mt-2 truncate">2b92736a...</div>
+            <div class="text-[10px] text-emerald-400 mt-0.5">RSA-PSS Verified</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">WebSocket V2</span>
+            <div id="liveWsStatusVal" class="text-sm font-black text-emerald-400 mt-1.5 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              STREAMING
+            </div>
+            <div class="text-[10px] text-slate-500 mt-0.5">orderbook_delta</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Watchdog Latency</span>
+            <div id="liveWatchdogLatencyVal" class="text-lg font-black text-cyan-400 mt-1">-- ms</div>
+            <div id="liveWatchdogStatusVal" class="text-[10px] text-emerald-400 mt-0.5">HEALTHY (&lt;1500ms)</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Active Contract</span>
+            <div id="liveActiveTickerVal" class="text-xs font-bold text-amber-400 mt-2 truncate">KXBTC15M...</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">15-Minute Scalp</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">State Discrepancies</span>
+            <div id="liveDiscrepanciesVal" class="text-lg font-black text-slate-300 mt-1">0</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">100% In Sync</div>
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- Main Live Grid: L2 Depth Ladder (Left) + OMS Execution & BRTI Accumulator (Right) -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        
+        <!-- LEFT: Real-Time L2 Order Book Depth Ladder -->
+        <div class="glass-card p-6 rounded-2xl flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800 font-mono">
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-bold text-white flex items-center gap-2">
+                  <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                  L2 Order Book Depth
+                </span>
+                <span id="liveBookTickerBadge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-amber-400 font-bold">
+                  KXBTC15M
+                </span>
+              </div>
+              <div class="text-xs text-slate-400">
+                Top of Book: <span id="liveTopBookDisplay" class="text-white font-bold">--¢ / --¢</span>
+              </div>
+            </div>
+
+            <!-- Asks (Red / Sell Side) -->
+            <div class="mt-4 space-y-1 font-mono text-xs">
+              <div class="text-[10px] uppercase tracking-wider text-rose-400/80 font-bold flex justify-between px-2 pb-1">
+                <span>Ask Price</span>
+                <span>Contracts Depth</span>
+              </div>
+              <div id="liveL2AsksContainer" class="space-y-1">
+                <div class="text-slate-500 text-center py-3 text-xs">Listening for WebSocket orderbook_delta...</div>
+              </div>
+            </div>
+
+            <!-- Spread Indicator Bar -->
+            <div class="my-3 py-1.5 px-3 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center justify-between font-mono text-xs text-slate-300">
+              <span class="text-slate-500">SPREAD: <span id="liveSpreadCents" class="text-amber-400 font-bold">--¢</span></span>
+              <span class="text-slate-500">MID: <span id="liveMidCents" class="text-white font-bold">--¢</span></span>
+              <span class="text-[10px] text-emerald-400 font-semibold">Taker Fee: ~0.5¢ - 1.8¢</span>
+            </div>
+
+            <!-- Bids (Green / Buy Side) -->
+            <div class="space-y-1 font-mono text-xs">
+              <div id="liveL2BidsContainer" class="space-y-1">
+                <div class="text-slate-500 text-center py-3 text-xs">Listening for WebSocket orderbook_delta...</div>
+              </div>
+              <div class="text-[10px] uppercase tracking-wider text-emerald-400/80 font-bold flex justify-between px-2 pt-1">
+                <span>Bid Price</span>
+                <span>Contracts Depth</span>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Interactive Sweep VWAP Simulator -->
+          <div class="mt-6 pt-4 border-t border-slate-800/80 font-mono text-xs">
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-bold text-white flex items-center gap-1.5">
+                🎯 Sweep VWAP Depth Calculator
+              </span>
+              <div class="flex items-center gap-1.5 text-slate-400">
+                <span>Size:</span>
+                <input type="number" id="sweepSizeInput" min="1" max="100" value="10" oninput="calculateVwapPreview()" class="w-14 px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-white font-bold text-center">
+                <span>contracts</span>
+              </div>
+            </div>
+            <div class="grid grid-cols-3 gap-2 p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Theoretical VWAP</span>
+                <span id="sweepCalcVwap" class="text-base font-black text-cyan-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Worst Cap Price</span>
+                <span id="sweepCalcCap" class="text-base font-black text-amber-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Taker Fee</span>
+                <span id="sweepCalcFee" class="text-base font-black text-slate-300">$0.00</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- RIGHT: Execution Telemetry, BRTI Accumulator & Reconciliation Audit -->
+        <div class="space-y-6">
+          
+          <!-- BRTI 60-Second Accumulator Card -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-purple-400"></span>
+                <h3 class="text-sm font-bold text-white">CF Benchmarks BRTI 60s Accumulator</h3>
+              </div>
+              <span id="brtiStatusBadge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-bold">
+                STANDBY (T &gt; 60s)
+              </span>
+            </div>
+
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">1s Samples</span>
+                <span id="brtiSamplesCount" class="text-base font-black text-purple-400">0 / 60</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Settlement Mean</span>
+                <span id="brtiSettleMean" class="text-base font-black text-white">$0.00</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Sigma (Decay)</span>
+                <span id="brtiSigmaVal" class="text-base font-black text-cyan-400">$0.00</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Variance Loss</span>
+                <span id="brtiVarLossVal" class="text-base font-black text-emerald-400">--%</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-400 mt-3 font-sans">
+              During the final 60 seconds, KXBTC15M settles on the simple arithmetic average of 60 1-second ticks. Variance collapses at a cubic rate, allowing the prediction engine to execute high-conviction sniper fills.
+            </p>
+          </div>
+
+          <!-- Stale-Tick Watchdog & Circuit Breaker Telemetry -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                <h3 class="text-sm font-bold text-white">Stale-Tick Watchdog & Circuit Breakers</h3>
+              </div>
+              <span id="watchdogStateBadge" class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30">
+                OPERATIONAL
+              </span>
+            </div>
+
+            <div class="space-y-2 mt-4 text-xs">
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Market Data Latency (Delta):</span>
+                <span id="watchdogDeltaDisplay" class="font-bold text-cyan-400">0.0 ms</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Safety Ceiling (Auto-Halt):</span>
+                <span class="font-bold text-slate-300">1,500 ms</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Recovery Threshold:</span>
+                <span class="font-bold text-emerald-400">&lt; 800 ms (3 consecutive ticks)</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Total Circuit Breaker Halts:</span>
+                <span id="watchdogHaltsCount" class="font-bold text-slate-300">0</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Cold-Boot Reconciliation Audit Log -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+                <h3 class="text-sm font-bold text-white">Cold-Boot State Reconciliation Log</h3>
+              </div>
+              <span class="text-[10px] text-slate-400 font-sans">Synced on boot</span>
+            </div>
+            <div id="reconcileLogContainer" class="mt-3 space-y-1.5 max-h-40 overflow-y-auto pr-1">
+              <div class="p-2 rounded bg-slate-900 border border-slate-800 text-[11px] text-slate-400">
+                No discrepancies found. Local SQLite state and Kalshi demo exchange are in sync.
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+
+    </section>
+
+    <!-- ================================================================= -->
     <!-- TAB 1: 15-MINUTE SCALP SNIPER (KXBTC15M)                          -->
     <!-- ================================================================= -->
     <section id="tab-scalp" class="hidden space-y-6">
@@ -641,6 +905,266 @@
     </section>
 
     <!-- ================================================================= -->
+    <!-- TAB: LIVE KALSHI DEMO EXECUTION & WEBSOCKET OMS                   -->
+    <!-- ================================================================= -->
+    <section id="tab-live" class="space-y-6 hidden">
+      
+      <!-- Live Demo Account & Mode Controller Banner -->
+      <div class="glass-card p-6 rounded-2xl relative overflow-hidden border border-rose-500/20">
+        <div class="absolute -top-24 -right-24 w-80 h-80 bg-rose-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+        <div class="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-800">
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="px-2.5 py-0.5 rounded bg-rose-500/20 text-rose-300 text-xs font-mono font-bold border border-rose-500/40 flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-rose-400 animate-pulse"></span>
+                LIVE KALSHI DEMO ENVIRONMENT
+              </span>
+              <span id="liveExecutionModeBadge" class="px-2.5 py-0.5 rounded bg-slate-800 text-slate-300 text-xs font-mono font-bold">
+                PAPER MODE (SAFE)
+              </span>
+            </div>
+            <h2 class="text-xl font-black text-white mt-1">Kalshi V2 WebSocket OMS & Live Scalper</h2>
+            <p class="text-xs text-slate-400 mt-0.5">Direct execution against <span class="font-mono text-slate-300">demo-api.kalshi.co</span> with microsecond L2 book sweeps and cold-boot safety state reconciliation.</p>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2">
+            <button onclick="toggleLiveExecutionMode()" id="liveModeToggleBtn" class="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-mono text-xs font-black transition flex items-center gap-1.5 shadow-lg shadow-emerald-500/20">
+              ⚡ Arm Live Demo Execution
+            </button>
+            <button onclick="triggerLiveReconcile()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono text-xs font-bold transition flex items-center gap-1">
+              🔄 Cold-Boot Reconcile
+            </button>
+            <button onclick="refreshLiveBalance()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono text-xs font-bold transition flex items-center gap-1">
+              💰 Sync Balance
+            </button>
+            <button onclick="cancelAllLiveOrders()" class="px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 font-mono text-xs font-bold transition">
+              🛑 Cancel All Resting
+            </button>
+          </div>
+        </div>
+
+        <!-- Live Demo KPI Cards -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-6 font-mono text-xs">
+          
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Demo Account Balance</span>
+            <div id="liveDemoCashVal" class="text-xl font-black text-emerald-400 mt-1">$50.00</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">Live On-Exchange</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">API Key ID</span>
+            <div id="liveApiKeyVal" class="text-xs font-black text-slate-200 mt-2 truncate">2b92736a...</div>
+            <div class="text-[10px] text-emerald-400 mt-0.5">RSA-PSS Verified</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">WebSocket V2</span>
+            <div id="liveWsStatusVal" class="text-sm font-black text-emerald-400 mt-1.5 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              STREAMING
+            </div>
+            <div class="text-[10px] text-slate-500 mt-0.5">orderbook_delta</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Watchdog Latency</span>
+            <div id="liveWatchdogLatencyVal" class="text-lg font-black text-cyan-400 mt-1">-- ms</div>
+            <div id="liveWatchdogStatusVal" class="text-[10px] text-emerald-400 mt-0.5">HEALTHY (&lt;1500ms)</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Active Contract</span>
+            <div id="liveActiveTickerVal" class="text-xs font-bold text-amber-400 mt-2 truncate">KXBTC15M...</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">15-Minute Scalp</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">State Discrepancies</span>
+            <div id="liveDiscrepanciesVal" class="text-lg font-black text-slate-300 mt-1">0</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">100% In Sync</div>
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- Main Live Grid: L2 Depth Ladder (Left) + OMS Execution & BRTI Accumulator (Right) -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        
+        <!-- LEFT: Real-Time L2 Order Book Depth Ladder -->
+        <div class="glass-card p-6 rounded-2xl flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800 font-mono">
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-bold text-white flex items-center gap-2">
+                  <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                  L2 Order Book Depth
+                </span>
+                <span id="liveBookTickerBadge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-amber-400 font-bold">
+                  KXBTC15M
+                </span>
+              </div>
+              <div class="text-xs text-slate-400">
+                Top of Book: <span id="liveTopBookDisplay" class="text-white font-bold">--¢ / --¢</span>
+              </div>
+            </div>
+
+            <!-- Asks (Red / Sell Side) -->
+            <div class="mt-4 space-y-1 font-mono text-xs">
+              <div class="text-[10px] uppercase tracking-wider text-rose-400/80 font-bold flex justify-between px-2 pb-1">
+                <span>Ask Price</span>
+                <span>Contracts Depth</span>
+              </div>
+              <div id="liveL2AsksContainer" class="space-y-1">
+                <div class="text-slate-500 text-center py-3 text-xs">Listening for WebSocket orderbook_delta...</div>
+              </div>
+            </div>
+
+            <!-- Spread Indicator Bar -->
+            <div class="my-3 py-1.5 px-3 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center justify-between font-mono text-xs text-slate-300">
+              <span class="text-slate-500">SPREAD: <span id="liveSpreadCents" class="text-amber-400 font-bold">--¢</span></span>
+              <span class="text-slate-500">MID: <span id="liveMidCents" class="text-white font-bold">--¢</span></span>
+              <span class="text-[10px] text-emerald-400 font-semibold">Taker Fee: ~0.5¢ - 1.8¢</span>
+            </div>
+
+            <!-- Bids (Green / Buy Side) -->
+            <div class="space-y-1 font-mono text-xs">
+              <div id="liveL2BidsContainer" class="space-y-1">
+                <div class="text-slate-500 text-center py-3 text-xs">Listening for WebSocket orderbook_delta...</div>
+              </div>
+              <div class="text-[10px] uppercase tracking-wider text-emerald-400/80 font-bold flex justify-between px-2 pt-1">
+                <span>Bid Price</span>
+                <span>Contracts Depth</span>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Interactive Sweep VWAP Simulator -->
+          <div class="mt-6 pt-4 border-t border-slate-800/80 font-mono text-xs">
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-bold text-white flex items-center gap-1.5">
+                🎯 Sweep VWAP Depth Calculator
+              </span>
+              <div class="flex items-center gap-1.5 text-slate-400">
+                <span>Size:</span>
+                <input type="number" id="sweepSizeInput" min="1" max="100" value="10" oninput="calculateVwapPreview()" class="w-14 px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-white font-bold text-center">
+                <span>contracts</span>
+              </div>
+            </div>
+            <div class="grid grid-cols-3 gap-2 p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Theoretical VWAP</span>
+                <span id="sweepCalcVwap" class="text-base font-black text-cyan-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Worst Cap Price</span>
+                <span id="sweepCalcCap" class="text-base font-black text-amber-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Taker Fee</span>
+                <span id="sweepCalcFee" class="text-base font-black text-slate-300">$0.00</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- RIGHT: Execution Telemetry, BRTI Accumulator & Reconciliation Audit -->
+        <div class="space-y-6">
+          
+          <!-- BRTI 60-Second Accumulator Card -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-purple-400"></span>
+                <h3 class="text-sm font-bold text-white">CF Benchmarks BRTI 60s Accumulator</h3>
+              </div>
+              <span id="brtiStatusBadge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-bold">
+                STANDBY (T &gt; 60s)
+              </span>
+            </div>
+
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">1s Samples</span>
+                <span id="brtiSamplesCount" class="text-base font-black text-purple-400">0 / 60</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Settlement Mean</span>
+                <span id="brtiSettleMean" class="text-base font-black text-white">$0.00</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Sigma (Decay)</span>
+                <span id="brtiSigmaVal" class="text-base font-black text-cyan-400">$0.00</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Variance Loss</span>
+                <span id="brtiVarLossVal" class="text-base font-black text-emerald-400">--%</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-400 mt-3 font-sans">
+              During the final 60 seconds, KXBTC15M settles on the simple arithmetic average of 60 1-second ticks. Variance collapses at a cubic rate, allowing the prediction engine to execute high-conviction sniper fills.
+            </p>
+          </div>
+
+          <!-- Stale-Tick Watchdog & Circuit Breaker Telemetry -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                <h3 class="text-sm font-bold text-white">Stale-Tick Watchdog & Circuit Breakers</h3>
+              </div>
+              <span id="watchdogStateBadge" class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30">
+                OPERATIONAL
+              </span>
+            </div>
+
+            <div class="space-y-2 mt-4 text-xs">
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Market Data Latency (Delta):</span>
+                <span id="watchdogDeltaDisplay" class="font-bold text-cyan-400">0.0 ms</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Safety Ceiling (Auto-Halt):</span>
+                <span class="font-bold text-slate-300">1,500 ms</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Recovery Threshold:</span>
+                <span class="font-bold text-emerald-400">&lt; 800 ms (3 consecutive ticks)</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Total Circuit Breaker Halts:</span>
+                <span id="watchdogHaltsCount" class="font-bold text-slate-300">0</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Cold-Boot Reconciliation Audit Log -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+                <h3 class="text-sm font-bold text-white">Cold-Boot State Reconciliation Log</h3>
+              </div>
+              <span class="text-[10px] text-slate-400 font-sans">Synced on boot</span>
+            </div>
+            <div id="reconcileLogContainer" class="mt-3 space-y-1.5 max-h-40 overflow-y-auto pr-1">
+              <div class="p-2 rounded bg-slate-900 border border-slate-800 text-[11px] text-slate-400">
+                No discrepancies found. Local SQLite state and Kalshi demo exchange are in sync.
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+
+    </section>
+
+    <!-- ================================================================= -->
     <!-- TAB 2: TOP +EV & MISPRICING RADAR                                 -->
     <!-- ================================================================= -->
     <section id="tab-radar" class="hidden space-y-4">
@@ -667,6 +1191,266 @@
           Scanning all 600+ Kalshi Bitcoin contracts...
         </div>
       </div>
+    </section>
+
+    <!-- ================================================================= -->
+    <!-- TAB: LIVE KALSHI DEMO EXECUTION & WEBSOCKET OMS                   -->
+    <!-- ================================================================= -->
+    <section id="tab-live" class="space-y-6 hidden">
+      
+      <!-- Live Demo Account & Mode Controller Banner -->
+      <div class="glass-card p-6 rounded-2xl relative overflow-hidden border border-rose-500/20">
+        <div class="absolute -top-24 -right-24 w-80 h-80 bg-rose-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+        <div class="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-800">
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="px-2.5 py-0.5 rounded bg-rose-500/20 text-rose-300 text-xs font-mono font-bold border border-rose-500/40 flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-rose-400 animate-pulse"></span>
+                LIVE KALSHI DEMO ENVIRONMENT
+              </span>
+              <span id="liveExecutionModeBadge" class="px-2.5 py-0.5 rounded bg-slate-800 text-slate-300 text-xs font-mono font-bold">
+                PAPER MODE (SAFE)
+              </span>
+            </div>
+            <h2 class="text-xl font-black text-white mt-1">Kalshi V2 WebSocket OMS & Live Scalper</h2>
+            <p class="text-xs text-slate-400 mt-0.5">Direct execution against <span class="font-mono text-slate-300">demo-api.kalshi.co</span> with microsecond L2 book sweeps and cold-boot safety state reconciliation.</p>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2">
+            <button onclick="toggleLiveExecutionMode()" id="liveModeToggleBtn" class="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-mono text-xs font-black transition flex items-center gap-1.5 shadow-lg shadow-emerald-500/20">
+              ⚡ Arm Live Demo Execution
+            </button>
+            <button onclick="triggerLiveReconcile()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono text-xs font-bold transition flex items-center gap-1">
+              🔄 Cold-Boot Reconcile
+            </button>
+            <button onclick="refreshLiveBalance()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono text-xs font-bold transition flex items-center gap-1">
+              💰 Sync Balance
+            </button>
+            <button onclick="cancelAllLiveOrders()" class="px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 font-mono text-xs font-bold transition">
+              🛑 Cancel All Resting
+            </button>
+          </div>
+        </div>
+
+        <!-- Live Demo KPI Cards -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-6 font-mono text-xs">
+          
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Demo Account Balance</span>
+            <div id="liveDemoCashVal" class="text-xl font-black text-emerald-400 mt-1">$50.00</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">Live On-Exchange</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">API Key ID</span>
+            <div id="liveApiKeyVal" class="text-xs font-black text-slate-200 mt-2 truncate">2b92736a...</div>
+            <div class="text-[10px] text-emerald-400 mt-0.5">RSA-PSS Verified</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">WebSocket V2</span>
+            <div id="liveWsStatusVal" class="text-sm font-black text-emerald-400 mt-1.5 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              STREAMING
+            </div>
+            <div class="text-[10px] text-slate-500 mt-0.5">orderbook_delta</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Watchdog Latency</span>
+            <div id="liveWatchdogLatencyVal" class="text-lg font-black text-cyan-400 mt-1">-- ms</div>
+            <div id="liveWatchdogStatusVal" class="text-[10px] text-emerald-400 mt-0.5">HEALTHY (&lt;1500ms)</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Active Contract</span>
+            <div id="liveActiveTickerVal" class="text-xs font-bold text-amber-400 mt-2 truncate">KXBTC15M...</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">15-Minute Scalp</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">State Discrepancies</span>
+            <div id="liveDiscrepanciesVal" class="text-lg font-black text-slate-300 mt-1">0</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">100% In Sync</div>
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- Main Live Grid: L2 Depth Ladder (Left) + OMS Execution & BRTI Accumulator (Right) -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        
+        <!-- LEFT: Real-Time L2 Order Book Depth Ladder -->
+        <div class="glass-card p-6 rounded-2xl flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800 font-mono">
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-bold text-white flex items-center gap-2">
+                  <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                  L2 Order Book Depth
+                </span>
+                <span id="liveBookTickerBadge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-amber-400 font-bold">
+                  KXBTC15M
+                </span>
+              </div>
+              <div class="text-xs text-slate-400">
+                Top of Book: <span id="liveTopBookDisplay" class="text-white font-bold">--¢ / --¢</span>
+              </div>
+            </div>
+
+            <!-- Asks (Red / Sell Side) -->
+            <div class="mt-4 space-y-1 font-mono text-xs">
+              <div class="text-[10px] uppercase tracking-wider text-rose-400/80 font-bold flex justify-between px-2 pb-1">
+                <span>Ask Price</span>
+                <span>Contracts Depth</span>
+              </div>
+              <div id="liveL2AsksContainer" class="space-y-1">
+                <div class="text-slate-500 text-center py-3 text-xs">Listening for WebSocket orderbook_delta...</div>
+              </div>
+            </div>
+
+            <!-- Spread Indicator Bar -->
+            <div class="my-3 py-1.5 px-3 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center justify-between font-mono text-xs text-slate-300">
+              <span class="text-slate-500">SPREAD: <span id="liveSpreadCents" class="text-amber-400 font-bold">--¢</span></span>
+              <span class="text-slate-500">MID: <span id="liveMidCents" class="text-white font-bold">--¢</span></span>
+              <span class="text-[10px] text-emerald-400 font-semibold">Taker Fee: ~0.5¢ - 1.8¢</span>
+            </div>
+
+            <!-- Bids (Green / Buy Side) -->
+            <div class="space-y-1 font-mono text-xs">
+              <div id="liveL2BidsContainer" class="space-y-1">
+                <div class="text-slate-500 text-center py-3 text-xs">Listening for WebSocket orderbook_delta...</div>
+              </div>
+              <div class="text-[10px] uppercase tracking-wider text-emerald-400/80 font-bold flex justify-between px-2 pt-1">
+                <span>Bid Price</span>
+                <span>Contracts Depth</span>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Interactive Sweep VWAP Simulator -->
+          <div class="mt-6 pt-4 border-t border-slate-800/80 font-mono text-xs">
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-bold text-white flex items-center gap-1.5">
+                🎯 Sweep VWAP Depth Calculator
+              </span>
+              <div class="flex items-center gap-1.5 text-slate-400">
+                <span>Size:</span>
+                <input type="number" id="sweepSizeInput" min="1" max="100" value="10" oninput="calculateVwapPreview()" class="w-14 px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-white font-bold text-center">
+                <span>contracts</span>
+              </div>
+            </div>
+            <div class="grid grid-cols-3 gap-2 p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Theoretical VWAP</span>
+                <span id="sweepCalcVwap" class="text-base font-black text-cyan-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Worst Cap Price</span>
+                <span id="sweepCalcCap" class="text-base font-black text-amber-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Taker Fee</span>
+                <span id="sweepCalcFee" class="text-base font-black text-slate-300">$0.00</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- RIGHT: Execution Telemetry, BRTI Accumulator & Reconciliation Audit -->
+        <div class="space-y-6">
+          
+          <!-- BRTI 60-Second Accumulator Card -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-purple-400"></span>
+                <h3 class="text-sm font-bold text-white">CF Benchmarks BRTI 60s Accumulator</h3>
+              </div>
+              <span id="brtiStatusBadge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-bold">
+                STANDBY (T &gt; 60s)
+              </span>
+            </div>
+
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">1s Samples</span>
+                <span id="brtiSamplesCount" class="text-base font-black text-purple-400">0 / 60</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Settlement Mean</span>
+                <span id="brtiSettleMean" class="text-base font-black text-white">$0.00</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Sigma (Decay)</span>
+                <span id="brtiSigmaVal" class="text-base font-black text-cyan-400">$0.00</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Variance Loss</span>
+                <span id="brtiVarLossVal" class="text-base font-black text-emerald-400">--%</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-400 mt-3 font-sans">
+              During the final 60 seconds, KXBTC15M settles on the simple arithmetic average of 60 1-second ticks. Variance collapses at a cubic rate, allowing the prediction engine to execute high-conviction sniper fills.
+            </p>
+          </div>
+
+          <!-- Stale-Tick Watchdog & Circuit Breaker Telemetry -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                <h3 class="text-sm font-bold text-white">Stale-Tick Watchdog & Circuit Breakers</h3>
+              </div>
+              <span id="watchdogStateBadge" class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30">
+                OPERATIONAL
+              </span>
+            </div>
+
+            <div class="space-y-2 mt-4 text-xs">
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Market Data Latency (Delta):</span>
+                <span id="watchdogDeltaDisplay" class="font-bold text-cyan-400">0.0 ms</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Safety Ceiling (Auto-Halt):</span>
+                <span class="font-bold text-slate-300">1,500 ms</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Recovery Threshold:</span>
+                <span class="font-bold text-emerald-400">&lt; 800 ms (3 consecutive ticks)</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Total Circuit Breaker Halts:</span>
+                <span id="watchdogHaltsCount" class="font-bold text-slate-300">0</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Cold-Boot Reconciliation Audit Log -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+                <h3 class="text-sm font-bold text-white">Cold-Boot State Reconciliation Log</h3>
+              </div>
+              <span class="text-[10px] text-slate-400 font-sans">Synced on boot</span>
+            </div>
+            <div id="reconcileLogContainer" class="mt-3 space-y-1.5 max-h-40 overflow-y-auto pr-1">
+              <div class="p-2 rounded bg-slate-900 border border-slate-800 text-[11px] text-slate-400">
+                No discrepancies found. Local SQLite state and Kalshi demo exchange are in sync.
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+
     </section>
 
     <!-- ================================================================= -->
@@ -748,6 +1532,266 @@
     </section>
 
     <!-- ================================================================= -->
+    <!-- TAB: LIVE KALSHI DEMO EXECUTION & WEBSOCKET OMS                   -->
+    <!-- ================================================================= -->
+    <section id="tab-live" class="space-y-6 hidden">
+      
+      <!-- Live Demo Account & Mode Controller Banner -->
+      <div class="glass-card p-6 rounded-2xl relative overflow-hidden border border-rose-500/20">
+        <div class="absolute -top-24 -right-24 w-80 h-80 bg-rose-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+        <div class="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-800">
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="px-2.5 py-0.5 rounded bg-rose-500/20 text-rose-300 text-xs font-mono font-bold border border-rose-500/40 flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-rose-400 animate-pulse"></span>
+                LIVE KALSHI DEMO ENVIRONMENT
+              </span>
+              <span id="liveExecutionModeBadge" class="px-2.5 py-0.5 rounded bg-slate-800 text-slate-300 text-xs font-mono font-bold">
+                PAPER MODE (SAFE)
+              </span>
+            </div>
+            <h2 class="text-xl font-black text-white mt-1">Kalshi V2 WebSocket OMS & Live Scalper</h2>
+            <p class="text-xs text-slate-400 mt-0.5">Direct execution against <span class="font-mono text-slate-300">demo-api.kalshi.co</span> with microsecond L2 book sweeps and cold-boot safety state reconciliation.</p>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2">
+            <button onclick="toggleLiveExecutionMode()" id="liveModeToggleBtn" class="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-mono text-xs font-black transition flex items-center gap-1.5 shadow-lg shadow-emerald-500/20">
+              ⚡ Arm Live Demo Execution
+            </button>
+            <button onclick="triggerLiveReconcile()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono text-xs font-bold transition flex items-center gap-1">
+              🔄 Cold-Boot Reconcile
+            </button>
+            <button onclick="refreshLiveBalance()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono text-xs font-bold transition flex items-center gap-1">
+              💰 Sync Balance
+            </button>
+            <button onclick="cancelAllLiveOrders()" class="px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 font-mono text-xs font-bold transition">
+              🛑 Cancel All Resting
+            </button>
+          </div>
+        </div>
+
+        <!-- Live Demo KPI Cards -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-6 font-mono text-xs">
+          
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Demo Account Balance</span>
+            <div id="liveDemoCashVal" class="text-xl font-black text-emerald-400 mt-1">$50.00</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">Live On-Exchange</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">API Key ID</span>
+            <div id="liveApiKeyVal" class="text-xs font-black text-slate-200 mt-2 truncate">2b92736a...</div>
+            <div class="text-[10px] text-emerald-400 mt-0.5">RSA-PSS Verified</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">WebSocket V2</span>
+            <div id="liveWsStatusVal" class="text-sm font-black text-emerald-400 mt-1.5 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              STREAMING
+            </div>
+            <div class="text-[10px] text-slate-500 mt-0.5">orderbook_delta</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Watchdog Latency</span>
+            <div id="liveWatchdogLatencyVal" class="text-lg font-black text-cyan-400 mt-1">-- ms</div>
+            <div id="liveWatchdogStatusVal" class="text-[10px] text-emerald-400 mt-0.5">HEALTHY (&lt;1500ms)</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Active Contract</span>
+            <div id="liveActiveTickerVal" class="text-xs font-bold text-amber-400 mt-2 truncate">KXBTC15M...</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">15-Minute Scalp</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">State Discrepancies</span>
+            <div id="liveDiscrepanciesVal" class="text-lg font-black text-slate-300 mt-1">0</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">100% In Sync</div>
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- Main Live Grid: L2 Depth Ladder (Left) + OMS Execution & BRTI Accumulator (Right) -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        
+        <!-- LEFT: Real-Time L2 Order Book Depth Ladder -->
+        <div class="glass-card p-6 rounded-2xl flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800 font-mono">
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-bold text-white flex items-center gap-2">
+                  <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                  L2 Order Book Depth
+                </span>
+                <span id="liveBookTickerBadge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-amber-400 font-bold">
+                  KXBTC15M
+                </span>
+              </div>
+              <div class="text-xs text-slate-400">
+                Top of Book: <span id="liveTopBookDisplay" class="text-white font-bold">--¢ / --¢</span>
+              </div>
+            </div>
+
+            <!-- Asks (Red / Sell Side) -->
+            <div class="mt-4 space-y-1 font-mono text-xs">
+              <div class="text-[10px] uppercase tracking-wider text-rose-400/80 font-bold flex justify-between px-2 pb-1">
+                <span>Ask Price</span>
+                <span>Contracts Depth</span>
+              </div>
+              <div id="liveL2AsksContainer" class="space-y-1">
+                <div class="text-slate-500 text-center py-3 text-xs">Listening for WebSocket orderbook_delta...</div>
+              </div>
+            </div>
+
+            <!-- Spread Indicator Bar -->
+            <div class="my-3 py-1.5 px-3 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center justify-between font-mono text-xs text-slate-300">
+              <span class="text-slate-500">SPREAD: <span id="liveSpreadCents" class="text-amber-400 font-bold">--¢</span></span>
+              <span class="text-slate-500">MID: <span id="liveMidCents" class="text-white font-bold">--¢</span></span>
+              <span class="text-[10px] text-emerald-400 font-semibold">Taker Fee: ~0.5¢ - 1.8¢</span>
+            </div>
+
+            <!-- Bids (Green / Buy Side) -->
+            <div class="space-y-1 font-mono text-xs">
+              <div id="liveL2BidsContainer" class="space-y-1">
+                <div class="text-slate-500 text-center py-3 text-xs">Listening for WebSocket orderbook_delta...</div>
+              </div>
+              <div class="text-[10px] uppercase tracking-wider text-emerald-400/80 font-bold flex justify-between px-2 pt-1">
+                <span>Bid Price</span>
+                <span>Contracts Depth</span>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Interactive Sweep VWAP Simulator -->
+          <div class="mt-6 pt-4 border-t border-slate-800/80 font-mono text-xs">
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-bold text-white flex items-center gap-1.5">
+                🎯 Sweep VWAP Depth Calculator
+              </span>
+              <div class="flex items-center gap-1.5 text-slate-400">
+                <span>Size:</span>
+                <input type="number" id="sweepSizeInput" min="1" max="100" value="10" oninput="calculateVwapPreview()" class="w-14 px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-white font-bold text-center">
+                <span>contracts</span>
+              </div>
+            </div>
+            <div class="grid grid-cols-3 gap-2 p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Theoretical VWAP</span>
+                <span id="sweepCalcVwap" class="text-base font-black text-cyan-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Worst Cap Price</span>
+                <span id="sweepCalcCap" class="text-base font-black text-amber-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Taker Fee</span>
+                <span id="sweepCalcFee" class="text-base font-black text-slate-300">$0.00</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- RIGHT: Execution Telemetry, BRTI Accumulator & Reconciliation Audit -->
+        <div class="space-y-6">
+          
+          <!-- BRTI 60-Second Accumulator Card -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-purple-400"></span>
+                <h3 class="text-sm font-bold text-white">CF Benchmarks BRTI 60s Accumulator</h3>
+              </div>
+              <span id="brtiStatusBadge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-bold">
+                STANDBY (T &gt; 60s)
+              </span>
+            </div>
+
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">1s Samples</span>
+                <span id="brtiSamplesCount" class="text-base font-black text-purple-400">0 / 60</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Settlement Mean</span>
+                <span id="brtiSettleMean" class="text-base font-black text-white">$0.00</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Sigma (Decay)</span>
+                <span id="brtiSigmaVal" class="text-base font-black text-cyan-400">$0.00</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Variance Loss</span>
+                <span id="brtiVarLossVal" class="text-base font-black text-emerald-400">--%</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-400 mt-3 font-sans">
+              During the final 60 seconds, KXBTC15M settles on the simple arithmetic average of 60 1-second ticks. Variance collapses at a cubic rate, allowing the prediction engine to execute high-conviction sniper fills.
+            </p>
+          </div>
+
+          <!-- Stale-Tick Watchdog & Circuit Breaker Telemetry -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                <h3 class="text-sm font-bold text-white">Stale-Tick Watchdog & Circuit Breakers</h3>
+              </div>
+              <span id="watchdogStateBadge" class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30">
+                OPERATIONAL
+              </span>
+            </div>
+
+            <div class="space-y-2 mt-4 text-xs">
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Market Data Latency (Delta):</span>
+                <span id="watchdogDeltaDisplay" class="font-bold text-cyan-400">0.0 ms</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Safety Ceiling (Auto-Halt):</span>
+                <span class="font-bold text-slate-300">1,500 ms</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Recovery Threshold:</span>
+                <span class="font-bold text-emerald-400">&lt; 800 ms (3 consecutive ticks)</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Total Circuit Breaker Halts:</span>
+                <span id="watchdogHaltsCount" class="font-bold text-slate-300">0</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Cold-Boot Reconciliation Audit Log -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+                <h3 class="text-sm font-bold text-white">Cold-Boot State Reconciliation Log</h3>
+              </div>
+              <span class="text-[10px] text-slate-400 font-sans">Synced on boot</span>
+            </div>
+            <div id="reconcileLogContainer" class="mt-3 space-y-1.5 max-h-40 overflow-y-auto pr-1">
+              <div class="p-2 rounded bg-slate-900 border border-slate-800 text-[11px] text-slate-400">
+                No discrepancies found. Local SQLite state and Kalshi demo exchange are in sync.
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+
+    </section>
+
+    <!-- ================================================================= -->
     <!-- TAB 4: PRICE RANGE BRACKETS (KXBTC)                               -->
     <!-- ================================================================= -->
     <section id="tab-range" class="hidden space-y-4">
@@ -764,6 +1808,266 @@
     </section>
 
     <!-- ================================================================= -->
+    <!-- TAB: LIVE KALSHI DEMO EXECUTION & WEBSOCKET OMS                   -->
+    <!-- ================================================================= -->
+    <section id="tab-live" class="space-y-6 hidden">
+      
+      <!-- Live Demo Account & Mode Controller Banner -->
+      <div class="glass-card p-6 rounded-2xl relative overflow-hidden border border-rose-500/20">
+        <div class="absolute -top-24 -right-24 w-80 h-80 bg-rose-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+        <div class="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-800">
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="px-2.5 py-0.5 rounded bg-rose-500/20 text-rose-300 text-xs font-mono font-bold border border-rose-500/40 flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-rose-400 animate-pulse"></span>
+                LIVE KALSHI DEMO ENVIRONMENT
+              </span>
+              <span id="liveExecutionModeBadge" class="px-2.5 py-0.5 rounded bg-slate-800 text-slate-300 text-xs font-mono font-bold">
+                PAPER MODE (SAFE)
+              </span>
+            </div>
+            <h2 class="text-xl font-black text-white mt-1">Kalshi V2 WebSocket OMS & Live Scalper</h2>
+            <p class="text-xs text-slate-400 mt-0.5">Direct execution against <span class="font-mono text-slate-300">demo-api.kalshi.co</span> with microsecond L2 book sweeps and cold-boot safety state reconciliation.</p>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2">
+            <button onclick="toggleLiveExecutionMode()" id="liveModeToggleBtn" class="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-mono text-xs font-black transition flex items-center gap-1.5 shadow-lg shadow-emerald-500/20">
+              ⚡ Arm Live Demo Execution
+            </button>
+            <button onclick="triggerLiveReconcile()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono text-xs font-bold transition flex items-center gap-1">
+              🔄 Cold-Boot Reconcile
+            </button>
+            <button onclick="refreshLiveBalance()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono text-xs font-bold transition flex items-center gap-1">
+              💰 Sync Balance
+            </button>
+            <button onclick="cancelAllLiveOrders()" class="px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 font-mono text-xs font-bold transition">
+              🛑 Cancel All Resting
+            </button>
+          </div>
+        </div>
+
+        <!-- Live Demo KPI Cards -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-6 font-mono text-xs">
+          
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Demo Account Balance</span>
+            <div id="liveDemoCashVal" class="text-xl font-black text-emerald-400 mt-1">$50.00</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">Live On-Exchange</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">API Key ID</span>
+            <div id="liveApiKeyVal" class="text-xs font-black text-slate-200 mt-2 truncate">2b92736a...</div>
+            <div class="text-[10px] text-emerald-400 mt-0.5">RSA-PSS Verified</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">WebSocket V2</span>
+            <div id="liveWsStatusVal" class="text-sm font-black text-emerald-400 mt-1.5 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              STREAMING
+            </div>
+            <div class="text-[10px] text-slate-500 mt-0.5">orderbook_delta</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Watchdog Latency</span>
+            <div id="liveWatchdogLatencyVal" class="text-lg font-black text-cyan-400 mt-1">-- ms</div>
+            <div id="liveWatchdogStatusVal" class="text-[10px] text-emerald-400 mt-0.5">HEALTHY (&lt;1500ms)</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Active Contract</span>
+            <div id="liveActiveTickerVal" class="text-xs font-bold text-amber-400 mt-2 truncate">KXBTC15M...</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">15-Minute Scalp</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">State Discrepancies</span>
+            <div id="liveDiscrepanciesVal" class="text-lg font-black text-slate-300 mt-1">0</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">100% In Sync</div>
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- Main Live Grid: L2 Depth Ladder (Left) + OMS Execution & BRTI Accumulator (Right) -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        
+        <!-- LEFT: Real-Time L2 Order Book Depth Ladder -->
+        <div class="glass-card p-6 rounded-2xl flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800 font-mono">
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-bold text-white flex items-center gap-2">
+                  <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                  L2 Order Book Depth
+                </span>
+                <span id="liveBookTickerBadge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-amber-400 font-bold">
+                  KXBTC15M
+                </span>
+              </div>
+              <div class="text-xs text-slate-400">
+                Top of Book: <span id="liveTopBookDisplay" class="text-white font-bold">--¢ / --¢</span>
+              </div>
+            </div>
+
+            <!-- Asks (Red / Sell Side) -->
+            <div class="mt-4 space-y-1 font-mono text-xs">
+              <div class="text-[10px] uppercase tracking-wider text-rose-400/80 font-bold flex justify-between px-2 pb-1">
+                <span>Ask Price</span>
+                <span>Contracts Depth</span>
+              </div>
+              <div id="liveL2AsksContainer" class="space-y-1">
+                <div class="text-slate-500 text-center py-3 text-xs">Listening for WebSocket orderbook_delta...</div>
+              </div>
+            </div>
+
+            <!-- Spread Indicator Bar -->
+            <div class="my-3 py-1.5 px-3 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center justify-between font-mono text-xs text-slate-300">
+              <span class="text-slate-500">SPREAD: <span id="liveSpreadCents" class="text-amber-400 font-bold">--¢</span></span>
+              <span class="text-slate-500">MID: <span id="liveMidCents" class="text-white font-bold">--¢</span></span>
+              <span class="text-[10px] text-emerald-400 font-semibold">Taker Fee: ~0.5¢ - 1.8¢</span>
+            </div>
+
+            <!-- Bids (Green / Buy Side) -->
+            <div class="space-y-1 font-mono text-xs">
+              <div id="liveL2BidsContainer" class="space-y-1">
+                <div class="text-slate-500 text-center py-3 text-xs">Listening for WebSocket orderbook_delta...</div>
+              </div>
+              <div class="text-[10px] uppercase tracking-wider text-emerald-400/80 font-bold flex justify-between px-2 pt-1">
+                <span>Bid Price</span>
+                <span>Contracts Depth</span>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Interactive Sweep VWAP Simulator -->
+          <div class="mt-6 pt-4 border-t border-slate-800/80 font-mono text-xs">
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-bold text-white flex items-center gap-1.5">
+                🎯 Sweep VWAP Depth Calculator
+              </span>
+              <div class="flex items-center gap-1.5 text-slate-400">
+                <span>Size:</span>
+                <input type="number" id="sweepSizeInput" min="1" max="100" value="10" oninput="calculateVwapPreview()" class="w-14 px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-white font-bold text-center">
+                <span>contracts</span>
+              </div>
+            </div>
+            <div class="grid grid-cols-3 gap-2 p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Theoretical VWAP</span>
+                <span id="sweepCalcVwap" class="text-base font-black text-cyan-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Worst Cap Price</span>
+                <span id="sweepCalcCap" class="text-base font-black text-amber-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Taker Fee</span>
+                <span id="sweepCalcFee" class="text-base font-black text-slate-300">$0.00</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- RIGHT: Execution Telemetry, BRTI Accumulator & Reconciliation Audit -->
+        <div class="space-y-6">
+          
+          <!-- BRTI 60-Second Accumulator Card -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-purple-400"></span>
+                <h3 class="text-sm font-bold text-white">CF Benchmarks BRTI 60s Accumulator</h3>
+              </div>
+              <span id="brtiStatusBadge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-bold">
+                STANDBY (T &gt; 60s)
+              </span>
+            </div>
+
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">1s Samples</span>
+                <span id="brtiSamplesCount" class="text-base font-black text-purple-400">0 / 60</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Settlement Mean</span>
+                <span id="brtiSettleMean" class="text-base font-black text-white">$0.00</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Sigma (Decay)</span>
+                <span id="brtiSigmaVal" class="text-base font-black text-cyan-400">$0.00</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Variance Loss</span>
+                <span id="brtiVarLossVal" class="text-base font-black text-emerald-400">--%</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-400 mt-3 font-sans">
+              During the final 60 seconds, KXBTC15M settles on the simple arithmetic average of 60 1-second ticks. Variance collapses at a cubic rate, allowing the prediction engine to execute high-conviction sniper fills.
+            </p>
+          </div>
+
+          <!-- Stale-Tick Watchdog & Circuit Breaker Telemetry -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                <h3 class="text-sm font-bold text-white">Stale-Tick Watchdog & Circuit Breakers</h3>
+              </div>
+              <span id="watchdogStateBadge" class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30">
+                OPERATIONAL
+              </span>
+            </div>
+
+            <div class="space-y-2 mt-4 text-xs">
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Market Data Latency (Delta):</span>
+                <span id="watchdogDeltaDisplay" class="font-bold text-cyan-400">0.0 ms</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Safety Ceiling (Auto-Halt):</span>
+                <span class="font-bold text-slate-300">1,500 ms</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Recovery Threshold:</span>
+                <span class="font-bold text-emerald-400">&lt; 800 ms (3 consecutive ticks)</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Total Circuit Breaker Halts:</span>
+                <span id="watchdogHaltsCount" class="font-bold text-slate-300">0</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Cold-Boot Reconciliation Audit Log -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+                <h3 class="text-sm font-bold text-white">Cold-Boot State Reconciliation Log</h3>
+              </div>
+              <span class="text-[10px] text-slate-400 font-sans">Synced on boot</span>
+            </div>
+            <div id="reconcileLogContainer" class="mt-3 space-y-1.5 max-h-40 overflow-y-auto pr-1">
+              <div class="p-2 rounded bg-slate-900 border border-slate-800 text-[11px] text-slate-400">
+                No discrepancies found. Local SQLite state and Kalshi demo exchange are in sync.
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+
+    </section>
+
+    <!-- ================================================================= -->
     <!-- TAB 5: MACRO & YEARLY TARGETS                                     -->
     <!-- ================================================================= -->
     <section id="tab-macro" class="hidden space-y-4">
@@ -777,6 +2081,266 @@
       <div id="macroCardsContainer" class="grid grid-cols-1 md:grid-cols-2 gap-4">
         <!-- Injected via JS -->
       </div>
+    </section>
+
+    <!-- ================================================================= -->
+    <!-- TAB: LIVE KALSHI DEMO EXECUTION & WEBSOCKET OMS                   -->
+    <!-- ================================================================= -->
+    <section id="tab-live" class="space-y-6 hidden">
+      
+      <!-- Live Demo Account & Mode Controller Banner -->
+      <div class="glass-card p-6 rounded-2xl relative overflow-hidden border border-rose-500/20">
+        <div class="absolute -top-24 -right-24 w-80 h-80 bg-rose-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+        <div class="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-800">
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="px-2.5 py-0.5 rounded bg-rose-500/20 text-rose-300 text-xs font-mono font-bold border border-rose-500/40 flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-rose-400 animate-pulse"></span>
+                LIVE KALSHI DEMO ENVIRONMENT
+              </span>
+              <span id="liveExecutionModeBadge" class="px-2.5 py-0.5 rounded bg-slate-800 text-slate-300 text-xs font-mono font-bold">
+                PAPER MODE (SAFE)
+              </span>
+            </div>
+            <h2 class="text-xl font-black text-white mt-1">Kalshi V2 WebSocket OMS & Live Scalper</h2>
+            <p class="text-xs text-slate-400 mt-0.5">Direct execution against <span class="font-mono text-slate-300">demo-api.kalshi.co</span> with microsecond L2 book sweeps and cold-boot safety state reconciliation.</p>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2">
+            <button onclick="toggleLiveExecutionMode()" id="liveModeToggleBtn" class="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-mono text-xs font-black transition flex items-center gap-1.5 shadow-lg shadow-emerald-500/20">
+              ⚡ Arm Live Demo Execution
+            </button>
+            <button onclick="triggerLiveReconcile()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono text-xs font-bold transition flex items-center gap-1">
+              🔄 Cold-Boot Reconcile
+            </button>
+            <button onclick="refreshLiveBalance()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono text-xs font-bold transition flex items-center gap-1">
+              💰 Sync Balance
+            </button>
+            <button onclick="cancelAllLiveOrders()" class="px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 font-mono text-xs font-bold transition">
+              🛑 Cancel All Resting
+            </button>
+          </div>
+        </div>
+
+        <!-- Live Demo KPI Cards -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-6 font-mono text-xs">
+          
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Demo Account Balance</span>
+            <div id="liveDemoCashVal" class="text-xl font-black text-emerald-400 mt-1">$50.00</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">Live On-Exchange</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">API Key ID</span>
+            <div id="liveApiKeyVal" class="text-xs font-black text-slate-200 mt-2 truncate">2b92736a...</div>
+            <div class="text-[10px] text-emerald-400 mt-0.5">RSA-PSS Verified</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">WebSocket V2</span>
+            <div id="liveWsStatusVal" class="text-sm font-black text-emerald-400 mt-1.5 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              STREAMING
+            </div>
+            <div class="text-[10px] text-slate-500 mt-0.5">orderbook_delta</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Watchdog Latency</span>
+            <div id="liveWatchdogLatencyVal" class="text-lg font-black text-cyan-400 mt-1">-- ms</div>
+            <div id="liveWatchdogStatusVal" class="text-[10px] text-emerald-400 mt-0.5">HEALTHY (&lt;1500ms)</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Active Contract</span>
+            <div id="liveActiveTickerVal" class="text-xs font-bold text-amber-400 mt-2 truncate">KXBTC15M...</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">15-Minute Scalp</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">State Discrepancies</span>
+            <div id="liveDiscrepanciesVal" class="text-lg font-black text-slate-300 mt-1">0</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">100% In Sync</div>
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- Main Live Grid: L2 Depth Ladder (Left) + OMS Execution & BRTI Accumulator (Right) -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        
+        <!-- LEFT: Real-Time L2 Order Book Depth Ladder -->
+        <div class="glass-card p-6 rounded-2xl flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800 font-mono">
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-bold text-white flex items-center gap-2">
+                  <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                  L2 Order Book Depth
+                </span>
+                <span id="liveBookTickerBadge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-amber-400 font-bold">
+                  KXBTC15M
+                </span>
+              </div>
+              <div class="text-xs text-slate-400">
+                Top of Book: <span id="liveTopBookDisplay" class="text-white font-bold">--¢ / --¢</span>
+              </div>
+            </div>
+
+            <!-- Asks (Red / Sell Side) -->
+            <div class="mt-4 space-y-1 font-mono text-xs">
+              <div class="text-[10px] uppercase tracking-wider text-rose-400/80 font-bold flex justify-between px-2 pb-1">
+                <span>Ask Price</span>
+                <span>Contracts Depth</span>
+              </div>
+              <div id="liveL2AsksContainer" class="space-y-1">
+                <div class="text-slate-500 text-center py-3 text-xs">Listening for WebSocket orderbook_delta...</div>
+              </div>
+            </div>
+
+            <!-- Spread Indicator Bar -->
+            <div class="my-3 py-1.5 px-3 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center justify-between font-mono text-xs text-slate-300">
+              <span class="text-slate-500">SPREAD: <span id="liveSpreadCents" class="text-amber-400 font-bold">--¢</span></span>
+              <span class="text-slate-500">MID: <span id="liveMidCents" class="text-white font-bold">--¢</span></span>
+              <span class="text-[10px] text-emerald-400 font-semibold">Taker Fee: ~0.5¢ - 1.8¢</span>
+            </div>
+
+            <!-- Bids (Green / Buy Side) -->
+            <div class="space-y-1 font-mono text-xs">
+              <div id="liveL2BidsContainer" class="space-y-1">
+                <div class="text-slate-500 text-center py-3 text-xs">Listening for WebSocket orderbook_delta...</div>
+              </div>
+              <div class="text-[10px] uppercase tracking-wider text-emerald-400/80 font-bold flex justify-between px-2 pt-1">
+                <span>Bid Price</span>
+                <span>Contracts Depth</span>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Interactive Sweep VWAP Simulator -->
+          <div class="mt-6 pt-4 border-t border-slate-800/80 font-mono text-xs">
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-bold text-white flex items-center gap-1.5">
+                🎯 Sweep VWAP Depth Calculator
+              </span>
+              <div class="flex items-center gap-1.5 text-slate-400">
+                <span>Size:</span>
+                <input type="number" id="sweepSizeInput" min="1" max="100" value="10" oninput="calculateVwapPreview()" class="w-14 px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-white font-bold text-center">
+                <span>contracts</span>
+              </div>
+            </div>
+            <div class="grid grid-cols-3 gap-2 p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Theoretical VWAP</span>
+                <span id="sweepCalcVwap" class="text-base font-black text-cyan-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Worst Cap Price</span>
+                <span id="sweepCalcCap" class="text-base font-black text-amber-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Taker Fee</span>
+                <span id="sweepCalcFee" class="text-base font-black text-slate-300">$0.00</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- RIGHT: Execution Telemetry, BRTI Accumulator & Reconciliation Audit -->
+        <div class="space-y-6">
+          
+          <!-- BRTI 60-Second Accumulator Card -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-purple-400"></span>
+                <h3 class="text-sm font-bold text-white">CF Benchmarks BRTI 60s Accumulator</h3>
+              </div>
+              <span id="brtiStatusBadge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-bold">
+                STANDBY (T &gt; 60s)
+              </span>
+            </div>
+
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">1s Samples</span>
+                <span id="brtiSamplesCount" class="text-base font-black text-purple-400">0 / 60</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Settlement Mean</span>
+                <span id="brtiSettleMean" class="text-base font-black text-white">$0.00</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Sigma (Decay)</span>
+                <span id="brtiSigmaVal" class="text-base font-black text-cyan-400">$0.00</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Variance Loss</span>
+                <span id="brtiVarLossVal" class="text-base font-black text-emerald-400">--%</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-400 mt-3 font-sans">
+              During the final 60 seconds, KXBTC15M settles on the simple arithmetic average of 60 1-second ticks. Variance collapses at a cubic rate, allowing the prediction engine to execute high-conviction sniper fills.
+            </p>
+          </div>
+
+          <!-- Stale-Tick Watchdog & Circuit Breaker Telemetry -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                <h3 class="text-sm font-bold text-white">Stale-Tick Watchdog & Circuit Breakers</h3>
+              </div>
+              <span id="watchdogStateBadge" class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30">
+                OPERATIONAL
+              </span>
+            </div>
+
+            <div class="space-y-2 mt-4 text-xs">
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Market Data Latency (Delta):</span>
+                <span id="watchdogDeltaDisplay" class="font-bold text-cyan-400">0.0 ms</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Safety Ceiling (Auto-Halt):</span>
+                <span class="font-bold text-slate-300">1,500 ms</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Recovery Threshold:</span>
+                <span class="font-bold text-emerald-400">&lt; 800 ms (3 consecutive ticks)</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Total Circuit Breaker Halts:</span>
+                <span id="watchdogHaltsCount" class="font-bold text-slate-300">0</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Cold-Boot Reconciliation Audit Log -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+                <h3 class="text-sm font-bold text-white">Cold-Boot State Reconciliation Log</h3>
+              </div>
+              <span class="text-[10px] text-slate-400 font-sans">Synced on boot</span>
+            </div>
+            <div id="reconcileLogContainer" class="mt-3 space-y-1.5 max-h-40 overflow-y-auto pr-1">
+              <div class="p-2 rounded bg-slate-900 border border-slate-800 text-[11px] text-slate-400">
+                No discrepancies found. Local SQLite state and Kalshi demo exchange are in sync.
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+
     </section>
 
     <!-- ================================================================= -->
@@ -862,6 +2426,266 @@
         </div>
 
       </div>
+    </section>
+
+    <!-- ================================================================= -->
+    <!-- TAB: LIVE KALSHI DEMO EXECUTION & WEBSOCKET OMS                   -->
+    <!-- ================================================================= -->
+    <section id="tab-live" class="space-y-6 hidden">
+      
+      <!-- Live Demo Account & Mode Controller Banner -->
+      <div class="glass-card p-6 rounded-2xl relative overflow-hidden border border-rose-500/20">
+        <div class="absolute -top-24 -right-24 w-80 h-80 bg-rose-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+        <div class="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-800">
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="px-2.5 py-0.5 rounded bg-rose-500/20 text-rose-300 text-xs font-mono font-bold border border-rose-500/40 flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-rose-400 animate-pulse"></span>
+                LIVE KALSHI DEMO ENVIRONMENT
+              </span>
+              <span id="liveExecutionModeBadge" class="px-2.5 py-0.5 rounded bg-slate-800 text-slate-300 text-xs font-mono font-bold">
+                PAPER MODE (SAFE)
+              </span>
+            </div>
+            <h2 class="text-xl font-black text-white mt-1">Kalshi V2 WebSocket OMS & Live Scalper</h2>
+            <p class="text-xs text-slate-400 mt-0.5">Direct execution against <span class="font-mono text-slate-300">demo-api.kalshi.co</span> with microsecond L2 book sweeps and cold-boot safety state reconciliation.</p>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2">
+            <button onclick="toggleLiveExecutionMode()" id="liveModeToggleBtn" class="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-mono text-xs font-black transition flex items-center gap-1.5 shadow-lg shadow-emerald-500/20">
+              ⚡ Arm Live Demo Execution
+            </button>
+            <button onclick="triggerLiveReconcile()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono text-xs font-bold transition flex items-center gap-1">
+              🔄 Cold-Boot Reconcile
+            </button>
+            <button onclick="refreshLiveBalance()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono text-xs font-bold transition flex items-center gap-1">
+              💰 Sync Balance
+            </button>
+            <button onclick="cancelAllLiveOrders()" class="px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 font-mono text-xs font-bold transition">
+              🛑 Cancel All Resting
+            </button>
+          </div>
+        </div>
+
+        <!-- Live Demo KPI Cards -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-6 font-mono text-xs">
+          
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Demo Account Balance</span>
+            <div id="liveDemoCashVal" class="text-xl font-black text-emerald-400 mt-1">$50.00</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">Live On-Exchange</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">API Key ID</span>
+            <div id="liveApiKeyVal" class="text-xs font-black text-slate-200 mt-2 truncate">2b92736a...</div>
+            <div class="text-[10px] text-emerald-400 mt-0.5">RSA-PSS Verified</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">WebSocket V2</span>
+            <div id="liveWsStatusVal" class="text-sm font-black text-emerald-400 mt-1.5 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              STREAMING
+            </div>
+            <div class="text-[10px] text-slate-500 mt-0.5">orderbook_delta</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Watchdog Latency</span>
+            <div id="liveWatchdogLatencyVal" class="text-lg font-black text-cyan-400 mt-1">-- ms</div>
+            <div id="liveWatchdogStatusVal" class="text-[10px] text-emerald-400 mt-0.5">HEALTHY (&lt;1500ms)</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Active Contract</span>
+            <div id="liveActiveTickerVal" class="text-xs font-bold text-amber-400 mt-2 truncate">KXBTC15M...</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">15-Minute Scalp</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">State Discrepancies</span>
+            <div id="liveDiscrepanciesVal" class="text-lg font-black text-slate-300 mt-1">0</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">100% In Sync</div>
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- Main Live Grid: L2 Depth Ladder (Left) + OMS Execution & BRTI Accumulator (Right) -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        
+        <!-- LEFT: Real-Time L2 Order Book Depth Ladder -->
+        <div class="glass-card p-6 rounded-2xl flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800 font-mono">
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-bold text-white flex items-center gap-2">
+                  <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                  L2 Order Book Depth
+                </span>
+                <span id="liveBookTickerBadge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-amber-400 font-bold">
+                  KXBTC15M
+                </span>
+              </div>
+              <div class="text-xs text-slate-400">
+                Top of Book: <span id="liveTopBookDisplay" class="text-white font-bold">--¢ / --¢</span>
+              </div>
+            </div>
+
+            <!-- Asks (Red / Sell Side) -->
+            <div class="mt-4 space-y-1 font-mono text-xs">
+              <div class="text-[10px] uppercase tracking-wider text-rose-400/80 font-bold flex justify-between px-2 pb-1">
+                <span>Ask Price</span>
+                <span>Contracts Depth</span>
+              </div>
+              <div id="liveL2AsksContainer" class="space-y-1">
+                <div class="text-slate-500 text-center py-3 text-xs">Listening for WebSocket orderbook_delta...</div>
+              </div>
+            </div>
+
+            <!-- Spread Indicator Bar -->
+            <div class="my-3 py-1.5 px-3 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center justify-between font-mono text-xs text-slate-300">
+              <span class="text-slate-500">SPREAD: <span id="liveSpreadCents" class="text-amber-400 font-bold">--¢</span></span>
+              <span class="text-slate-500">MID: <span id="liveMidCents" class="text-white font-bold">--¢</span></span>
+              <span class="text-[10px] text-emerald-400 font-semibold">Taker Fee: ~0.5¢ - 1.8¢</span>
+            </div>
+
+            <!-- Bids (Green / Buy Side) -->
+            <div class="space-y-1 font-mono text-xs">
+              <div id="liveL2BidsContainer" class="space-y-1">
+                <div class="text-slate-500 text-center py-3 text-xs">Listening for WebSocket orderbook_delta...</div>
+              </div>
+              <div class="text-[10px] uppercase tracking-wider text-emerald-400/80 font-bold flex justify-between px-2 pt-1">
+                <span>Bid Price</span>
+                <span>Contracts Depth</span>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Interactive Sweep VWAP Simulator -->
+          <div class="mt-6 pt-4 border-t border-slate-800/80 font-mono text-xs">
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-bold text-white flex items-center gap-1.5">
+                🎯 Sweep VWAP Depth Calculator
+              </span>
+              <div class="flex items-center gap-1.5 text-slate-400">
+                <span>Size:</span>
+                <input type="number" id="sweepSizeInput" min="1" max="100" value="10" oninput="calculateVwapPreview()" class="w-14 px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-white font-bold text-center">
+                <span>contracts</span>
+              </div>
+            </div>
+            <div class="grid grid-cols-3 gap-2 p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Theoretical VWAP</span>
+                <span id="sweepCalcVwap" class="text-base font-black text-cyan-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Worst Cap Price</span>
+                <span id="sweepCalcCap" class="text-base font-black text-amber-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Taker Fee</span>
+                <span id="sweepCalcFee" class="text-base font-black text-slate-300">$0.00</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- RIGHT: Execution Telemetry, BRTI Accumulator & Reconciliation Audit -->
+        <div class="space-y-6">
+          
+          <!-- BRTI 60-Second Accumulator Card -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-purple-400"></span>
+                <h3 class="text-sm font-bold text-white">CF Benchmarks BRTI 60s Accumulator</h3>
+              </div>
+              <span id="brtiStatusBadge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-bold">
+                STANDBY (T &gt; 60s)
+              </span>
+            </div>
+
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">1s Samples</span>
+                <span id="brtiSamplesCount" class="text-base font-black text-purple-400">0 / 60</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Settlement Mean</span>
+                <span id="brtiSettleMean" class="text-base font-black text-white">$0.00</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Sigma (Decay)</span>
+                <span id="brtiSigmaVal" class="text-base font-black text-cyan-400">$0.00</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Variance Loss</span>
+                <span id="brtiVarLossVal" class="text-base font-black text-emerald-400">--%</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-400 mt-3 font-sans">
+              During the final 60 seconds, KXBTC15M settles on the simple arithmetic average of 60 1-second ticks. Variance collapses at a cubic rate, allowing the prediction engine to execute high-conviction sniper fills.
+            </p>
+          </div>
+
+          <!-- Stale-Tick Watchdog & Circuit Breaker Telemetry -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                <h3 class="text-sm font-bold text-white">Stale-Tick Watchdog & Circuit Breakers</h3>
+              </div>
+              <span id="watchdogStateBadge" class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30">
+                OPERATIONAL
+              </span>
+            </div>
+
+            <div class="space-y-2 mt-4 text-xs">
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Market Data Latency (Delta):</span>
+                <span id="watchdogDeltaDisplay" class="font-bold text-cyan-400">0.0 ms</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Safety Ceiling (Auto-Halt):</span>
+                <span class="font-bold text-slate-300">1,500 ms</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Recovery Threshold:</span>
+                <span class="font-bold text-emerald-400">&lt; 800 ms (3 consecutive ticks)</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Total Circuit Breaker Halts:</span>
+                <span id="watchdogHaltsCount" class="font-bold text-slate-300">0</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Cold-Boot Reconciliation Audit Log -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+                <h3 class="text-sm font-bold text-white">Cold-Boot State Reconciliation Log</h3>
+              </div>
+              <span class="text-[10px] text-slate-400 font-sans">Synced on boot</span>
+            </div>
+            <div id="reconcileLogContainer" class="mt-3 space-y-1.5 max-h-40 overflow-y-auto pr-1">
+              <div class="p-2 rounded bg-slate-900 border border-slate-800 text-[11px] text-slate-400">
+                No discrepancies found. Local SQLite state and Kalshi demo exchange are in sync.
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+
     </section>
 
     <!-- ================================================================= -->
@@ -967,6 +2791,266 @@
               <span id="techExchangeSpots" class="font-bold text-amber-400">CB: $0 | KR: $0 | HL: $0</span>
             </div>
           </div>
+        </div>
+
+      </div>
+
+    </section>
+
+    <!-- ================================================================= -->
+    <!-- TAB: LIVE KALSHI DEMO EXECUTION & WEBSOCKET OMS                   -->
+    <!-- ================================================================= -->
+    <section id="tab-live" class="space-y-6 hidden">
+      
+      <!-- Live Demo Account & Mode Controller Banner -->
+      <div class="glass-card p-6 rounded-2xl relative overflow-hidden border border-rose-500/20">
+        <div class="absolute -top-24 -right-24 w-80 h-80 bg-rose-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+        <div class="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-800">
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="px-2.5 py-0.5 rounded bg-rose-500/20 text-rose-300 text-xs font-mono font-bold border border-rose-500/40 flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-rose-400 animate-pulse"></span>
+                LIVE KALSHI DEMO ENVIRONMENT
+              </span>
+              <span id="liveExecutionModeBadge" class="px-2.5 py-0.5 rounded bg-slate-800 text-slate-300 text-xs font-mono font-bold">
+                PAPER MODE (SAFE)
+              </span>
+            </div>
+            <h2 class="text-xl font-black text-white mt-1">Kalshi V2 WebSocket OMS & Live Scalper</h2>
+            <p class="text-xs text-slate-400 mt-0.5">Direct execution against <span class="font-mono text-slate-300">demo-api.kalshi.co</span> with microsecond L2 book sweeps and cold-boot safety state reconciliation.</p>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2">
+            <button onclick="toggleLiveExecutionMode()" id="liveModeToggleBtn" class="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-mono text-xs font-black transition flex items-center gap-1.5 shadow-lg shadow-emerald-500/20">
+              ⚡ Arm Live Demo Execution
+            </button>
+            <button onclick="triggerLiveReconcile()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono text-xs font-bold transition flex items-center gap-1">
+              🔄 Cold-Boot Reconcile
+            </button>
+            <button onclick="refreshLiveBalance()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono text-xs font-bold transition flex items-center gap-1">
+              💰 Sync Balance
+            </button>
+            <button onclick="cancelAllLiveOrders()" class="px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 font-mono text-xs font-bold transition">
+              🛑 Cancel All Resting
+            </button>
+          </div>
+        </div>
+
+        <!-- Live Demo KPI Cards -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-6 font-mono text-xs">
+          
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Demo Account Balance</span>
+            <div id="liveDemoCashVal" class="text-xl font-black text-emerald-400 mt-1">$50.00</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">Live On-Exchange</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">API Key ID</span>
+            <div id="liveApiKeyVal" class="text-xs font-black text-slate-200 mt-2 truncate">2b92736a...</div>
+            <div class="text-[10px] text-emerald-400 mt-0.5">RSA-PSS Verified</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">WebSocket V2</span>
+            <div id="liveWsStatusVal" class="text-sm font-black text-emerald-400 mt-1.5 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              STREAMING
+            </div>
+            <div class="text-[10px] text-slate-500 mt-0.5">orderbook_delta</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Watchdog Latency</span>
+            <div id="liveWatchdogLatencyVal" class="text-lg font-black text-cyan-400 mt-1">-- ms</div>
+            <div id="liveWatchdogStatusVal" class="text-[10px] text-emerald-400 mt-0.5">HEALTHY (&lt;1500ms)</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">Active Contract</span>
+            <div id="liveActiveTickerVal" class="text-xs font-bold text-amber-400 mt-2 truncate">KXBTC15M...</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">15-Minute Scalp</div>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="text-slate-400 text-[10px] uppercase font-bold">State Discrepancies</span>
+            <div id="liveDiscrepanciesVal" class="text-lg font-black text-slate-300 mt-1">0</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">100% In Sync</div>
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- Main Live Grid: L2 Depth Ladder (Left) + OMS Execution & BRTI Accumulator (Right) -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        
+        <!-- LEFT: Real-Time L2 Order Book Depth Ladder -->
+        <div class="glass-card p-6 rounded-2xl flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800 font-mono">
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-bold text-white flex items-center gap-2">
+                  <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                  L2 Order Book Depth
+                </span>
+                <span id="liveBookTickerBadge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-amber-400 font-bold">
+                  KXBTC15M
+                </span>
+              </div>
+              <div class="text-xs text-slate-400">
+                Top of Book: <span id="liveTopBookDisplay" class="text-white font-bold">--¢ / --¢</span>
+              </div>
+            </div>
+
+            <!-- Asks (Red / Sell Side) -->
+            <div class="mt-4 space-y-1 font-mono text-xs">
+              <div class="text-[10px] uppercase tracking-wider text-rose-400/80 font-bold flex justify-between px-2 pb-1">
+                <span>Ask Price</span>
+                <span>Contracts Depth</span>
+              </div>
+              <div id="liveL2AsksContainer" class="space-y-1">
+                <div class="text-slate-500 text-center py-3 text-xs">Listening for WebSocket orderbook_delta...</div>
+              </div>
+            </div>
+
+            <!-- Spread Indicator Bar -->
+            <div class="my-3 py-1.5 px-3 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center justify-between font-mono text-xs text-slate-300">
+              <span class="text-slate-500">SPREAD: <span id="liveSpreadCents" class="text-amber-400 font-bold">--¢</span></span>
+              <span class="text-slate-500">MID: <span id="liveMidCents" class="text-white font-bold">--¢</span></span>
+              <span class="text-[10px] text-emerald-400 font-semibold">Taker Fee: ~0.5¢ - 1.8¢</span>
+            </div>
+
+            <!-- Bids (Green / Buy Side) -->
+            <div class="space-y-1 font-mono text-xs">
+              <div id="liveL2BidsContainer" class="space-y-1">
+                <div class="text-slate-500 text-center py-3 text-xs">Listening for WebSocket orderbook_delta...</div>
+              </div>
+              <div class="text-[10px] uppercase tracking-wider text-emerald-400/80 font-bold flex justify-between px-2 pt-1">
+                <span>Bid Price</span>
+                <span>Contracts Depth</span>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Interactive Sweep VWAP Simulator -->
+          <div class="mt-6 pt-4 border-t border-slate-800/80 font-mono text-xs">
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-bold text-white flex items-center gap-1.5">
+                🎯 Sweep VWAP Depth Calculator
+              </span>
+              <div class="flex items-center gap-1.5 text-slate-400">
+                <span>Size:</span>
+                <input type="number" id="sweepSizeInput" min="1" max="100" value="10" oninput="calculateVwapPreview()" class="w-14 px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-white font-bold text-center">
+                <span>contracts</span>
+              </div>
+            </div>
+            <div class="grid grid-cols-3 gap-2 p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Theoretical VWAP</span>
+                <span id="sweepCalcVwap" class="text-base font-black text-cyan-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Worst Cap Price</span>
+                <span id="sweepCalcCap" class="text-base font-black text-amber-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-[10px] text-slate-400 block uppercase">Taker Fee</span>
+                <span id="sweepCalcFee" class="text-base font-black text-slate-300">$0.00</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- RIGHT: Execution Telemetry, BRTI Accumulator & Reconciliation Audit -->
+        <div class="space-y-6">
+          
+          <!-- BRTI 60-Second Accumulator Card -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-purple-400"></span>
+                <h3 class="text-sm font-bold text-white">CF Benchmarks BRTI 60s Accumulator</h3>
+              </div>
+              <span id="brtiStatusBadge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-bold">
+                STANDBY (T &gt; 60s)
+              </span>
+            </div>
+
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">1s Samples</span>
+                <span id="brtiSamplesCount" class="text-base font-black text-purple-400">0 / 60</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Settlement Mean</span>
+                <span id="brtiSettleMean" class="text-base font-black text-white">$0.00</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Sigma (Decay)</span>
+                <span id="brtiSigmaVal" class="text-base font-black text-cyan-400">$0.00</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                <span class="text-[10px] text-slate-500 block uppercase">Variance Loss</span>
+                <span id="brtiVarLossVal" class="text-base font-black text-emerald-400">--%</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-400 mt-3 font-sans">
+              During the final 60 seconds, KXBTC15M settles on the simple arithmetic average of 60 1-second ticks. Variance collapses at a cubic rate, allowing the prediction engine to execute high-conviction sniper fills.
+            </p>
+          </div>
+
+          <!-- Stale-Tick Watchdog & Circuit Breaker Telemetry -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                <h3 class="text-sm font-bold text-white">Stale-Tick Watchdog & Circuit Breakers</h3>
+              </div>
+              <span id="watchdogStateBadge" class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30">
+                OPERATIONAL
+              </span>
+            </div>
+
+            <div class="space-y-2 mt-4 text-xs">
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Market Data Latency (Delta):</span>
+                <span id="watchdogDeltaDisplay" class="font-bold text-cyan-400">0.0 ms</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Safety Ceiling (Auto-Halt):</span>
+                <span class="font-bold text-slate-300">1,500 ms</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Recovery Threshold:</span>
+                <span class="font-bold text-emerald-400">&lt; 800 ms (3 consecutive ticks)</span>
+              </div>
+              <div class="flex justify-between p-2 rounded bg-slate-900 border border-slate-800">
+                <span class="text-slate-400">Total Circuit Breaker Halts:</span>
+                <span id="watchdogHaltsCount" class="font-bold text-slate-300">0</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Cold-Boot Reconciliation Audit Log -->
+          <div class="glass-card p-6 rounded-2xl font-mono text-xs">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+                <h3 class="text-sm font-bold text-white">Cold-Boot State Reconciliation Log</h3>
+              </div>
+              <span class="text-[10px] text-slate-400 font-sans">Synced on boot</span>
+            </div>
+            <div id="reconcileLogContainer" class="mt-3 space-y-1.5 max-h-40 overflow-y-auto pr-1">
+              <div class="p-2 rounded bg-slate-900 border border-slate-800 text-[11px] text-slate-400">
+                No discrepancies found. Local SQLite state and Kalshi demo exchange are in sync.
+              </div>
+            </div>
+          </div>
+
         </div>
 
       </div>
@@ -1178,6 +3262,11 @@
 
       // 10. Update Technicals Tab
       renderTechnicalsTab(m);
+
+      // 11. Update Live Kalshi Demo OMS Tab
+      if (data.live_kalshi) {
+        renderLiveDemoTab(data.live_kalshi, scalp);
+      }
     }
 
     // Update Paper Bot UI
@@ -1797,6 +3886,298 @@
 
       } catch (e) {
         console.error("Simulation error:", e);
+      }
+    }
+
+    // Render Live Kalshi Demo Tab (Tab 0)
+    function renderLiveDemoTab(live, scalp) {
+      if (!live) return;
+
+      // 1. Account & Mode Badges
+      const isArmed = live.mode === 'LIVE_DEMO';
+      const modeBadge = document.getElementById('liveExecutionModeBadge');
+      const toggleBtn = document.getElementById('liveModeToggleBtn');
+      if (modeBadge) {
+        modeBadge.innerText = isArmed ? '⚡ LIVE DEMO ARMED' : 'PAPER MODE (SAFE)';
+        modeBadge.className = isArmed 
+          ? 'px-2.5 py-0.5 rounded bg-rose-500/20 text-rose-300 text-xs font-mono font-bold border border-rose-500/50 animate-pulse'
+          : 'px-2.5 py-0.5 rounded bg-slate-800 text-slate-300 text-xs font-mono font-bold';
+      }
+      if (toggleBtn) {
+        toggleBtn.innerText = isArmed ? '🛡️ Disarm Live Mode' : '⚡ Arm Live Demo Execution';
+        toggleBtn.className = isArmed
+          ? 'px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-slate-950 font-mono text-xs font-black transition flex items-center gap-1.5 shadow-lg shadow-amber-500/20'
+          : 'px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-mono text-xs font-black transition flex items-center gap-1.5 shadow-lg shadow-emerald-500/20';
+      }
+
+      // 2. Balances & Keys
+      const balEl = document.getElementById('liveDemoCashVal');
+      if (balEl) balEl.innerText = '$' + (live.balance_dollars || 50.0).toFixed(2);
+
+      const keyEl = document.getElementById('liveApiKeyVal');
+      if (keyEl) keyEl.innerText = live.key_id || '2b92736a...';
+
+      // 3. WebSocket Status
+      const wsEl = document.getElementById('liveWsStatusVal');
+      if (wsEl) {
+        wsEl.innerHTML = live.ws_connected 
+          ? '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> STREAMING'
+          : '<span class="w-2 h-2 rounded-full bg-rose-400"></span> CONNECTING';
+        wsEl.className = 'text-sm font-black mt-1.5 flex items-center gap-1.5 ' + (live.ws_connected ? 'text-emerald-400' : 'text-rose-400');
+      }
+
+      // 4. Watchdog Latency
+      const wd = live.watchdog || {};
+      const wdDeltaEl = document.getElementById('liveWatchdogLatencyVal');
+      const wdStatusEl = document.getElementById('liveWatchdogStatusVal');
+      const curDelta = wd.last_delta_ms || 0.0;
+      if (wdDeltaEl) wdDeltaEl.innerText = curDelta.toFixed(1) + ' ms';
+      if (wdStatusEl) {
+        if (wd.is_stale) {
+          wdStatusEl.innerText = 'STALE (CIRCUIT TRIPPED)';
+          wdStatusEl.className = 'text-[10px] text-rose-400 font-bold';
+        } else {
+          wdStatusEl.innerText = 'HEALTHY (<1500ms)';
+          wdStatusEl.className = 'text-[10px] text-emerald-400';
+        }
+      }
+
+      // 5. Active Contract & Discrepancies
+      const activeTicker = live.active_ticker || scalp?.ticker || 'KXBTC15M';
+      const tickerEl = document.getElementById('liveActiveTickerVal');
+      if (tickerEl) tickerEl.innerText = activeTicker;
+
+      const badgeTickerEl = document.getElementById('liveBookTickerBadge');
+      if (badgeTickerEl) badgeTickerEl.innerText = activeTicker;
+
+      const rec = live.reconciliation || {};
+      const discEl = document.getElementById('liveDiscrepanciesVal');
+      if (discEl) {
+        const dCount = rec.discrepancies?.length || 0;
+        discEl.innerText = dCount;
+        discEl.className = 'text-lg font-black mt-1 ' + (dCount > 0 ? 'text-amber-400' : 'text-slate-300');
+      }
+
+      // 6. L2 Order Book Depth Ladder
+      const depth = live.l2_depth || {};
+      const bestBid = depth.best_bid || scalp?.yes_bid_cents || 0;
+      const bestAsk = depth.best_ask || scalp?.yes_ask_cents || 100;
+      
+      const topBookEl = document.getElementById('liveTopBookDisplay');
+      if (topBookEl) topBookEl.innerText = `${bestBid}¢ / ${bestAsk}¢`;
+
+      const spreadEl = document.getElementById('liveSpreadCents');
+      if (spreadEl) spreadEl.innerText = Math.max(0, bestAsk - bestBid) + '¢';
+
+      const midEl = document.getElementById('liveMidCents');
+      if (midEl) midEl.innerText = ((bestBid + bestAsk) / 2.0).toFixed(1) + '¢';
+
+      // Render Asks (Red) - descending so best ask is closest to spread bar at bottom
+      const asksContainer = document.getElementById('liveL2AsksContainer');
+      if (asksContainer) {
+        let rawAsks = depth.asks && depth.asks.length ? depth.asks : [[bestAsk, 25], [bestAsk + 1, 40], [bestAsk + 2, 75]];
+        let sortedAsks = [...rawAsks].sort((a,b) => b[0] - a[0]).slice(-5);
+        let maxQty = Math.max(...sortedAsks.map(x => x[1]), 10);
+
+        let asksHtml = '';
+        sortedAsks.forEach(([p, q]) => {
+          const widthPct = Math.min(100, (q / maxQty) * 100);
+          asksHtml += `
+            <div class="flex items-center justify-between px-2.5 py-1 rounded bg-slate-900/60 relative overflow-hidden group border border-slate-800/40">
+              <div class="absolute right-0 top-0 bottom-0 bg-rose-500/15 pointer-events-none transition-all" style="width: ${widthPct}%"></div>
+              <span class="text-rose-400 font-bold z-10">${p}¢</span>
+              <span class="text-slate-300 z-10 font-mono text-[11px]">${q} contracts</span>
+            </div>
+          `;
+        });
+        asksContainer.innerHTML = asksHtml;
+      }
+
+      // Render Bids (Green) - descending so best bid is closest to spread bar at top
+      const bidsContainer = document.getElementById('liveL2BidsContainer');
+      if (bidsContainer) {
+        let rawBids = depth.bids && depth.bids.length ? depth.bids : [[bestBid, 30], [bestBid - 1, 55], [bestBid - 2, 80]];
+        let sortedBids = [...rawBids].sort((a,b) => b[0] - a[0]).slice(0, 5);
+        let maxQty = Math.max(...sortedBids.map(x => x[1]), 10);
+
+        let bidsHtml = '';
+        sortedBids.forEach(([p, q]) => {
+          const widthPct = Math.min(100, (q / maxQty) * 100);
+          bidsHtml += `
+            <div class="flex items-center justify-between px-2.5 py-1 rounded bg-slate-900/60 relative overflow-hidden group border border-slate-800/40">
+              <div class="absolute right-0 top-0 bottom-0 bg-emerald-500/15 pointer-events-none transition-all" style="width: ${widthPct}%"></div>
+              <span class="text-emerald-400 font-bold z-10">${p}¢</span>
+              <span class="text-slate-300 z-10 font-mono text-[11px]">${q} contracts</span>
+            </div>
+          `;
+        });
+        bidsContainer.innerHTML = bidsHtml;
+      }
+
+      // 7. Update Sweep VWAP Preview
+      calculateVwapPreview();
+
+      // 8. BRTI 60-Second Accumulator
+      const secLeft = scalp?.seconds_left !== undefined ? scalp.seconds_left : 900;
+      const isBrtiActive = secLeft <= 60 && secLeft >= 0;
+      const brtiBadge = document.getElementById('brtiStatusBadge');
+      if (brtiBadge) {
+        brtiBadge.innerText = isBrtiActive ? 'ACTIVE ACCUMULATION (T <= 60s)' : 'STANDBY (T > 60s)';
+        brtiBadge.className = isBrtiActive
+          ? 'text-[10px] px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 font-bold border border-purple-500/40 animate-pulse'
+          : 'text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-bold';
+      }
+
+      const brtiCountEl = document.getElementById('brtiSamplesCount');
+      if (brtiCountEl) brtiCountEl.innerText = (isBrtiActive ? Math.min(60, 60 - secLeft) : 0) + ' / 60';
+
+      const brtiMeanEl = document.getElementById('brtiSettleMean');
+      const meanVal = scalp?.brti_mean || scalp?.candle_open || latestData?.metrics?.spot_price || 0.0;
+      if (brtiMeanEl) brtiMeanEl.innerText = '$' + meanVal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+      const brtiSigmaEl = document.getElementById('brtiSigmaVal');
+      const baseVol = latestData?.metrics?.vol_15m_dollar || 95.0;
+      const sigmaVal = scalp?.sigma || (baseVol * Math.sqrt(Math.max(1, secLeft) / 900.0));
+      if (brtiSigmaEl) brtiSigmaEl.innerText = '$' + sigmaVal.toFixed(2);
+
+      const brtiVarEl = document.getElementById('brtiVarLossVal');
+      const varPct = isBrtiActive ? Math.min(100, Math.max(0, ((60 - secLeft) / 60.0) * 100)) : 0;
+      if (brtiVarEl) brtiVarEl.innerText = isBrtiActive ? varPct.toFixed(0) + '%' : '--%';
+
+      // 9. Stale-Tick Watchdog Telemetry Card
+      const wdStateBadge = document.getElementById('watchdogStateBadge');
+      if (wdStateBadge) {
+        wdStateBadge.innerText = wd.is_stale ? 'CIRCUIT TRIPPED (HALT)' : 'OPERATIONAL';
+        wdStateBadge.className = wd.is_stale
+          ? 'text-[10px] px-2 py-0.5 rounded bg-rose-500/20 text-rose-400 font-bold border border-rose-500/30 animate-pulse'
+          : 'text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30';
+      }
+
+      const wdDeltaDisp = document.getElementById('watchdogDeltaDisplay');
+      if (wdDeltaDisp) wdDeltaDisp.innerText = curDelta.toFixed(1) + ' ms';
+
+      const wdHaltsEl = document.getElementById('watchdogHaltsCount');
+      if (wdHaltsEl) wdHaltsEl.innerText = wd.total_halts || 0;
+
+      // 10. Reconciliation Log Container
+      const rLogContainer = document.getElementById('reconcileLogContainer');
+      if (rLogContainer && rec.status) {
+        rLogContainer.innerHTML = `
+          <div class="p-2.5 rounded bg-slate-900 border border-slate-800 text-[11px] space-y-1">
+            <div class="flex justify-between text-slate-300 font-bold">
+              <span>Status: <span class="text-emerald-400">${rec.status}</span></span>
+              <span class="text-slate-500 text-[10px]">${rec.timestamp ? new Date(rec.timestamp * 1000).toLocaleTimeString() : 'Startup'}</span>
+            </div>
+            <div class="text-slate-400">Resting Orders Canceled: <span class="text-white font-bold">${rec.resting_orders_canceled ?? 0}</span></div>
+            <div class="text-slate-400">Open Exchange Positions: <span class="text-white font-bold">${rec.open_positions_count ?? 0}</span></div>
+            <div class="text-slate-400">Audit Discrepancies: <span class="${(rec.discrepancies?.length || 0) > 0 ? 'text-amber-400' : 'text-emerald-400'} font-bold">${rec.discrepancies?.length || 0}</span></div>
+          </div>
+        `;
+      }
+    }
+
+    // Dynamic Sweep VWAP Calculator preview
+    function calculateVwapPreview() {
+      const sizeInput = document.getElementById('sweepSizeInput');
+      const targetQty = sizeInput ? (parseInt(sizeInput.value) || 10) : 10;
+      const depth = latestData?.live_kalshi?.l2_depth || {};
+      const asks = depth.asks && depth.asks.length ? depth.asks : [[depth.best_ask || 50, 25], [(depth.best_ask || 50) + 1, 40]];
+
+      const sortedAsks = [...asks].sort((a,b) => a[0] - b[0]);
+      let rem = targetQty;
+      let totalCents = 0;
+      let worst = 0;
+
+      for (const [p, q] of sortedAsks) {
+        const take = Math.min(rem, q);
+        totalCents += take * p;
+        worst = Math.max(worst, p);
+        rem -= take;
+        if (rem <= 0) break;
+      }
+
+      const filled = targetQty - rem;
+      const vwap = filled > 0 ? (totalCents / filled).toFixed(1) : (depth.best_ask || 50).toFixed(1);
+      
+      const vwapEl = document.getElementById('sweepCalcVwap');
+      if (vwapEl) vwapEl.innerText = `${vwap}¢` + (rem > 0 ? ' (partial)' : '');
+
+      const capEl = document.getElementById('sweepCalcCap');
+      if (capEl) capEl.innerText = `${worst || (depth.best_ask || 50)}¢`;
+
+      const feeEl = document.getElementById('sweepCalcFee');
+      if (feeEl) {
+        const feeEst = (targetQty * 0.015);
+        feeEl.innerText = '$' + feeEst.toFixed(2);
+      }
+    }
+
+    // Live Execution Interactive Handlers
+    async function toggleLiveExecutionMode() {
+      const curMode = latestData?.live_kalshi?.mode || 'PAPER';
+      const targetMode = curMode === 'LIVE_DEMO' ? 'PAPER' : 'LIVE_DEMO';
+
+      if (targetMode === 'LIVE_DEMO') {
+        const ok = confirm("⚠️ ARM LIVE DEMO EXECUTION?\\n\\nThis will route trades to Kalshi Demo environment (demo-api.kalshi.co) using your real API key. Confirm to enable.");
+        if (!ok) return;
+      }
+
+      try {
+        const resp = await fetch('/api/live/mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: targetMode })
+        });
+        const res = await resp.json();
+        if (res.mode) {
+          if (latestData && latestData.live_kalshi) latestData.live_kalshi.mode = res.mode;
+          renderLiveDemoTab(latestData.live_kalshi, latestData.kxbtc15m);
+        }
+      } catch (e) {
+        alert("Error changing live execution mode: " + e);
+      }
+    }
+
+    async function triggerLiveReconcile() {
+      try {
+        const resp = await fetch('/api/live/reconcile', { method: 'POST' });
+        const res = await resp.json();
+        alert(`Cold-Boot Reconciliation Finished!\\n\\nStatus: ${res.status}\\nResting Orders Canceled: ${res.resting_orders_canceled}\\nOpen Positions: ${res.open_positions_count}\\nDiscrepancies: ${res.discrepancies ? res.discrepancies.length : 0}`);
+        if (latestData && latestData.live_kalshi) {
+          latestData.live_kalshi.reconciliation = res;
+          renderLiveDemoTab(latestData.live_kalshi, latestData.kxbtc15m);
+        }
+      } catch (e) {
+        alert("Error during reconciliation: " + e);
+      }
+    }
+
+    async function refreshLiveBalance() {
+      try {
+        const resp = await fetch('/api/live/refresh_balance', { method: 'POST' });
+        const res = await resp.json();
+        if (res.balance_dollars !== undefined) {
+          if (latestData && latestData.live_kalshi) {
+            latestData.live_kalshi.balance_dollars = res.balance_dollars;
+            latestData.live_kalshi.balance_cents = res.balance;
+            renderLiveDemoTab(latestData.live_kalshi, latestData.kxbtc15m);
+          }
+          alert(`Live Demo Balance Synced: $${res.balance_dollars.toFixed(2)} USD`);
+        }
+      } catch (e) {
+        alert("Error fetching live balance: " + e);
+      }
+    }
+
+    async function cancelAllLiveOrders() {
+      const ok = confirm("🛑 CANCEL ALL RESTING ORDERS?\\n\\nThis will send cancellation requests to demo-api.kalshi.co for all active orders.");
+      if (!ok) return;
+      try {
+        const resp = await fetch('/api/live/cancel_all', { method: 'POST' });
+        const res = await resp.json();
+        alert(`Orders canceled: ${res.canceled_orders?.length || 0}`);
+      } catch (e) {
+        alert("Error canceling orders: " + e);
       }
     }
 

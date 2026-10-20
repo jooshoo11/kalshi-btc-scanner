@@ -107,8 +107,11 @@ class KalshiAuth:
         ts = timestamp_ms or int(time.time() * 1000)
         # Remove query parameters if present from signature path
         clean_path = path.split("?")[0]
-        if not clean_path.startswith("/trade-api/v2"):
-            clean_path = f"/trade-api/v2{clean_path}"
+        if not clean_path.startswith("/trade-api/"):
+            if clean_path.startswith("/"):
+                clean_path = f"/trade-api/v2{clean_path}"
+            else:
+                clean_path = f"/trade-api/v2/{clean_path}"
         msg = f"{ts}{method.upper()}{clean_path}".encode("utf-8")
 
         sig = self._private_key.sign(
