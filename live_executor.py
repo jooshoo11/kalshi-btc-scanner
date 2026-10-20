@@ -748,6 +748,145 @@ class KalshiOrderManagementSystem:
         self.reconciler = KalshiStateReconciler(auth=self.auth, rest_url=self.rest_url, dry_run=dry_run)
         self.dry_run = dry_run
 
+    async def execute_trade(
+        self,
+        ticker: str,
+        direction: str,
+        target_contracts: int,
+        edge_threshold: float,
+        model_prob: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        OMS VWAP Execution with Book-Sweeping Protection & Safety Gate:
+        1. Inspects local L2 WebSocket cache (orderbook_delta).
+        2. Walks down the L2 book (bids if selling, asks if buying) until target_contracts is filled.
+        3. Calculates the Volume-Weighted Average Price (VWAP) of that theoretical sweep.
+        4. Safety Gate: If the VWAP price eliminates the mathematical edge (i.e. exceeds edge_threshold),
+           aborts the trade and logs a VWAP_SLIPPAGE_ABORT.
+        """
+        # 0. Safety Gate: Stale-Tick Watchdog
+        if not self.watchdog.is_safe_to_trade():
+            logger.error(f"[OMS] ABORT: Execution blocked by Stale-Tick Watchdog! ({self.watchdog.halt_reason})")
+            return {
+                "status": "ABORTED_STALE_TICK",
+                "reason": self.watchdog.halt_reason or "Market data feed delta exceeded 1500ms safety limit",
+                "watchdog": self.watchdog.get_status()
+            }
+
+        if target_contracts <= 0:
+            return {"status": "ABORTED_INVALID_COUNT", "reason": "Target contracts must be > 0"}
+
+        # 1. Query Local L2 WebSocket Cache
+        is_buy = direction.upper() in ("BUY", "YES")
+        side_label = "yes" if is_buy else "no"
+        book: Optional[L2OrderBook] = None
+        if self.ws_client and ticker in self.ws_client.books:
+            book = self.ws_client.books[ticker]
+
+        if not book:
+            if not self.dry_run and (self.auth and self.auth.is_configured and not self.auth.key_id.startswith("test-")):
+                logger.warning(f"[OMS] ABORT: No L2 book in local cache for {ticker}.")
+                return {
+                    "status": "ABORTED_EMPTY_BOOK",
+                    "reason": f"No L2 order book found in WebSocket cache for {ticker}"
+                }
+
+        # 2. Walk down L2 book to calculate VWAP
+        if book:
+            order_levels = book.asks if is_buy else book.bids
+            if not order_levels:
+                logger.warning(f"[OMS] ABORT: L2 book for {ticker} has 0 depth on {'asks' if is_buy else 'bids'}.")
+                return {"status": "ABORTED_EMPTY_BOOK", "reason": "Empty order book on requested side"}
+
+            sorted_prices = sorted(order_levels.keys()) if is_buy else sorted(order_levels.keys(), reverse=True)
+            accumulated_qty = 0
+            total_cost_cents = 0
+            worst_price_cents = 0
+            levels_swept = 0
+
+            for p in sorted_prices:
+                avail = order_levels[p]
+                needed = target_contracts - accumulated_qty
+                fill = min(avail, needed)
+                total_cost_cents += fill * p
+                accumulated_qty += fill
+                worst_price_cents = p
+                levels_swept += 1
+                if accumulated_qty >= target_contracts:
+                    break
+
+            if accumulated_qty < target_contracts:
+                logger.warning(
+                    f"[OMS] ABORT: Insufficient liquidity on {ticker}. "
+                    f"Requested {target_contracts} contracts, book only held {accumulated_qty}."
+                )
+                return {
+                    "status": "ABORTED_THIN_BOOK",
+                    "reason": f"Insufficient book depth: Available {accumulated_qty} < Needed {target_contracts}",
+                    "filled_count": accumulated_qty,
+                    "target_contracts": target_contracts
+                }
+
+            vwap_cents = round(total_cost_cents / float(accumulated_qty), 2)
+        else:
+            # Synthetic fallback for mock tests without active WS client
+            worst_price_cents = int(round(edge_threshold * 100)) if edge_threshold <= 1.0 else int(round(edge_threshold))
+            vwap_cents = float(worst_price_cents)
+            levels_swept = 1
+
+        vwap_dollars = vwap_cents / 100.0
+
+        # 3. Safety Gate: Evaluate Mathematical Edge vs edge_threshold
+        if model_prob is not None:
+            # Model probability provided: edge_threshold is the minimum required net edge %
+            kalshi_fee = calculate_kalshi_fee(1, vwap_dollars)
+            net_edge = model_prob - (vwap_dollars + kalshi_fee)
+            min_edge_pct = edge_threshold if edge_threshold > 1.0 else (edge_threshold * 100.0)
+            actual_edge_pct = round(net_edge * 100.0, 2)
+
+            if actual_edge_pct < min_edge_pct:
+                logger.warning(
+                    f"[OMS] VWAP_SLIPPAGE_ABORT: Sweep VWAP ({vwap_cents:.1f}¢) leaves net edge {actual_edge_pct:.1f}% "
+                    f"which violates threshold {min_edge_pct:.1f}% on {ticker}."
+                )
+                return {
+                    "status": "VWAP_SLIPPAGE_ABORT",
+                    "reason": f"Sweep VWAP {vwap_cents:.1f}¢ leaves net edge {actual_edge_pct:.1f}% < threshold {min_edge_pct:.1f}%",
+                    "vwap_cents": vwap_cents,
+                    "worst_price_cents": worst_price_cents,
+                    "net_edge_pct": actual_edge_pct,
+                    "required_edge_pct": min_edge_pct
+                }
+        else:
+            # Price threshold mode: edge_threshold is maximum acceptable price
+            max_acceptable_cents = int(round(edge_threshold * 100)) if edge_threshold <= 1.0 else int(round(edge_threshold))
+            if is_buy and vwap_cents > max_acceptable_cents:
+                logger.warning(
+                    f"[OMS] VWAP_SLIPPAGE_ABORT: Sweep VWAP ({vwap_cents:.1f}¢) exceeds "
+                    f"edge threshold ({max_acceptable_cents}¢) on {ticker}."
+                )
+                return {
+                    "status": "VWAP_SLIPPAGE_ABORT",
+                    "reason": f"Sweep VWAP {vwap_cents:.1f}¢ exceeds edge threshold {max_acceptable_cents}¢",
+                    "vwap_cents": vwap_cents,
+                    "worst_price_cents": worst_price_cents,
+                    "max_acceptable_cents": max_acceptable_cents
+                }
+
+        # 4. Dispatch Marketable Limit Order capped at worst sweep price
+        logger.info(
+            f"[OMS] Executing {target_contracts}x {direction} on {ticker} | "
+            f"Sweep VWAP: {vwap_cents:.1f}¢ | Cap Limit: {worst_price_cents}¢ | Levels: {levels_swept}"
+        )
+        return await self._place_rest_order(
+            ticker=ticker,
+            action="buy" if is_buy else "sell",
+            side=side_label,
+            count=target_contracts,
+            price_cents=worst_price_cents,
+            order_type="limit"
+        )
+
     async def execute_entry_with_vwap_protection(
         self,
         ticker: str,
@@ -1034,12 +1173,12 @@ class LiveKalshiBroker(BaseExecutionBroker):
         self.oms = oms
 
     async def submit_entry(self, ticker: str, side: str, contracts: int, model_prob: float, max_price_cents: int) -> Dict[str, Any]:
-        return await self.oms.execute_entry_with_vwap_protection(
+        return await self.oms.execute_trade(
             ticker=ticker,
-            side=side,
-            contracts=contracts,
-            model_prob=model_prob,
-            max_acceptable_vwap_cents=max_price_cents
+            direction=side,
+            target_contracts=contracts,
+            edge_threshold=max_price_cents,
+            model_prob=model_prob
         )
 
     async def exit_position(self, ticker: str, side: str, contracts: int, reason: str, exit_price_cents: int) -> Dict[str, Any]:

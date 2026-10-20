@@ -115,34 +115,43 @@ async def run_oms_tests():
     # Level 2: 20 @ 72¢
     # VWAP = (15*70 + 20*72)/35 = (1050 + 1440)/35 = 2490 / 35 = 71.14¢
     # Suppose max acceptable VWAP is 70¢: the trade MUST ABORT!
-    abort_res = await oms.execute_entry_with_vwap_protection(
+    abort_res = await oms.execute_trade(
         ticker="KXBTC15M-TEST",
-        side="YES",
-        contracts=35,
-        model_prob=0.76, # 76% model prob
-        max_acceptable_vwap_cents=70 # Cap set to 70¢
+        direction="BUY",
+        target_contracts=35,
+        edge_threshold=70 # Cap set to 70¢
     )
-    assert abort_res["status"] == "ABORTED_VWAP_SLIPPAGE", f"Should have aborted with VWAP slippage: {abort_res}"
-    print(f"  ✓ VWAP Protection Triggered: Correctly aborted order when expected VWAP ({abort_res['vwap_cents']:.1f}¢) > Cap (70¢).")
+    assert abort_res["status"] == "VWAP_SLIPPAGE_ABORT", f"Should have aborted with VWAP slippage: {abort_res}"
+    print(f"  ✓ VWAP_SLIPPAGE_ABORT Triggered: Correctly aborted order when expected VWAP ({abort_res['vwap_cents']:.1f}¢) > Cap (70¢).")
+
+    # Test EV Edge Safety Gate with model_prob:
+    # 20 contracts @ VWAP 70.25¢. Model prob 72%. Post-fee net edge is ~ -0.1%, below 4.0% min edge threshold
+    abort_edge = await oms.execute_trade(
+        ticker="KXBTC15M-TEST",
+        direction="BUY",
+        target_contracts=20,
+        edge_threshold=4.0, # 4.0% min edge
+        model_prob=0.72
+    )
+    assert abort_edge["status"] == "VWAP_SLIPPAGE_ABORT", f"Should have aborted with EV edge slippage: {abort_edge}"
+    print(f"  ✓ Mathematical Edge Safety Gate: Correctly aborted trade with VWAP_SLIPPAGE_ABORT when net edge ({abort_edge['net_edge_pct']:.1f}%) < threshold (4.0%).")
 
     # Test Thin Book Abort: Request 120 contracts (book only has 95)
-    abort_thin = await oms.execute_entry_with_vwap_protection(
+    abort_thin = await oms.execute_trade(
         ticker="KXBTC15M-TEST",
-        side="YES",
-        contracts=120,
-        model_prob=0.85,
-        max_acceptable_vwap_cents=85
+        direction="BUY",
+        target_contracts=120,
+        edge_threshold=85
     )
     assert abort_thin["status"] == "ABORTED_THIN_BOOK", f"Should have aborted on thin book: {abort_thin}"
     print(f"  ✓ Depth Protection Triggered: Correctly aborted order when book lacked sufficient contracts.")
 
     # Test Clean Fill: Buy 12 contracts @ 70¢ with cap 71¢
-    fill_res = await oms.execute_entry_with_vwap_protection(
+    fill_res = await oms.execute_trade(
         ticker="KXBTC15M-TEST",
-        side="YES",
-        contracts=12,
-        model_prob=0.85,
-        max_acceptable_vwap_cents=71
+        direction="BUY",
+        target_contracts=12,
+        edge_threshold=71
     )
     assert "FILLED" in fill_res["status"]
     print(f"  ✓ Valid Order Approved: Successfully dispatched 12 contracts within acceptable VWAP.")
