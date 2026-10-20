@@ -158,9 +158,14 @@ class KalshiLiveScalper:
             if resp.status_code == 200:
                 markets = resp.json().get("markets", [])
                 if markets:
-                    # Pick earliest expiring active market
-                    sorted_markets = sorted(markets, key=lambda m: m.get("close_time", ""))
-                    return sorted_markets[0]
+                    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    active_future = [m for m in markets if (m.get("close_time") or "") >= now_iso]
+                    if active_future:
+                        active_future.sort(key=lambda m: m.get("close_time", ""))
+                        return active_future[0]
+                    else:
+                        markets.sort(key=lambda m: m.get("close_time", ""), reverse=True)
+                        return markets[0]
         except Exception as e:
             logger.debug(f"Error querying active markets: {e}")
 
@@ -273,6 +278,9 @@ class KalshiLiveScalper:
                 y_ask = min(0.99, y_bid + 0.02)
             best_bid = int(round(y_bid * 100))
             best_ask = int(round(y_ask * 100))
+            ask_size = max(1, int(float(mkt.get("yes_ask_size_fp") or 50)))
+            bid_size = max(1, int(float(mkt.get("yes_bid_size_fp") or 50)))
+            book.apply_snapshot([[best_bid, bid_size]], [[best_ask, ask_size]])
         else:
             y_bid = float(best_bid) / 100.0
             y_ask = float(best_ask) / 100.0
