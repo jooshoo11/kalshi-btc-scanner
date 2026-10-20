@@ -26,8 +26,11 @@ class PaperTradingBot:
         # Bot Configuration Settings
         self.enabled = True
         self.take_profit_roi_pct = 25.0    # Take profit when up 25%
-        self.stop_loss_roi_pct = 25.0      # Cut loss when down 25%
+        self.stop_loss_roi_pct = 25.0      # Cut loss strictly when down 25%
         self.max_allocation_pct = 15.0     # Max 15% of equity per trade
+        self.max_trade_dollars = 75.0      # Hard $75.00 dollar cap to prevent large drawdowns
+        self.min_entry_price = 0.25        # Penny floor: avoid <25¢ lottery tickets
+        self.max_entry_price = 0.78        # Ceiling: avoid >78¢ low-upside contracts
         self.min_edge_pct = 4.0            # Minimum model edge required to enter
         self.slippage_penalty_cents = 3.0  # 3¢ adverse slippage haircut
         self.taker_fee_cents = 0.5         # Reference baseline taker fee
@@ -35,7 +38,8 @@ class PaperTradingBot:
         # Candle & Re-entry tracking
         self.current_candle_id: str = ""
         self.trades_in_candle: int = 0
-        self.max_trades_per_candle: int = 3 # Allows re-entry if profit was taken
+        self.max_trades_per_candle: int = 3 # Allows re-entry ONLY if profit was taken
+        self.last_exit_reason: str = ""     # Tracks exit reason to prevent revenge trading
         self.last_exit_ts: float = 0.0
 
         # Stats
@@ -109,6 +113,7 @@ class PaperTradingBot:
             # New 15-minute candle began
             self.current_candle_id = close_time
             self.trades_in_candle = 0
+            self.last_exit_reason = ""
 
         # -------------------------------------------------------------
         # STEP 1: If open position exists, monitor and manage active trade
@@ -143,14 +148,14 @@ class PaperTradingBot:
                 )
                 return
 
-            # C. Dynamic Risk Cut (Stop Loss)
-            # If delta reversed and model probability collapsed below 35% with adverse drawdown
-            if unrealized_pct <= -self.stop_loss_roi_pct and curr_model_prob <= 35.0:
+            # C. Dynamic Risk Cut (Strict Stop Loss)
+            # Cut immediately if loss hits -25%, OR if down -15% with model prob <= 35%
+            if unrealized_pct <= -self.stop_loss_roi_pct or (unrealized_pct <= -15.0 and curr_model_prob <= 35.0):
                 self._close_position(
                     pos,
                     exit_price=current_bid,
                     reason="STOP_LOSS",
-                    rationale=f"Cut loss at {unrealized_pct}%: Model probability dropped to {curr_model_prob}% as delta flipped against position."
+                    rationale=f"Strict Stop Loss triggered at {unrealized_pct}%: Cutting loss early to protect bankroll."
                 )
                 return
 
@@ -165,6 +170,10 @@ class PaperTradingBot:
         # Check Stale-Tick Watchdog safety circuit breaker
         if self.watchdog and not self.watchdog.is_safe_to_trade():
             return
+
+        # Re-entry Lockout: NEVER re-enter same candle if previous trade stopped out
+        if self.trades_in_candle >= 1 and self.last_exit_reason in ("STOP_LOSS", "SETTLED_LOSS"):
+            return # Block revenge trading / fighting adverse trend on same candle
 
         # Check re-entry limit & cooldown
         if self.trades_in_candle >= self.max_trades_per_candle:
@@ -185,16 +194,17 @@ class PaperTradingBot:
         target_price = 0.0
         model_prob = 0.0
 
-        if "BUY YES" in signal and edge_pct >= self.min_edge_pct and model_prob_yes >= 60.0 and yes_ask > 0 and yes_ask <= 0.78:
+        # Penny Floor & Ceiling Enforcement: Trade only between min_entry_price (25¢) and max_entry_price (78¢)
+        if "BUY YES" in signal and edge_pct >= self.min_edge_pct and model_prob_yes >= 60.0 and yes_ask >= self.min_entry_price and yes_ask <= self.max_entry_price:
             target_side = "YES"
             target_price = yes_ask
             model_prob = model_prob_yes
-        elif "BUY NO" in signal and edge_pct >= self.min_edge_pct and model_prob_no >= 60.0 and no_ask > 0 and no_ask <= 0.78:
+        elif "BUY NO" in signal and edge_pct >= self.min_edge_pct and model_prob_no >= 60.0 and no_ask >= self.min_entry_price and no_ask <= self.max_entry_price:
             target_side = "NO"
             target_price = no_ask
             model_prob = model_prob_no
 
-        if not target_side or target_price <= 0.05:
+        if not target_side or target_price < self.min_entry_price or target_price > self.max_entry_price:
             return
 
         # Net Post-Fee Half-Kelly Position Sizing
@@ -202,10 +212,10 @@ class PaperTradingBot:
         if half_kelly_frac <= 0.01:
             return # Zero allocation if edge is insufficient after fees & 3¢ slippage
 
-        # Allocate between Half-Kelly and max_allocation_pct safety ceiling
+        # Allocate between Half-Kelly and max_allocation_pct, capped by hard max_trade_dollars ceiling
         alloc_pct = min(self.max_allocation_pct / 100.0, half_kelly_frac)
         equity = self.get_equity()
-        budget = min(self.cash, equity * alloc_pct)
+        budget = min(self.cash, equity * alloc_pct, self.max_trade_dollars)
 
         # Apply 3¢ adverse slippage penalty to fill price
         fill_price = min(0.99, target_price + (self.slippage_penalty_cents / 100.0))
@@ -294,6 +304,7 @@ class PaperTradingBot:
         )
 
         self.last_exit_ts = time.time()
+        self.last_exit_reason = reason
         self.open_position = None
 
     def _settle_at_expiration(
@@ -337,6 +348,7 @@ class PaperTradingBot:
         )
 
         self.last_exit_ts = time.time()
+        self.last_exit_reason = reason
         self.open_position = None
 
     def manual_close_position(self, reason: str = "MANUAL_EXIT") -> Dict[str, Any]:
@@ -400,6 +412,8 @@ class PaperTradingBot:
                 "take_profit_roi_pct": self.take_profit_roi_pct,
                 "stop_loss_roi_pct": self.stop_loss_roi_pct,
                 "max_allocation_pct": self.max_allocation_pct,
+                "max_trade_dollars": self.max_trade_dollars,
+                "min_entry_price": self.min_entry_price,
                 "min_edge_pct": self.min_edge_pct
             },
             "watchdog": self.watchdog.get_status() if self.watchdog else None,
