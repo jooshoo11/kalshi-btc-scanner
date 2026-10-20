@@ -54,8 +54,8 @@ class KalshiAuth:
     Kalshi API V2 Cryptographic Authentication Handler.
     Signs requests using RSA-PSS with SHA-256 and MGF1.
     """
-    def __init__(self, key_id: str, private_key_pem: Optional[str] = None, private_key_path: Optional[str] = None):
-        self.key_id = key_id.strip() if key_id else ""
+    def __init__(self, key_id: Optional[str] = None, private_key_pem: Optional[str] = None, private_key_path: Optional[str] = None):
+        self.key_id = (key_id or "").strip()
         self._private_key = None
 
         if private_key_pem:
@@ -63,6 +63,27 @@ class KalshiAuth:
         elif private_key_path and os.path.exists(private_key_path):
             with open(private_key_path, "rb") as f:
                 self._load_from_pem(f.read())
+
+    @classmethod
+    def from_env(cls) -> "KalshiAuth":
+        """
+        Securely load RSA-PSS credentials from environment variables.
+        Checks:
+          - KALSHI_API_KEY_ID or KALSHI_KEY_ID
+          - KALSHI_PRIVATE_KEY_PEM (unescapes newlines like '\\n')
+          - KALSHI_PRIVATE_KEY_PATH (path to private key file)
+        """
+        key_id = os.environ.get("KALSHI_API_KEY_ID") or os.environ.get("KALSHI_KEY_ID") or ""
+        pem_content = os.environ.get("KALSHI_PRIVATE_KEY_PEM")
+        key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH")
+
+        if pem_content:
+            formatted_pem = pem_content.replace("\\n", "\n").strip()
+            return cls(key_id=key_id, private_key_pem=formatted_pem)
+        elif key_path:
+            return cls(key_id=key_id, private_key_path=key_path)
+
+        return cls(key_id=key_id)
 
     def _load_from_pem(self, pem_bytes: bytes):
         try:
@@ -86,6 +107,8 @@ class KalshiAuth:
         ts = timestamp_ms or int(time.time() * 1000)
         # Remove query parameters if present from signature path
         clean_path = path.split("?")[0]
+        if not clean_path.startswith("/trade-api/v2"):
+            clean_path = f"/trade-api/v2{clean_path}"
         msg = f"{ts}{method.upper()}{clean_path}".encode("utf-8")
 
         sig = self._private_key.sign(
@@ -457,8 +480,11 @@ class KalshiStateReconciler:
     Queries Kalshi REST API (/portfolio/positions and /portfolio/orders) on boot
     and reconciles exchange state against the local SQLite kalshi_audit.db.
     """
-    def __init__(self, auth: Optional[KalshiAuth] = None, rest_url: str = KALSHI_PROD_REST_URL, dry_run: bool = False):
-        self.auth = auth
+    def __init__(self, auth: Optional[KalshiAuth] = None, rest_url: Optional[str] = None, dry_run: bool = False):
+        self.auth = auth or KalshiAuth.from_env()
+        if rest_url is None:
+            env_choice = os.environ.get("KALSHI_ENVIRONMENT", "demo").lower()
+            rest_url = KALSHI_PROD_REST_URL if env_choice == "prod" else KALSHI_DEMO_REST_URL
         self.rest_url = rest_url.rstrip("/")
         self.dry_run = dry_run
 
@@ -504,21 +530,20 @@ class KalshiStateReconciler:
             resp = await client.delete(f"{self.rest_url}{endpoint}", headers=headers)
             return resp.status_code == 200
 
-    async def reconcile_with_db(
+    async def reconcile_state_on_startup(
         self,
-        db_path_or_db: Any,
-        cancel_orphaned_orders: bool = True
+        db_path_or_db: Any = "kalshi_audit.db",
+        cancel_resting_orders: bool = True
     ) -> Dict[str, Any]:
         """
-        Synchronize live Kalshi exchange state with SQLite kalshi_audit.db:
-        1. Query open trades in SQLite.
-        2. Query live exchange positions & resting orders.
-        3. Close local DB positions if settled/closed on exchange while offline.
-        4. Reconcile exchange positions missing from DB.
-        5. Purge/cancel orphaned resting orders on exchange.
+        Cold-boot safety sequence executed before the WebSocket listener starts:
+        1. Fetch all open orders (/portfolio/orders with status=resting).
+        2. Issue batch or individual cancel requests for all resting orders.
+        3. Fetch all open positions (/portfolio/positions).
+        4. Log any discrepancies between the live positions and the local SQLite state.
         """
-        logger.info("[Reconciler] Initiating startup state reconciliation with Kalshi exchange...")
-        
+        logger.info("[Cold-Boot Reconciler] Starting pre-flight state reconciliation sequence...")
+
         import sqlite3
         if hasattr(db_path_or_db, "_get_conn"):
             conn = db_path_or_db._get_conn()
@@ -532,72 +557,132 @@ class KalshiStateReconciler:
 
         report: Dict[str, Any] = {
             "timestamp": time.time(),
+            "resting_orders_fetched": 0,
+            "resting_orders_canceled": [],
+            "live_positions_fetched": 0,
             "active_exchange_positions": 0,
             "local_db_open_trades": 0,
+            "discrepancies_found": [],
             "reconciled_closed_in_db": [],
             "reconciled_opened_in_db": [],
-            "resting_orders_canceled": [],
+            "reconciled_count_mismatches": [],
             "status": "SUCCESS"
         }
 
         try:
-            # 1. Fetch live exchange state
-            exchange_positions = await self.fetch_exchange_positions()
+            # ------------------------------------------------------------------
+            # STEP 1: Fetch all open orders (status=resting)
+            # ------------------------------------------------------------------
+            logger.info("[Cold-Boot Reconciler] Step 1/4: Fetching open resting orders from Kalshi exchange...")
             resting_orders = await self.fetch_resting_orders()
+            report["resting_orders_fetched"] = len(resting_orders)
+            logger.info(f"[Cold-Boot Reconciler] Step 1 Complete: Fetched {len(resting_orders)} resting order(s).")
 
+            # ------------------------------------------------------------------
+            # STEP 2: Issue cancel requests for all resting orders
+            # ------------------------------------------------------------------
+            if cancel_resting_orders and resting_orders:
+                logger.info(f"[Cold-Boot Reconciler] Step 2/4: Canceling {len(resting_orders)} open resting order(s)...")
+                for ord_item in resting_orders:
+                    ord_id = ord_item.get("order_id", "")
+                    if ord_id:
+                        canceled = await self.cancel_order(ord_id)
+                        if canceled:
+                            report["resting_orders_canceled"].append(ord_id)
+                            logger.info(f"[Cold-Boot Reconciler] Successfully canceled resting order: {ord_id}")
+                        else:
+                            logger.warning(f"[Cold-Boot Reconciler] Failed to cancel resting order: {ord_id}")
+            else:
+                logger.info("[Cold-Boot Reconciler] Step 2 Complete: No resting orders require cancellation.")
+
+            # ------------------------------------------------------------------
+            # STEP 3: Fetch all open positions (/portfolio/positions)
+            # ------------------------------------------------------------------
+            logger.info("[Cold-Boot Reconciler] Step 3/4: Fetching live portfolio positions from Kalshi exchange...")
+            exchange_positions = await self.fetch_exchange_positions()
+            report["live_positions_fetched"] = len(exchange_positions)
             report["active_exchange_positions"] = len(exchange_positions)
 
-            # Map active exchange positions by ticker
-            pos_map = {}
+            # Map active exchange positions by ticker (only positions with > 0 contracts)
+            pos_map: Dict[str, Dict[str, Any]] = {}
             for p in exchange_positions:
                 tk = p.get("ticker", "")
-                contracts = p.get("position", 0)
+                contracts = int(p.get("position", 0))
                 if tk and contracts > 0:
                     pos_map[tk] = p
+            logger.info(f"[Cold-Boot Reconciler] Step 3 Complete: {len(pos_map)} active position(s) on exchange.")
 
-            # 2. Inspect local DB open trades
+            # ------------------------------------------------------------------
+            # STEP 4: Log any discrepancies between live positions and local SQLite state
+            # ------------------------------------------------------------------
+            logger.info("[Cold-Boot Reconciler] Step 4/4: Cross-referencing live exchange positions with local SQLite state...")
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM trades WHERE status = 'OPEN'")
             db_open_trades = [dict(r) for r in cursor.fetchall()]
             report["local_db_open_trades"] = len(db_open_trades)
 
-            # 3. Check for DB trades that are no longer open on exchange (settled or filled offline)
+            db_tickers = {t["ticker"] for t in db_open_trades}
+
+            # Case 4A: Trade open in SQLite but closed/settled on exchange
             for db_trade in db_open_trades:
                 trade_id = db_trade["id"]
                 ticker = db_trade["ticker"]
-                contracts = db_trade["contracts"]
-                cost = db_trade["cost_dollars"]
+                contracts = int(db_trade["contracts"])
+                cost = float(db_trade["cost_dollars"])
 
-                if ticker not in pos_map or pos_map[ticker].get("position", 0) <= 0:
-                    logger.warning(f"[Reconciler] DB Trade #{trade_id} ({ticker}) settled/liquidated while offline. Closing in DB.")
-                    exit_price = 0.0
-                    pnl_dollars = -cost
-                    pnl_pct = -100.0
+                if ticker not in pos_map:
+                    msg = (
+                        f"[DISCREPANCY: OFFLINE_SETTLEMENT] DB Trade #{trade_id} ({ticker}, {contracts} contracts) "
+                        f"is marked OPEN in SQLite, but not found on exchange. Marking CLOSED in SQLite."
+                    )
+                    logger.warning(msg)
+                    report["discrepancies_found"].append(msg)
+
                     cursor.execute("""
                         UPDATE trades
-                        SET exit_price = ?,
+                        SET exit_price = 0.0,
                             exit_timestamp = ?,
                             exit_reason = 'EXCHANGE_RECONCILED_OFFLINE',
                             pnl_dollars = ?,
-                            pnl_pct = ?,
+                            pnl_pct = -100.0,
                             status = 'CLOSED'
                         WHERE id = ?
-                    """, (exit_price, time.time(), pnl_dollars, pnl_pct, trade_id))
+                    """, (time.time(), -cost, trade_id))
                     conn.commit()
-                    report["reconciled_closed_in_db"].append({
-                        "trade_id": trade_id,
-                        "ticker": ticker,
-                        "action": "CLOSED"
-                    })
+                    report["reconciled_closed_in_db"].append({"trade_id": trade_id, "ticker": ticker})
 
-            # 4. Check for exchange positions not recorded in DB
-            db_tickers = {t["ticker"] for t in db_open_trades}
+                else:
+                    # Case 4C: Position exists in both, check contract count match
+                    ex_contracts = int(pos_map[ticker].get("position", 0))
+                    if ex_contracts != contracts:
+                        msg = (
+                            f"[DISCREPANCY: COUNT_MISMATCH] Contract count mismatch on {ticker}: "
+                            f"SQLite has {contracts}, live exchange has {ex_contracts}. Syncing count in SQLite."
+                        )
+                        logger.warning(msg)
+                        report["discrepancies_found"].append(msg)
+                        cursor.execute("UPDATE trades SET contracts = ? WHERE id = ?", (ex_contracts, trade_id))
+                        conn.commit()
+                        report["reconciled_count_mismatches"].append({
+                            "trade_id": trade_id,
+                            "ticker": ticker,
+                            "db_contracts": contracts,
+                            "ex_contracts": ex_contracts
+                        })
+
+            # Case 4B: Live position on exchange missing from SQLite
             for ticker, pos in pos_map.items():
                 if ticker not in db_tickers:
-                    contracts = pos.get("position", 0)
-                    exposure = pos.get("market_exposure", 0.0)
+                    contracts = int(pos.get("position", 0))
+                    exposure = float(pos.get("market_exposure", 0.0))
                     entry_p = (exposure / contracts) if contracts > 0 else 0.50
-                    logger.info(f"[Reconciler] Exchange position {ticker} ({contracts} contracts) missing from DB. Syncing to DB...")
+                    msg = (
+                        f"[DISCREPANCY: UNTRACKED_POSITION] Live position on {ticker} ({contracts} contracts) "
+                        f"found on exchange but missing from SQLite. Syncing to SQLite trades table."
+                    )
+                    logger.warning(msg)
+                    report["discrepancies_found"].append(msg)
+
                     cursor.execute("""
                         INSERT INTO trades (
                             timestamp, ticker, series, side, entry_price, contracts,
@@ -605,36 +690,32 @@ class KalshiStateReconciler:
                         ) VALUES (?, ?, 'KXBTC15M', 'yes', ?, ?, ?, 0.0, 'OPEN', 'RECONCILED_FROM_EXCHANGE')
                     """, (time.time(), ticker, entry_p, contracts, exposure))
                     conn.commit()
-                    report["reconciled_opened_in_db"].append({
-                        "ticker": ticker,
-                        "contracts": contracts,
-                        "action": "SYNCED_TO_DB"
-                    })
+                    report["reconciled_opened_in_db"].append({"ticker": ticker, "contracts": contracts})
 
-            # 5. Cancel orphaned resting orders
-            if cancel_orphaned_orders and resting_orders:
-                for ord_item in resting_orders:
-                    ord_id = ord_item.get("order_id", "")
-                    if ord_id:
-                        logger.info(f"[Reconciler] Cancelling orphaned resting order {ord_id} on exchange...")
-                        canceled = await self.cancel_order(ord_id)
-                        if canceled:
-                            report["resting_orders_canceled"].append(ord_id)
+            if not report["discrepancies_found"]:
+                logger.info("[Cold-Boot Reconciler] Step 4 Complete: 0 discrepancies found. Local SQLite and live exchange are 100% in sync.")
+            else:
+                logger.info(f"[Cold-Boot Reconciler] Step 4 Complete: Resolved {len(report['discrepancies_found'])} discrepancy(ies).")
 
             logger.info(
-                f"[Reconciler] Startup reconciliation complete: {len(report['reconciled_closed_in_db'])} closed in DB, "
-                f"{len(report['reconciled_opened_in_db'])} synced to DB, {len(report['resting_orders_canceled'])} orphaned orders canceled."
+                f"[Cold-Boot Reconciler] Complete: Canceled {len(report['resting_orders_canceled'])} order(s), "
+                f"Closed {len(report['reconciled_closed_in_db'])} trade(s) in DB, "
+                f"Synced {len(report['reconciled_opened_in_db'])} missing position(s) to DB."
             )
             return report
 
         except Exception as e:
-            logger.error(f"[Reconciler] Error during reconciliation: {e}")
+            logger.error(f"[Cold-Boot Reconciler] Error during reconciliation: {e}")
             report["status"] = "ERROR"
             report["error"] = str(e)
             return report
         finally:
             if should_close:
                 conn.close()
+
+    async def reconcile_with_db(self, db_path_or_db: Any, cancel_orphaned_orders: bool = True) -> Dict[str, Any]:
+        """Backward-compatible alias for reconcile_state_on_startup."""
+        return await self.reconcile_state_on_startup(db_path_or_db=db_path_or_db, cancel_resting_orders=cancel_orphaned_orders)
 
 
 # ==============================================================================
@@ -652,16 +733,19 @@ class KalshiOrderManagementSystem:
     def __init__(
         self,
         auth: Optional[KalshiAuth] = None,
-        rest_url: str = KALSHI_PROD_REST_URL,
+        rest_url: Optional[str] = None,
         ws_client: Optional[KalshiWebSocketClient] = None,
         watchdog: Optional[StaleTickWatchdog] = None,
         dry_run: bool = False
     ):
-        self.auth = auth
-        self.rest_url = rest_url
+        self.auth = auth or KalshiAuth.from_env()
+        if rest_url is None:
+            env_choice = os.environ.get("KALSHI_ENVIRONMENT", "demo").lower()
+            rest_url = KALSHI_PROD_REST_URL if env_choice == "prod" else KALSHI_DEMO_REST_URL
+        self.rest_url = rest_url.rstrip("/")
         self.ws_client = ws_client
         self.watchdog = watchdog or StaleTickWatchdog()
-        self.reconciler = KalshiStateReconciler(auth=auth, rest_url=rest_url, dry_run=dry_run)
+        self.reconciler = KalshiStateReconciler(auth=self.auth, rest_url=self.rest_url, dry_run=dry_run)
         self.dry_run = dry_run
 
     async def execute_entry_with_vwap_protection(
@@ -876,19 +960,56 @@ class KalshiOrderManagementSystem:
             resp = await client.delete(f"{self.rest_url}{endpoint}", headers=headers)
             return resp.status_code == 200
 
+    async def reconcile_state_on_startup(
+        self,
+        db_path_or_db: Any = "kalshi_audit.db",
+        cancel_resting_orders: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Cold-boot safety sequence executed before the WebSocket listener starts:
+        1. Fetch all open orders (/portfolio/orders with status=resting).
+        2. Issue batch or individual cancel requests for all resting orders.
+        3. Fetch all open positions (/portfolio/positions).
+        4. Log any discrepancies between the live positions and the local SQLite state.
+        """
+        return await self.reconciler.reconcile_state_on_startup(
+            db_path_or_db=db_path_or_db,
+            cancel_resting_orders=cancel_resting_orders
+        )
+
     async def reconcile_exchange_state(
         self,
-        db_path_or_db: Any,
+        db_path_or_db: Any = "kalshi_audit.db",
         cancel_orphaned_orders: bool = True
     ) -> Dict[str, Any]:
         """
-        Startup sequence reconciling exchange state with SQLite kalshi_audit.db.
-        Queries /portfolio/positions and /portfolio/orders on boot.
+        Backward-compatible alias for reconcile_state_on_startup.
         """
-        return await self.reconciler.reconcile_with_db(
+        return await self.reconcile_state_on_startup(
             db_path_or_db=db_path_or_db,
-            cancel_orphaned_orders=cancel_orphaned_orders
+            cancel_resting_orders=cancel_orphaned_orders
         )
+
+
+async def reconcile_state_on_startup(
+    auth: Optional[KalshiAuth] = None,
+    rest_url: Optional[str] = None,
+    db_path: str = "kalshi_audit.db",
+    cancel_resting_orders: bool = True,
+    dry_run: bool = False
+) -> Dict[str, Any]:
+    """
+    Top-level standalone cold-boot reconciliation runner:
+    1. Fetch all open orders (/portfolio/orders with status=resting).
+    2. Issue cancel requests for all resting orders.
+    3. Fetch all open positions (/portfolio/positions).
+    4. Log any discrepancies between the live positions and the local SQLite state.
+    """
+    reconciler = KalshiStateReconciler(auth=auth, rest_url=rest_url, dry_run=dry_run)
+    return await reconciler.reconcile_state_on_startup(
+        db_path_or_db=db_path,
+        cancel_resting_orders=cancel_resting_orders
+    )
 
 
 
