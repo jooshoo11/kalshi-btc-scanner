@@ -560,16 +560,19 @@ async def live_stream_sse(request):
     """
     async def event_generator():
         first_tick = True
-        while True:
-            if await request.is_disconnected():
-                break
-            if first_tick:
-                payload = json.dumps(assemble_full_payload())
-                first_tick = False
-            else:
-                payload = json.dumps(assemble_tick_payload())
-            yield f"data: {payload}\n\n"
-            await asyncio.sleep(1.0)
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                if first_tick:
+                    payload = json.dumps(assemble_full_payload())
+                    first_tick = False
+                else:
+                    payload = json.dumps(assemble_tick_payload())
+                yield f"data: {payload}\n\n"
+                await asyncio.sleep(1.0)
+        except (asyncio.CancelledError, GeneratorExit, Exception):
+            pass
 
     return StreamingResponse(
         event_generator(),

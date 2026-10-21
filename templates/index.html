@@ -1760,18 +1760,30 @@
       if (tabId === 'tab-mc') populateMcDefaults();
     }
 
-    // Connect Server-Sent Events (SSE)
+    // Connect Server-Sent Events (SSE) with robust reconnection & REST polling fallback
+    let currentSse = null;
+    let lastSseTickTs = Date.now();
+
     function connectSse() {
+      if (currentSse) {
+        try { currentSse.close(); } catch (e) {}
+        currentSse = null;
+      }
+
       const sse = new EventSource('/api/stream');
+      currentSse = sse;
       const statusBadge = document.getElementById('streamStatusBadge');
 
       sse.onopen = () => {
-        statusBadge.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> LIVE STREAM';
-        statusBadge.className = 'text-[11px] px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-mono font-semibold flex items-center gap-1.5';
+        if (statusBadge) {
+          statusBadge.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> LIVE STREAM';
+          statusBadge.className = 'text-[11px] px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-mono font-semibold flex items-center gap-1.5';
+        }
       };
 
       sse.onmessage = (event) => {
         try {
+          lastSseTickTs = Date.now();
           const data = JSON.parse(event.data);
           updateDashboard(data);
         } catch (e) {
@@ -1780,11 +1792,42 @@
       };
 
       sse.onerror = () => {
-        statusBadge.innerHTML = '<span class="w-2 h-2 rounded-full bg-rose-500"></span> RECONNECTING';
-        statusBadge.className = 'text-[11px] px-2.5 py-1 rounded-full bg-rose-500/15 text-rose-400 border border-rose-500/30 font-mono font-semibold flex items-center gap-1.5';
-        setTimeout(connectSse, 3000);
+        if (statusBadge) {
+          statusBadge.innerHTML = '<span class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span> RECONNECTING...';
+          statusBadge.className = 'text-[11px] px-2.5 py-1 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono font-semibold flex items-center gap-1.5';
+        }
+        try { sse.close(); } catch (e) {}
+        currentSse = null;
+        setTimeout(connectSse, 2500);
       };
     }
+
+    // Always release SSE connection on page unload
+    window.addEventListener('beforeunload', () => {
+      if (currentSse) {
+        try { currentSse.close(); } catch (e) {}
+        currentSse = null;
+      }
+    });
+
+    // Automatic Fallback Polling Loop:
+    // If browser socket limits or network proxies block SSE ticks for >3.5s,
+    // seamlessly fall back to REST polling every 2.0s so the dashboard never freezes!
+    setInterval(() => {
+      if (Date.now() - lastSseTickTs > 3500) {
+        fetch('/api/scan')
+          .then(r => r.json())
+          .then(data => {
+            updateDashboard(data);
+            const statusBadge = document.getElementById('streamStatusBadge');
+            if (statusBadge && (!currentSse || currentSse.readyState !== EventSource.OPEN)) {
+              statusBadge.innerHTML = '<span class="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span> POLLING ACTIVE';
+              statusBadge.className = 'text-[11px] px-2.5 py-1 rounded-full bg-cyan-500/15 text-cyan-400 border border-cyan-500/30 font-mono font-semibold flex items-center gap-1.5';
+            }
+          })
+          .catch(() => {});
+      }
+    }, 2000);
 
     async function triggerManualRescan() {
       const btn = document.getElementById('rescanBtn');
