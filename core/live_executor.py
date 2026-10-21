@@ -959,24 +959,40 @@ class KalshiOrderManagementSystem:
             order_res["order_id"] = order_id or f"sim_{int(time.time()*1000)}"
             return order_res
 
-        # Allow matching engine to execute against book (0.8s for exchange matching)
-        await asyncio.sleep(0.8)
+        # Allow matching engine to execute against book (Option C Hybrid Execution)
+        # Step 1: Initial fast taker check (1.0s)
+        await asyncio.sleep(1.0)
         order_status = await self._get_order_status(order_id)
         filled_count = order_status.get("fill_count", 0)
         remaining_count = order_status.get("remaining_count", target_contracts - filled_count)
         status_str = order_status.get("status", "").lower()
 
-        # If any contracts remain resting/open, cancel immediately so no orphaned orders linger
+        # Step 2: Hybrid Resting Window (poll across up to 3 intervals of 1.8s ~ 5.4s total)
+        # Gives Kalshi Demo participants time to trade against the limit order
         if remaining_count > 0 and status_str in ("resting", "open", "pending", "partially_filled"):
-            logger.info(f"[OMS Entry] Cancelling unfilled resting contracts ({remaining_count} resting on book)...")
+            for rest_step in range(3):
+                if remaining_count <= 0 or status_str in ("executed", "filled"):
+                    break
+                await asyncio.sleep(1.8)
+                order_status = await self._get_order_status(order_id)
+                filled_count = order_status.get("fill_count", filled_count)
+                remaining_count = order_status.get("remaining_count", target_contracts - filled_count)
+                status_str = order_status.get("status", status_str).lower()
+                if filled_count > 0:
+                    logger.info(f"[OMS Entry] Partial fill progress: {filled_count}/{target_contracts} contracts filled ({remaining_count} remaining on book)...")
+
+        # Step 3: Cancel any remaining unfilled contracts cleanly so no orphaned orders sit into expiry
+        if remaining_count > 0 and status_str in ("resting", "open", "pending", "partially_filled"):
+            logger.info(f"[OMS Entry] Cancelling unfilled resting remainder ({remaining_count} resting on book)...")
             cancel_ok = await self._cancel_rest_order(order_id, ticker=ticker)
             await asyncio.sleep(0.8)
             final_status = await self._get_order_status(order_id)
             filled_count = final_status.get("fill_count", filled_count)
             status_str = final_status.get("status", status_str).lower()
 
+        # Step 4: Accept and commit any filled contracts
         if filled_count <= 0:
-            logger.warning(f"[OMS Entry] Order {order_id} received 0 fills on exchange book. Entry canceled cleanly.")
+            logger.warning(f"[OMS Entry] Order {order_id} received 0 fills on exchange book after resting window. Entry canceled cleanly.")
             return {
                 "status": "UNFILLED",
                 "reason": "Order received 0 fills on orderbook",
