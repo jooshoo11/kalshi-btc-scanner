@@ -341,17 +341,22 @@ async def multi_coin_production_loop():
                     elif multicoin_engine.candle_stopped_out.get(coin) == close_time:
                         action_status = "HOLD_STOPPED_OUT"
                         action_reason = "Candle lockout: stopped out in this 15m candle"
-                    elif prob_yes_pct >= 60.0 and edge_y >= 4.0 and 0.20 <= y_ask <= 0.80:
+                    elif prob_yes_pct >= 60.0 and edge_y >= 4.0 and 0.20 <= y_ask <= 0.68:
                         action_status = "BUY_YES"
                         action_reason = f"Conviction {prob_yes_pct:.1f}% & Edge +{edge_y:.1f}% meets criteria"
-                    elif prob_no_pct >= 60.0 and edge_n >= 4.0 and 0.20 <= n_ask <= 0.80:
+                    elif prob_no_pct >= 60.0 and edge_n >= 4.0 and 0.20 <= n_ask <= 0.68:
                         action_status = "BUY_NO"
                         action_reason = f"Conviction {prob_no_pct:.1f}% & Edge +{edge_n:.1f}% meets criteria"
                     else:
                         best_p = max(prob_yes_pct, prob_no_pct)
                         best_e = max(edge_y, edge_n)
+                        best_ask = y_ask if prob_yes_pct >= prob_no_pct else n_ask
                         if best_p < 60.0:
                             action_reason = f"Low Conviction ({best_p:.1f}% < 60%)"
+                        elif best_ask > 0.68:
+                            action_reason = f"Price above 68¢ cap ({int(best_ask*100)}¢ > 68¢)"
+                        elif best_ask < 0.20:
+                            action_reason = f"Price below 20¢ floor ({int(best_ask*100)}¢ < 20¢)"
                         else:
                             action_reason = f"Negative Edge ({best_e:+.1f}% < +4.0%)"
 

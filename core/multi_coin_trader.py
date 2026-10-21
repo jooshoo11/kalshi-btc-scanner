@@ -197,6 +197,8 @@ class MultiCoinPaperEngine:
 
         # Risk parameters
         self.max_trade_alloc_pct = 20.0     # 20% of coin's sub-equity per trade
+        self.max_contracts_per_trade = 60   # Liquidity protection cap to prevent orderbook slippage
+        self.max_entry_price = 0.68         # Cap entry price at 68¢ to maintain positive risk/reward
         self.take_profit_roi_pct = 25.0     # Lock in +25% ROI
         self.stop_loss_roi_pct = 25.0       # Exit at -25% ROI if model confirms decay
         self.stop_loss_max_prob_pct = 38.0  # Dual confirmation: cut loss if model prob <= 38.0%
@@ -314,13 +316,20 @@ class MultiCoinPaperEngine:
         if not target_side or target_price <= 0.0:
             return None
 
-        # Position Sizing: 20% of coin's sub-equity
+        # Entry price gate: reject contracts priced above 68¢ (or below 20¢)
+        if target_price > getattr(self, "max_entry_price", 0.68) or target_price < 0.20:
+            return None
+
+        # Position Sizing: 20% of coin's sub-equity capped at 60 contracts
         sub_equity = self.coin_equities.get(coin, self.total_equity * self.coin_weights.get(coin, 0.25))
         trade_budget = sub_equity * (self.max_trade_alloc_pct / 100.0)
         trade_budget = min(trade_budget, self.total_cash)
 
         fee_est = calculate_kalshi_taker_fee(1, target_price)
         contracts = int(trade_budget / (target_price + fee_est))
+        max_c = getattr(self, "max_contracts_per_trade", 60)
+        if max_c > 0:
+            contracts = min(contracts, max_c)
         if contracts < 1:
             return None
 
