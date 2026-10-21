@@ -100,33 +100,94 @@ An institutional-grade, high-frequency market scanner, quantitative prediction e
 
 ## Quick Start
 
-### 1. Launch Server
+### Directory Location
+The project is located at:
 ```bash
-cd /home/jooshoo/kalshi_scanner
-./run.sh
-```
-Or directly:
-```bash
-python3 app.py
-```
-
-### 2. Access Live Terminal
-Open your browser to:
-```
-http://localhost:8088
+/home/jooshoo/kalshi_scanner
 ```
 
 ---
 
-## API Endpoints
+## Running the Dashboards & Bots
 
-- `GET /api/scan`: Instantaneous snapshot of all metrics, bot state, strikes, and top +EV opportunities.
-- `GET /api/stream`: High-frequency Server-Sent Events (SSE) streaming live ticks and bot updates every second.
-- `GET /api/bot/status`: Current paper account balance, equity, active position, and settings.
-- `POST /api/bot/settings`: Update take-profit, stop-loss, max allocation, or toggle bot on/off.
-- `POST /api/bot/close_position`: Emergency manual close of active open position.
-- `POST /api/bot/reset`: Reset paper account back to $50.00.
-- `GET /api/audit/export`: Download complete CSV audit log of all trades.
-- `GET /api/audit/history`: Time-series equity curve and trade logs.
-- `POST /api/simulate`: Interactive 10,000-path Monte Carlo simulation endpoint.
-- `POST /api/trigger`: Triggers an immediate re-scan.
+### 1. Chainlit Agent & Brain Dashboard (Port 8089)
+Native Chain-of-Thought visualization, live market reasoning, tool calls, and interactive quant chat:
+```bash
+cd /home/jooshoo/kalshi_scanner
+chainlit run chainlit_agent.py --port 8089
+```
+Access at:
+- **Local**: `http://localhost:8089`
+- **LAN**: `http://10.0.0.50:8089`
+
+### 2. Live Web Dashboard & Multi-Coin Server (Port 8088)
+Continuous Starlette / SSE streaming dashboard with Bloomberg-style terminal and multi-coin tabs:
+```bash
+cd /home/jooshoo/kalshi_scanner
+python3 app.py
+```
+Access at:
+- **Local**: `http://localhost:8088`
+- **LAN**: `http://10.0.0.50:8088`
+
+### 3. Dedicated Execution Bot (CLI)
+```bash
+cd /home/jooshoo/kalshi_scanner
+
+# Run in Production Paper Trading Mode (Real orderbooks, $0 Risk):
+python3 run_live_bot.py --mode=prod-paper
+
+# Run in Kalshi Demo Mode (Real demo orders on exchange):
+python3 run_live_bot.py --mode=live-demo
+```
+
+---
+
+## Project Structure & File Guide
+
+```
+/home/jooshoo/kalshi_scanner/
+├── core/                                # Shared Quantitative Infrastructure
+│   ├── multi_coin_trader.py             # Multi-coin paper engine & dynamic rebalancer
+│   ├── live_executor.py                 # OMS, L2 orderbook sync, bounded spread-crossing
+│   ├── prediction_engine.py             # Drift-diffusion & Black-Scholes pricing
+│   ├── portfolio_manager.py             # Global cash & multi-asset capital allocator
+│   ├── kalshi_client.py                 # Async REST & WebSocket client
+│   ├── bot_database.py                  # SQLite audit persistence
+│   └── tests/                           # Integration test suite
+│
+├── coins/                               # Asset-Specific Workspaces
+│   ├── btc/                             # KXBTC15M (Bitcoin)
+│   ├── eth/                             # KXETH15M (Ethereum)
+│   ├── sol/                             # KXSOL15M (Solana)
+│   └── xrp/                             # KXXRP15M (Ripple)
+│
+├── Dashboards & Interfaces:
+│   ├── chainlit_agent.py                # Chainlit Brain & Agent Dashboard (Port 8089)
+│   ├── chainlit.md                      # Chainlit welcome configuration
+│   ├── .chainlit/                       # Chainlit theme & CoT settings
+│   ├── app.py                           # Starlette / Uvicorn Server & API (Port 8088)
+│   └── templates/index.html             # Bloomberg-style Terminal UI
+│
+├── Execution Bots:
+│   ├── run_live_bot.py                  # Standalone CLI execution bot (Demo or Prod-Paper)
+│   ├── burn_in_multicoin.py             # Multi-coin historical calibration & burn-in script
+│   └── paper_trader.py                  # Single-coin paper trading engine
+│
+└── SQLite Audit Databases:
+    ├── multi_coin_paper.db              # 4-Coin Production Paper Trading ($100 baseline)
+    ├── kalshi_live_demo.db              # Kalshi Live Demo Order Execution
+    └── kalshi_audit.db                  # Single-Coin Paper Trading Audit Trail
+```
+
+---
+
+## API Endpoints (Port 8088)
+
+- `GET /api/scan`: Instantaneous snapshot of all metrics, strikes, and top +EV opportunities.
+- `GET /api/stream`: High-frequency Server-Sent Events (SSE) streaming live ticks every second.
+- `GET /api/multicoin/status`: 4-coin portfolio equity, dynamic weights, and active positions.
+- `GET /api/multicoin/trades`: Recent multi-coin trade fills and PnL.
+- `GET /api/audit/block_summary`: Real-time block audit data for automated monitoring.
+- `GET /api/bot/status`: Single-coin bot balance, equity, and parameters.
+- `GET /api/audit/export`: Complete CSV audit export.
