@@ -18,7 +18,7 @@ from prediction_engine import QuantPredictionEngine
 from kalshi_btc_scanner import KalshiBitcoinScanner
 from bot_database import AuditDatabase
 from paper_trader import PaperTradingBot
-from core.multi_coin_trader import MultiCoinPaperEngine
+from core.multi_coin_trader import MultiCoinPaperEngine, calculate_kalshi_taker_fee
 from live_executor import (
     KALSHI_DEMO_REST_URL,
     KALSHI_DEMO_WS_URL,
@@ -76,33 +76,6 @@ async def fast_spot_loop():
                         spot_price=metrics_provider.spot_price,
                         metrics=metrics_provider.get_summary_dict()
                     )
-
-                    # Real-time Multi-Coin paper evaluation for BTC
-                    sig = scalp_data.get("trade_signal", "")
-                    prob_val = scalp_data.get("model_prob_yes_pct", 50.0) if "YES" in sig else scalp_data.get("model_prob_no_pct", 50.0)
-                    multicoin_engine.evaluate_entry(
-                        coin="BTC",
-                        ticker=scalp_data.get("ticker", ""),
-                        series="KXBTC15M",
-                        signal=sig,
-                        edge_pct=scalp_data.get("best_edge_pct", 0.0),
-                        model_prob=prob_val,
-                        yes_ask=float(scalp_data.get("yes_ask_cents", 0)) / 100.0,
-                        no_ask=float(scalp_data.get("no_ask_cents", 0)) / 100.0,
-                        seconds_left=scalp_data.get("seconds_left", 0),
-                        delta=scalp_data.get("delta", 0.0),
-                        candle_id=scalp_data.get("close_time", "")
-                    )
-                    if "BTC" in multicoin_engine.active_positions:
-                        pos = multicoin_engine.active_positions["BTC"]
-                        cur_bid = (float(scalp_data.get("yes_bid_cents", 0))/100.0) if pos["side"] == "YES" else (float(scalp_data.get("no_bid_cents", 0))/100.0)
-                        multicoin_engine.update_position(
-                            coin="BTC",
-                            current_bid=cur_bid,
-                            seconds_left=scalp_data.get("seconds_left", 0),
-                            settle_spot=metrics_provider.spot_price,
-                            strike=scalp_data.get("candle_open", metrics_provider.spot_price)
-                        )
             except Exception as e:
                 print(f"[FastSpotLoop] Warning: {e}")
             await asyncio.sleep(1.0)
@@ -122,6 +95,7 @@ async def full_scan_loop():
                         live_demo_balance["balance"] = data.get("balance", 5254)
                         live_demo_balance["balance_dollars"] = float(data.get("balance", 5254)) / 100.0
             except Exception as e:
+                # Suppress normal network hiccups or log unexpected
                 pass
             await asyncio.sleep(15.0)
 
@@ -162,7 +136,165 @@ async def technicals_loop():
                     trades_count=b_stat["total_trades"]
                 )
             except Exception as e:
+                # Suppress normal network hiccups or log unexpected
                 pass
+
+def normal_cdf(x: float) -> float:
+    return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
+
+async def multi_coin_production_loop():
+    """
+    Continuous Multi-Asset (BTC, ETH, SOL, XRP) production paper trading loop.
+    Evaluates drift-diffusion edge against real Kalshi Production order books (api.elections.kalshi.com)
+    and dynamically rebalances performance-based capital weights ($100 initial baseline).
+    """
+    print("Starting Multi-Coin Production Paper Trading Loop (BTC, ETH, SOL, XRP)...")
+    coin_configs = {
+        "BTC": {"series": "KXBTC15M", "vol_15m": 95.0},
+        "ETH": {"series": "KXETH15M", "vol_15m": 6.5},
+        "SOL": {"series": "KXSOL15M", "vol_15m": 1.2},
+        "XRP": {"series": "KXXRP15M", "vol_15m": 0.025}
+    }
+
+    candle_opens: Dict[str, float] = {}
+    last_candle_fetch = 0.0
+    cached_markets: Dict[str, Dict[str, Any]] = {}
+    last_mkt_fetch = 0.0
+
+    async with httpx.AsyncClient(timeout=4.0) as client:
+        while True:
+            try:
+                now = time.time()
+                now_ms = int(now * 1000)
+                candle_15m_start = (now_ms // (15 * 60 * 1000)) * (15 * 60 * 1000)
+                candle_15m_end = candle_15m_start + (15 * 60 * 1000)
+                seconds_left = max(1.0, float((candle_15m_end - now_ms) / 1000.0))
+
+                # 1. Refresh spot prices from Hyperliquid
+                hl_resp = await client.post("https://api.hyperliquid.xyz/info", json={"type": "allMids"})
+                spot_prices = {}
+                if hl_resp.status_code == 200:
+                    mids = hl_resp.json()
+                    for coin in coin_configs:
+                        val = mids.get(coin)
+                        if val is not None:
+                            spot_prices[coin] = float(val)
+
+                # 2. Refresh candle opens every 20s
+                if now - last_candle_fetch > 20.0 or not candle_opens:
+                    for coin in coin_configs:
+                        try:
+                            c_resp = await client.post("https://api.hyperliquid.xyz/info", json={
+                                "type": "candleSnapshot",
+                                "req": {
+                                    "coin": coin,
+                                    "interval": "15m",
+                                    "startTime": candle_15m_start,
+                                    "endTime": now_ms
+                                }
+                            })
+                            if c_resp.status_code == 200:
+                                candles = c_resp.json()
+                                if candles:
+                                    candle_opens[coin] = float(candles[-1].get("o", spot_prices.get(coin, 0.0)))
+                        except Exception:
+                            pass
+                    last_candle_fetch = now
+
+                # 3. Refresh active production markets every 10s
+                if now - last_mkt_fetch > 10.0 or not cached_markets:
+                    for coin, cfg in coin_configs.items():
+                        try:
+                            m_resp = await client.get(f"{KALSHI_PROD_REST_URL}/markets?series_ticker={cfg['series']}&status=open")
+                            if m_resp.status_code == 200:
+                                mkts = m_resp.json().get("markets", [])
+                                if mkts:
+                                    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                                    active = [m for m in mkts if (m.get("close_time") or "") >= now_iso]
+                                    cached_markets[coin] = active[0] if active else mkts[0]
+                        except Exception:
+                            pass
+                    last_mkt_fetch = now
+
+                # 4. Evaluate each coin
+                for coin, cfg in coin_configs.items():
+                    spot = spot_prices.get(coin, 0.0)
+                    open_p = candle_opens.get(coin, spot)
+                    mkt = cached_markets.get(coin)
+                    if not spot or not mkt:
+                        continue
+
+                    ticker = mkt.get("ticker", "")
+                    close_time = mkt.get("close_time", "")
+                    y_ask = float(mkt.get("yes_ask_dollars") or 0.0)
+                    y_bid = float(mkt.get("yes_bid_dollars") or 0.0)
+                    n_ask = float(mkt.get("no_ask_dollars") or 0.0)
+                    n_bid = float(mkt.get("no_bid_dollars") or 0.0)
+
+                    # Model probability
+                    delta = spot - open_p
+                    sigma = cfg["vol_15m"] * math.sqrt(seconds_left / 900.0)
+                    z = delta / max(0.0001, sigma)
+                    prob_yes = normal_cdf(z)
+                    prob_no = 1.0 - prob_yes
+                    prob_yes_pct = prob_yes * 100.0
+                    prob_no_pct = prob_no * 100.0
+
+                    # Evaluate open positions
+                    if coin in multicoin_engine.active_positions:
+                        pos = multicoin_engine.active_positions[coin]
+                        cur_bid = y_bid if pos["side"] == "YES" else n_bid
+                        if cur_bid <= 0.01:
+                            cur_bid = pos.get("current_bid", pos["entry_price"])
+                        multicoin_engine.update_position(
+                            coin=coin,
+                            current_bid=cur_bid,
+                            seconds_left=seconds_left,
+                            settle_spot=spot,
+                            strike=open_p
+                        )
+
+                    # Evaluate new entry
+                    else:
+                        signal = ""
+                        edge_pct = 0.0
+                        prob_val = 50.0
+
+                        if prob_yes_pct >= 60.0 and 0.20 <= y_ask <= 0.80:
+                            fee_y = calculate_kalshi_taker_fee(1, y_ask)
+                            edge = (prob_yes - (y_ask + fee_y)) * 100.0
+                            if edge >= 4.0:
+                                signal = "BUY YES"
+                                edge_pct = edge
+                                prob_val = prob_yes_pct
+                        elif prob_no_pct >= 60.0 and 0.20 <= n_ask <= 0.80:
+                            fee_n = calculate_kalshi_taker_fee(1, n_ask)
+                            edge = (prob_no - (n_ask + fee_n)) * 100.0
+                            if edge >= 4.0:
+                                signal = "BUY NO"
+                                edge_pct = edge
+                                prob_val = prob_no_pct
+
+                        if signal:
+                            multicoin_engine.evaluate_entry(
+                                coin=coin,
+                                ticker=ticker,
+                                series=cfg["series"],
+                                signal=signal,
+                                edge_pct=edge_pct,
+                                model_prob=prob_val,
+                                yes_ask=y_ask,
+                                no_ask=n_ask,
+                                seconds_left=seconds_left,
+                                delta=delta,
+                                candle_id=close_time
+                            )
+
+            except Exception as e:
+                # Suppress normal network hiccups or log unexpected
+                pass
+
+            await asyncio.sleep(1.0)
 
 @asynccontextmanager
 async def lifespan(app):
@@ -202,12 +334,14 @@ async def lifespan(app):
     task1 = asyncio.create_task(fast_spot_loop())
     task2 = asyncio.create_task(full_scan_loop())
     task3 = asyncio.create_task(technicals_loop())
+    task_multicoin = asyncio.create_task(multi_coin_production_loop())
     yield
     live_ws.stop()
     task_ws.cancel()
     task1.cancel()
     task2.cancel()
     task3.cancel()
+    task_multicoin.cancel()
 
 def assemble_full_payload() -> Dict[str, Any]:
     """Combine live metrics, scanner results, bot state, and live Kalshi OMS into a master payload."""

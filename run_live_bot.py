@@ -138,42 +138,53 @@ class KalshiLiveScalper:
     async def initialize_and_reconcile(self):
         """Pre-flight sequence: reconciles state and syncs exchange before starting WS."""
         logger.info("=" * 80)
-        logger.info("       INITIALIZING KALSHI LIVE SCALPER (DEMO ENVIRONMENT)")
+        mode_str = "PRODUCTION PAPER TRADING ($0 Risk)" if self.dry_run else "LIVE DEMO ENVIRONMENT"
+        logger.info(f"       INITIALIZING KALSHI SCALPER ({mode_str})")
         logger.info("=" * 80)
 
-        if not self.auth.is_configured:
-            logger.error("Authentication credentials not configured! Please check .env file.")
-            sys.exit(1)
+        if not self.dry_run:
+            if not self.auth.is_configured:
+                logger.error("Authentication credentials not configured! Please check .env file.")
+                sys.exit(1)
+            logger.info(f"Using Kalshi API Key ID: {self.auth.key_id}")
+        else:
+            logger.info("Dry-run / Paper mode active. $0.00 capital risked against real production books.")
 
-        logger.info(f"Using Kalshi API Key ID: {self.auth.key_id}")
         logger.info(f"Target REST Endpoint: {self.rest_url}")
         logger.info(f"Target WebSocket Endpoint: {self.ws_url}")
 
-        # 1. Fetch live balance
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            headers = self.auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
-            resp = await client.get(f"{self.rest_url}/portfolio/balance", headers=headers)
-            if resp.status_code == 200:
-                bal_data = resp.json()
-                self._parse_balance_data(bal_data)
-                logger.info(
-                    f"✓ Confirmed Live Exchange Balance: ${self.cash:.2f} "
-                    f"(Crypto Partition exchange_index=2: ${self.crypto_cash:.2f})"
-                )
-            else:
-                logger.warning(f"Could not fetch balance ({resp.status_code}): {resp.text}")
+        if not self.dry_run:
+            # 1. Fetch live balance
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                headers = self.auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
+                resp = await client.get(f"{self.rest_url}/portfolio/balance", headers=headers)
+                if resp.status_code == 200:
+                    bal_data = resp.json()
+                    self._parse_balance_data(bal_data)
+                    logger.info(
+                        f"✓ Confirmed Live Exchange Balance: ${self.cash:.2f} "
+                        f"(Crypto Partition exchange_index=2: ${self.crypto_cash:.2f})"
+                    )
+                else:
+                    logger.warning(f"Could not fetch balance ({resp.status_code}): {resp.text}")
 
-        # 2. Execute Cold-Boot State Reconciliation
-        logger.info("Running cold-boot state reconciliation...")
-        reconcile_report = await self.oms.reconcile_state_on_startup(
-            db_path_or_db=self.db,
-            cancel_resting_orders=True
-        )
-        logger.info(
-            f"✓ Cold-Boot Reconciliation Finished: "
-            f"{len(reconcile_report.get('resting_orders_canceled', []))} resting orders canceled, "
-            f"{len(reconcile_report.get('discrepancies_found', []))} discrepancies resolved."
-        )
+            # 2. Execute Cold-Boot State Reconciliation
+            logger.info("Running cold-boot state reconciliation...")
+            reconcile_report = await self.oms.reconcile_state_on_startup(
+                db_path_or_db=self.db,
+                cancel_resting_orders=True
+            )
+            logger.info(
+                f"✓ Cold-Boot Reconciliation Finished: "
+                f"{len(reconcile_report.get('resting_orders_canceled', []))} resting orders canceled, "
+                f"{len(reconcile_report.get('discrepancies_found', []))} discrepancies resolved."
+            )
+        else:
+            # Paper baseline $100.00
+            self.cash = 100.0
+            self.total_equity = 100.0
+            self.crypto_cash = 100.0
+            logger.info("✓ Initialized paper trading balance: $100.00")
 
     async def resolve_active_kxbtc_market(self, http_client: httpx.AsyncClient) -> Optional[Dict[str, Any]]:
         """
@@ -501,14 +512,14 @@ class KalshiLiveScalper:
                 pnl_pct = (pnl / max(0.01, pos["cost_dollars"] + pos.get("fee_dollars", 0.0))) * 100.0
                 self.cash += payout
 
-                # Sync exact cash balance from Kalshi Demo API
-                try:
-                    b_headers = self.auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
-                    b_resp = await http_client.get(f"{self.rest_url}/portfolio/balance", headers=b_headers, timeout=3.0)
-                    if b_resp.status_code == 200:
-                        self._parse_balance_data(b_resp.json())
-                except Exception:
-                    pass
+                if not self.dry_run and self.auth.is_configured:
+                    try:
+                        b_headers = self.auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
+                        b_resp = await http_client.get(f"{self.rest_url}/portfolio/balance", headers=b_headers, timeout=3.0)
+                        if b_resp.status_code == 200:
+                            self._parse_balance_data(b_resp.json())
+                    except Exception:
+                        pass
 
                 self.last_exit_reason = "SETTLED_WIN" if is_win else "SETTLED_LOSS"
                 self.last_exit_ts = time.time()
@@ -556,14 +567,14 @@ class KalshiLiveScalper:
                             pnl_dollars=round(pnl, 2),
                             pnl_pct=round(pnl_pct, 1)
                         )
-                # Re-sync exact cash balance from exchange
-                try:
-                    b_headers = self.auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
-                    b_resp = await http_client.get(f"{self.rest_url}/portfolio/balance", headers=b_headers, timeout=3.0)
-                    if b_resp.status_code == 200:
-                        self._parse_balance_data(b_resp.json())
-                except Exception:
-                    pass
+                if not self.dry_run and self.auth.is_configured:
+                    try:
+                        b_headers = self.auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
+                        b_resp = await http_client.get(f"{self.rest_url}/portfolio/balance", headers=b_headers, timeout=3.0)
+                        if b_resp.status_code == 200:
+                            self._parse_balance_data(b_resp.json())
+                    except Exception:
+                        pass
 
                 if exit_res["remaining_contracts"] <= 0:
                     self.active_position = None
@@ -609,14 +620,14 @@ class KalshiLiveScalper:
                             pnl_dollars=round(pnl, 2),
                             pnl_pct=round(pnl_pct, 1)
                         )
-                # Re-sync exact cash balance from exchange
-                try:
-                    b_headers = self.auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
-                    b_resp = await http_client.get(f"{self.rest_url}/portfolio/balance", headers=b_headers, timeout=3.0)
-                    if b_resp.status_code == 200:
-                        self._parse_balance_data(b_resp.json())
-                except Exception:
-                    pass
+                if not self.dry_run and self.auth.is_configured:
+                    try:
+                        b_headers = self.auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
+                        b_resp = await http_client.get(f"{self.rest_url}/portfolio/balance", headers=b_headers, timeout=3.0)
+                        if b_resp.status_code == 200:
+                            self._parse_balance_data(b_resp.json())
+                    except Exception:
+                        pass
 
                 if exit_res["remaining_contracts"] <= 0:
                     self.active_position = None
@@ -747,22 +758,43 @@ class KalshiLiveScalper:
             logger.warning(f"[Trade Blocked] VWAP_SLIPPAGE_ABORT: {trade_res.get('reason')}")
         else:
             logger.warning(f"[Trade Skipped] {trade_res.get('status')}: {trade_res.get('error') or trade_res.get('reason')}")
-            # Re-sync balance & apply 8s cooldown so rejected orders never spam the API
+            # Apply 8s cooldown so rejected orders never spam the API
             self.last_exit_ts = time.time()
-            try:
-                b_headers = self.auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
-                b_resp = await http_client.get(f"{self.rest_url}/portfolio/balance", headers=b_headers, timeout=3.0)
-                if b_resp.status_code == 200:
-                    self._parse_balance_data(b_resp.json())
-            except Exception:
-                pass
+            if not self.dry_run and self.auth.is_configured:
+                try:
+                    b_headers = self.auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
+                    b_resp = await http_client.get(f"{self.rest_url}/portfolio/balance", headers=b_headers, timeout=3.0)
+                    if b_resp.status_code == 200:
+                        self._parse_balance_data(b_resp.json())
+                except Exception:
+                    pass
 
     def stop(self):
         self.is_running = False
 
 
 async def main():
-    scalper = KalshiLiveScalper()
+    import argparse
+    parser = argparse.ArgumentParser(description="Kalshi Scalping Bot")
+    parser.add_argument(
+        "--mode",
+        choices=["live-demo", "prod-paper"],
+        default="live-demo",
+        help="Execution mode: live-demo (real demo orders) or prod-paper (shadow paper trade on real production orderbooks)"
+    )
+    args = parser.parse_args()
+
+    if args.mode == "prod-paper":
+        logger.info("Configuring PRODUCTION PAPER TRADING MODE (Real Orderbooks, $0 Risk)...")
+        scalper = KalshiLiveScalper(
+            rest_url=KALSHI_PROD_REST_URL,
+            ws_url="wss://api.elections.kalshi.com/trade-api/ws/v2",
+            db_path="kalshi_prod_paper.db",
+            dry_run=True
+        )
+    else:
+        logger.info("Configuring LIVE DEMO MODE (Demo Environment)...")
+        scalper = KalshiLiveScalper()
 
     def handle_exit(sig, frame):
         logger.info("Shutdown signal received. Exiting gracefully...")
