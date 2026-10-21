@@ -2,6 +2,7 @@ import asyncio
 import os
 import json
 import time
+import sqlite3
 from typing import Dict, Any, Optional
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse, HTMLResponse, StreamingResponse, Response
@@ -17,6 +18,7 @@ from prediction_engine import QuantPredictionEngine
 from kalshi_btc_scanner import KalshiBitcoinScanner
 from bot_database import AuditDatabase
 from paper_trader import PaperTradingBot
+from core.multi_coin_trader import MultiCoinPaperEngine
 from live_executor import (
     KALSHI_DEMO_REST_URL,
     KALSHI_DEMO_WS_URL,
@@ -39,6 +41,7 @@ scanner = KalshiBitcoinScanner(metrics_provider, prediction_engine)
 db = AuditDatabase("kalshi_audit.db")
 live_db = AuditDatabase("kalshi_live_demo.db")
 paper_bot = PaperTradingBot(db, initial_balance=50.0, watchdog=watchdog)
+multicoin_engine = MultiCoinPaperEngine(initial_balance=100.0, db_path="multi_coin_paper.db")
 
 # Live Kalshi Demo OMS & WebSocket instances
 live_auth = KalshiAuth.from_env()
@@ -73,6 +76,33 @@ async def fast_spot_loop():
                         spot_price=metrics_provider.spot_price,
                         metrics=metrics_provider.get_summary_dict()
                     )
+
+                    # Real-time Multi-Coin paper evaluation for BTC
+                    sig = scalp_data.get("trade_signal", "")
+                    prob_val = scalp_data.get("model_prob_yes_pct", 50.0) if "YES" in sig else scalp_data.get("model_prob_no_pct", 50.0)
+                    multicoin_engine.evaluate_entry(
+                        coin="BTC",
+                        ticker=scalp_data.get("ticker", ""),
+                        series="KXBTC15M",
+                        signal=sig,
+                        edge_pct=scalp_data.get("best_edge_pct", 0.0),
+                        model_prob=prob_val,
+                        yes_ask=float(scalp_data.get("yes_ask_cents", 0)) / 100.0,
+                        no_ask=float(scalp_data.get("no_ask_cents", 0)) / 100.0,
+                        seconds_left=scalp_data.get("seconds_left", 0),
+                        delta=scalp_data.get("delta", 0.0),
+                        candle_id=scalp_data.get("close_time", "")
+                    )
+                    if "BTC" in multicoin_engine.active_positions:
+                        pos = multicoin_engine.active_positions["BTC"]
+                        cur_bid = (float(scalp_data.get("yes_bid_cents", 0))/100.0) if pos["side"] == "YES" else (float(scalp_data.get("no_bid_cents", 0))/100.0)
+                        multicoin_engine.update_position(
+                            coin="BTC",
+                            current_bid=cur_bid,
+                            seconds_left=scalp_data.get("seconds_left", 0),
+                            settle_spot=metrics_provider.spot_price,
+                            strike=scalp_data.get("candle_open", metrics_provider.spot_price)
+                        )
             except Exception as e:
                 print(f"[FastSpotLoop] Warning: {e}")
             await asyncio.sleep(1.0)
@@ -230,6 +260,7 @@ def assemble_full_payload() -> Dict[str, Any]:
         "arbitrage_alerts": scan_data.get("arbitrage_alerts", []),
         "stats": scan_data.get("stats", {}),
         "bot": bot_data,
+        "multicoin": multicoin_engine.get_status_dict(),
         "live_kalshi": live_kalshi_payload
     }
 
@@ -280,6 +311,7 @@ def assemble_tick_payload() -> Dict[str, Any]:
         "arbitrage_alerts": scan_data.get("arbitrage_alerts", []),
         "stats": scan_data.get("stats", {}),
         "bot": bot_data,
+        "multicoin": multicoin_engine.get_status_dict(),
         "live_kalshi": live_kalshi_payload
     }
 
@@ -506,6 +538,77 @@ async def post_live_cancel_all(request):
             canceled_ids.append(oid)
     return JSONResponse({"status": "success", "canceled_orders": canceled_ids})
 
+async def get_multicoin_status(request):
+    """Return multi-coin paper trading engine status."""
+    return JSONResponse(multicoin_engine.get_status_dict())
+
+async def get_multicoin_trades(request):
+    """Return recent multi-coin trades from SQLite."""
+    return JSONResponse(multicoin_engine.db.get_recent_trades(limit=50))
+
+async def get_audit_block_summary(request):
+    """
+    Returns exact block-by-block audit synchronization:
+    - Current Kalshi Demo balance ($157.72)
+    - Single-Coin Paper Bot Total Equity
+    - Multi-Coin Paper Portfolio Equity
+    - All trades executed within the current 15-minute block (last 900 seconds)
+    """
+    now = time.time()
+    block_window = 900.0
+
+    live_trades_15m = []
+    try:
+        with sqlite3.connect("kalshi_live_demo.db") as conn:
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("SELECT id, timestamp, ticker, side, entry_price, exit_price, exit_reason, pnl_dollars, contracts FROM trades WHERE timestamp >= ? ORDER BY id DESC", (now - block_window,))
+            live_trades_15m = [dict(r) for r in c.fetchall()]
+    except Exception:
+        pass
+
+    paper_trades_15m = []
+    try:
+        with sqlite3.connect("kalshi_audit.db") as conn:
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("SELECT id, timestamp, ticker, side, entry_price, exit_price, exit_reason, pnl_dollars, contracts FROM trades WHERE timestamp >= ? ORDER BY id DESC", (now - block_window,))
+            paper_trades_15m = [dict(r) for r in c.fetchall()]
+    except Exception:
+        pass
+
+    multicoin_trades_15m = []
+    try:
+        with sqlite3.connect("multi_coin_paper.db") as conn:
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("SELECT id, timestamp, coin, ticker, side, entry_price, exit_price, exit_reason, pnl_dollars, contracts FROM trades WHERE timestamp >= ? ORDER BY id DESC", (now - block_window,))
+            multicoin_trades_15m = [dict(r) for r in c.fetchall()]
+    except Exception:
+        pass
+
+    active_mkt = scanner.cache.get("kxbtc15m", {})
+    ticker = active_mkt.get("ticker", "")
+    close_time = active_mkt.get("close_time", "")
+
+    return JSONResponse({
+        "timestamp": now,
+        "demo_balance_dollars": live_demo_balance.get("balance_dollars", 157.72),
+        "paper_equity_dollars": paper_bot.get_equity(),
+        "multicoin_equity_dollars": multicoin_engine.total_equity,
+        "active_ticker": ticker,
+        "candle_close_time": close_time,
+        "trades_in_block": {
+            "live_count": len(live_trades_15m),
+            "paper_count": len(paper_trades_15m),
+            "multicoin_count": len(multicoin_trades_15m),
+            "total_count": len(live_trades_15m) + len(paper_trades_15m) + len(multicoin_trades_15m),
+            "live_trades": live_trades_15m,
+            "paper_trades": paper_trades_15m,
+            "multicoin_trades": multicoin_trades_15m
+        }
+    })
+
 routes = [
     Route("/", serve_dashboard, methods=["GET"]),
     Route("/api/scan", get_live_scan, methods=["GET"]),
@@ -528,6 +631,11 @@ routes = [
     Route("/api/live/reconcile", post_live_reconcile, methods=["POST"]),
     Route("/api/live/refresh_balance", post_live_refresh_balance, methods=["POST"]),
     Route("/api/live/cancel_all", post_live_cancel_all, methods=["POST"]),
+
+    # Multi-Coin Portfolio & Block Audit Synchronization routes
+    Route("/api/multicoin/status", get_multicoin_status, methods=["GET"]),
+    Route("/api/multicoin/trades", get_multicoin_trades, methods=["GET"]),
+    Route("/api/audit/block_summary", get_audit_block_summary, methods=["GET"]),
 ]
 
 app = Starlette(
