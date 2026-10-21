@@ -198,10 +198,11 @@ class MultiCoinPaperEngine:
         # Risk parameters
         self.max_trade_alloc_pct = 20.0     # 20% of coin's sub-equity per trade
         self.take_profit_roi_pct = 25.0     # Lock in +25% ROI
-        self.stop_loss_roi_pct = 25.0       # Exit at -25% ROI
-        self.stop_loss_max_prob_pct = 38.0  # Dual confirmation: only cut loss if model prob <= 38.0%
+        self.stop_loss_roi_pct = 25.0       # Exit at -25% ROI if model confirms decay
+        self.stop_loss_max_prob_pct = 38.0  # Dual confirmation: cut loss if model prob <= 38.0%
+        self.stop_loss_hard_roi_pct = 28.0  # Hard circuit-breaker: cut immediately at -28% ROI regardless of model prob
         self.min_seconds_left = 90          # 90s expiration safety cutoff (avoid pin risk)
-        self.max_seconds_left = 720         # 720s (first 3 minutes noise filter: avoid entering with >12m left)
+        self.max_seconds_left = 660         # 660s (first 4 minutes noise filter: avoid entering with >11m left)
         self.min_edge_pct = 4.0             # 4.0% min model edge
         self.min_prob_pct = 60.0            # 60.0% min model conviction
 
@@ -411,9 +412,10 @@ class MultiCoinPaperEngine:
             pnl = gross - exit_fee - (pos["cost_dollars"] + pos["fee_dollars"])
             return self._close_position(coin, exit_price=current_bid, reason="TAKE_PROFIT", pnl=pnl, payout=gross - exit_fee, current_time=now)
 
-        # C. Dynamic Dual-Confirmation Stop Loss (-25% ROI AND Model Probability <= 38%)
-        # Only stop out if BOTH price drawdown is severe AND quant model thesis collapsed
-        if roi_pct <= -self.stop_loss_roi_pct and (model_prob is None or model_prob <= self.stop_loss_max_prob_pct):
+        # C. Dynamic Dual-Confirmation Stop Loss (-25% ROI AND Model Prob <= 38%, OR Hard Circuit-Breaker at -28% ROI)
+        is_dual_confirmed = (roi_pct <= -self.stop_loss_roi_pct and (model_prob is None or model_prob <= self.stop_loss_max_prob_pct))
+        is_hard_stop = (roi_pct <= -self.stop_loss_hard_roi_pct)
+        if is_dual_confirmed or is_hard_stop:
             exit_fee = calculate_kalshi_taker_fee(pos["contracts"], current_bid)
             gross = pos["contracts"] * current_bid
             pnl = gross - exit_fee - (pos["cost_dollars"] + pos["fee_dollars"])

@@ -335,9 +335,9 @@ async def multi_coin_production_loop():
                     elif seconds_left < 90:
                         action_status = "HOLD_EXPIRE"
                         action_reason = f"Expiration gate active ({int(seconds_left)}s < 90s cutoff)"
-                    elif seconds_left > 720:
+                    elif seconds_left > 660:
                         action_status = "HOLD_EARLY"
-                        action_reason = f"Early candle noise filter ({int(seconds_left)}s > 720s)"
+                        action_reason = f"Early candle noise filter ({int(seconds_left)}s > 660s)"
                     elif multicoin_engine.candle_stopped_out.get(coin) == close_time:
                         action_status = "HOLD_STOPPED_OUT"
                         action_reason = "Candle lockout: stopped out in this 15m candle"
