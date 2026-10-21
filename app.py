@@ -2,6 +2,7 @@ import asyncio
 import os
 import json
 import time
+import math
 import sqlite3
 from typing import Dict, Any, Optional
 from starlette.applications import Starlette
@@ -22,12 +23,16 @@ from core.multi_coin_trader import MultiCoinPaperEngine, calculate_kalshi_taker_
 from live_executor import (
     KALSHI_DEMO_REST_URL,
     KALSHI_DEMO_WS_URL,
+    KALSHI_PROD_REST_URL,
     KalshiAuth,
     KalshiWebSocketClient,
     KalshiOrderManagementSystem,
     StaleTickWatchdog,
     KalshiStateReconciler
 )
+import logging
+logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s")
+logger = logging.getLogger("KalshiApp")
 from dotenv import load_dotenv
 
 # Load credentials from .env
@@ -160,6 +165,7 @@ async def multi_coin_production_loop():
     last_candle_fetch = 0.0
     cached_markets: Dict[str, Dict[str, Any]] = {}
     last_mkt_fetch = 0.0
+    last_heartbeat = 0.0
 
     async with httpx.AsyncClient(timeout=4.0) as client:
         while True:
@@ -276,7 +282,7 @@ async def multi_coin_production_loop():
                                 prob_val = prob_no_pct
 
                         if signal:
-                            multicoin_engine.evaluate_entry(
+                            trade_pos = multicoin_engine.evaluate_entry(
                                 coin=coin,
                                 ticker=ticker,
                                 series=cfg["series"],
@@ -289,10 +295,17 @@ async def multi_coin_production_loop():
                                 delta=delta,
                                 candle_id=close_time
                             )
+                            if trade_pos:
+                                print(f"[MultiCoinProd] TRADE ENTERED: {coin} {trade_pos.get('side')} {trade_pos.get('contracts')}x @ {trade_pos.get('entry_price')} on {ticker}")
+
+                if now - last_heartbeat > 30.0:
+                    last_heartbeat = now
+                    summary = " | ".join([f"{c}: d={spot_prices.get(c,0)-candle_opens.get(c,0):+.2f}" for c in coin_configs])
+                    mkts_str = ", ".join([f"{c}:{cached_markets.get(c, {}).get('ticker', 'none')}" for c in coin_configs])
+                    print(f"[MultiCoinProd] Heartbeat | {summary} | Markets: [{mkts_str}] | Active: {list(multicoin_engine.active_positions.keys())}")
 
             except Exception as e:
-                # Suppress normal network hiccups or log unexpected
-                pass
+                print(f"[MultiCoinProd] Exception: {e}")
 
             await asyncio.sleep(1.0)
 
