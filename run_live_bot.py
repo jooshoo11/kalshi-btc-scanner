@@ -305,6 +305,17 @@ class KalshiLiveScalper:
             await self.metrics_provider.update_candles_and_technicals(http_client)
             self._last_candle_refresh = now
 
+        # Periodically sync live Demo balance (every 15s) so deposits & settlements update immediately
+        if not hasattr(self, "_last_bal_sync") or now - self._last_bal_sync > 15.0:
+            self._last_bal_sync = now
+            try:
+                b_headers = self.auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
+                b_resp = await http_client.get(f"{self.rest_url}/portfolio/balance", headers=b_headers, timeout=3.0)
+                if b_resp.status_code == 200:
+                    self._parse_balance_data(b_resp.json())
+            except Exception:
+                pass
+
         # 2. Resolve active 15-minute market (Demo contract ticker + live Production institutional quotes)
         mkt = await self.resolve_active_kxbtc_market(http_client)
         if not mkt:
@@ -602,10 +613,10 @@ class KalshiLiveScalper:
         if not target_side or target_ask < self.min_entry_price or target_ask > self.max_entry_price:
             return
 
-        # Position Sizing (Full 15% Equity Compounding matching PaperTradingBot 1:1, capped by exchange_index=2 available collateral)
+        # Position Sizing (Full 15% Equity Compounding matching PaperTradingBot 1:1, using full unified cash)
         equity = self.get_equity()
         max_alloc = equity * (self.max_allocation_pct / 100.0)
-        avail_collateral = max(0.0, min(self.cash, self.crypto_cash) - 0.15)
+        avail_collateral = max(0.0, self.cash - 0.15)
         budget = min(avail_collateral, max_alloc)
         fee_per_contract = self.taker_fee_cents / 100.0
         target_contracts = int(budget / (target_ask + fee_per_contract))
