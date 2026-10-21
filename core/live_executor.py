@@ -31,6 +31,11 @@ except ImportError as e:
     logging.warning(f"Required crypto/ws libraries: {e}")
 
 from prediction_engine import calculate_kalshi_fee
+from phoenix.otel import register
+
+# Initialize Phoenix OpenInference tracer for execution tracing
+tracer_provider = register(project_name="kalshi-multi-coin-bot")
+tracer = tracer_provider.get_tracer(__name__)
 
 logger = logging.getLogger("KalshiOMS")
 if not logger.handlers:
@@ -1337,6 +1342,7 @@ class KalshiOrderManagementSystem:
             order_type="limit"
         )
 
+    @tracer.tool
     async def _place_rest_order(
         self,
         ticker: str,
@@ -1521,6 +1527,7 @@ class LiveKalshiBroker(BaseExecutionBroker):
     def __init__(self, oms: KalshiOrderManagementSystem):
         self.oms = oms
 
+    @tracer.tool
     async def submit_entry(self, ticker: str, side: str, contracts: int, model_prob: float, max_price_cents: int) -> Dict[str, Any]:
         return await self.oms.execute_trade(
             ticker=ticker,

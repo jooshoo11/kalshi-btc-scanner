@@ -34,6 +34,10 @@ import logging
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s")
 logger = logging.getLogger("KalshiApp")
 from dotenv import load_dotenv
+from phoenix.otel import register
+
+# Initialize OpenTelemetry tracer provider for Phoenix observability
+tracer_provider = register(project_name="kalshi-multi-coin-bot", auto_instrument=True, batch=True)
 
 # Load credentials from .env
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))

@@ -2,6 +2,11 @@ import math
 import time
 from typing import Dict, Any, List, Tuple, Optional
 import numpy as np
+from phoenix.otel import register
+
+# Initialize Phoenix OpenInference tracer
+tracer_provider = register(project_name="kalshi-multi-coin-bot")
+tracer = tracer_provider.get_tracer(__name__)
 
 def normal_cdf(x: float) -> float:
     """Standard normal cumulative distribution function (CDF)."""
@@ -223,6 +228,7 @@ class QuantPredictionEngine:
             "strike_probs": strike_probs
         }
 
+    @tracer.agent
     def evaluate_15m_brti_accumulator(
         self,
         spot: float,
@@ -230,7 +236,9 @@ class QuantPredictionEngine:
         seconds_left: float,
         accumulated_samples: Optional[List[float]] = None,
         dollar_vol_15m: float = 95.0,
-        momentum_bias: float = 0.0
+        momentum_bias: float = 0.0,
+        market_data: Optional[Dict[str, Any]] = None,
+        hypothesis: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         CF Benchmarks BRTI 60-Second Simple Average Accumulator for the final minute
@@ -242,6 +250,14 @@ class QuantPredictionEngine:
         Variance collapses at cubic rate:
         Var(S_settle | F_m) = (1/3) * (sigma_1s^2) * (T_rem^3) / 3600
         """
+        if market_data:
+            spot = market_data.get("spot", spot)
+            open_price = market_data.get("open_price", open_price)
+            seconds_left = market_data.get("seconds_left", seconds_left)
+            dollar_vol_15m = market_data.get("dollar_vol_15m", dollar_vol_15m)
+            momentum_bias = market_data.get("momentum_bias", momentum_bias)
+            accumulated_samples = market_data.get("accumulated_samples", accumulated_samples)
+
         samples = list(accumulated_samples or [])
         m = len(samples)
         # Ensure m + t_rem == 60 samples total in 60-second settlement window
@@ -272,6 +288,17 @@ class QuantPredictionEngine:
         prob_no = 1.0 - prob_yes
         delta = spot - open_price
 
+        computed_hypothesis = hypothesis or (
+            "BULLISH_YES" if prob_yes >= 0.60 else ("BEARISH_NO" if prob_no >= 0.60 else "NEUTRAL_HOLD")
+        )
+        resolved_market_data = market_data or {
+            "spot": spot,
+            "open_price": open_price,
+            "seconds_left": int(seconds_left),
+            "dollar_vol_15m": dollar_vol_15m,
+            "momentum_bias": momentum_bias
+        }
+
         return {
             "delta": round(delta, 2),
             "delta_pct": round((delta / (open_price + 1e-9)) * 100.0, 3),
@@ -282,12 +309,15 @@ class QuantPredictionEngine:
             "prob_yes_pct": round(prob_yes * 100.0, 1),
             "prob_no": round(prob_no, 4),
             "prob_no_pct": round(prob_no * 100.0, 1),
+            "hypothesis": computed_hypothesis,
+            "market_data": resolved_market_data,
             "mu_settle": round(mu_settle, 2),
             "sigma_settle": round(sigma_settle, 2),
             "accumulated_samples_count": m,
             "is_brti_accumulator": True
         }
 
+    @tracer.agent
     def evaluate_15m_scalp(
         self,
         spot: float,
@@ -295,13 +325,23 @@ class QuantPredictionEngine:
         seconds_left: float,
         dollar_vol_15m: float,
         momentum_bias: float = 0.0,
-        accumulated_samples: Optional[List[float]] = None
+        accumulated_samples: Optional[List[float]] = None,
+        market_data: Optional[Dict[str, Any]] = None,
+        hypothesis: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         High-frequency Drift-Diffusion model for 15-minute Kalshi candlestick contracts (KXBTC15M).
         In the final 60 seconds, automatically routes to the CF Benchmarks BRTI 60-second accumulator
         where variance collapses proportionally.
         """
+        if market_data:
+            spot = market_data.get("spot", spot)
+            open_price = market_data.get("open_price", open_price)
+            seconds_left = market_data.get("seconds_left", seconds_left)
+            dollar_vol_15m = market_data.get("dollar_vol_15m", dollar_vol_15m)
+            momentum_bias = market_data.get("momentum_bias", momentum_bias)
+            accumulated_samples = market_data.get("accumulated_samples", accumulated_samples)
+
         if seconds_left <= 60.0:
             return self.evaluate_15m_brti_accumulator(
                 spot=spot,
@@ -309,7 +349,9 @@ class QuantPredictionEngine:
                 seconds_left=seconds_left,
                 accumulated_samples=accumulated_samples,
                 dollar_vol_15m=dollar_vol_15m,
-                momentum_bias=momentum_bias
+                momentum_bias=momentum_bias,
+                market_data=market_data,
+                hypothesis=hypothesis
             )
 
         delta = spot - open_price
@@ -326,6 +368,17 @@ class QuantPredictionEngine:
         prob_yes = normal_cdf(z_score)
         prob_no = 1.0 - prob_yes
 
+        computed_hypothesis = hypothesis or (
+            "BULLISH_YES" if prob_yes >= 0.60 else ("BEARISH_NO" if prob_no >= 0.60 else "NEUTRAL_HOLD")
+        )
+        resolved_market_data = market_data or {
+            "spot": spot,
+            "open_price": open_price,
+            "seconds_left": int(seconds_left),
+            "dollar_vol_15m": dollar_vol_15m,
+            "momentum_bias": momentum_bias
+        }
+
         return {
             "delta": round(delta, 2),
             "delta_pct": round(delta_pct, 3),
@@ -336,8 +389,38 @@ class QuantPredictionEngine:
             "prob_yes_pct": round(prob_yes * 100.0, 1),
             "prob_no": round(prob_no, 4),
             "prob_no_pct": round(prob_no * 100.0, 1),
+            "hypothesis": computed_hypothesis,
+            "market_data": resolved_market_data,
             "is_brti_accumulator": False
         }
+
+    @tracer.agent
+    def evaluate_market_prediction(
+        self,
+        market_data: Dict[str, Any],
+        hypothesis: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Agent-level prediction logic evaluated and traced via Phoenix/OpenInference.
+        Accepts market data and hypothesis, returning quantitative evaluation and predicted edge.
+        """
+        spot = market_data.get("spot", 0.0)
+        open_p = market_data.get("open_price", spot)
+        sec_left = market_data.get("seconds_left", 900.0)
+        vol = market_data.get("dollar_vol_15m", 95.0)
+        mom = market_data.get("momentum_bias", 0.0)
+        samples = market_data.get("accumulated_samples", [])
+
+        return self.evaluate_15m_scalp(
+            spot=spot,
+            open_price=open_p,
+            seconds_left=sec_left,
+            dollar_vol_15m=vol,
+            momentum_bias=mom,
+            accumulated_samples=samples,
+            market_data=market_data,
+            hypothesis=hypothesis
+        )
 
     def calculate_trade_metrics(
         self,
