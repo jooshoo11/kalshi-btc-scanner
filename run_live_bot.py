@@ -294,6 +294,55 @@ class KalshiLiveScalper:
             pass
         logger.info("Scalper shutdown complete.")
 
+    async def sync_exchange_orderbook(self, ticker: str, http_client: httpx.AsyncClient, force: bool = False) -> bool:
+        """Fetch live resting orderbook directly from exchange and populate local L2 book with real depth."""
+        now = time.time()
+        if not force and hasattr(self, "_last_ob_sync_ts") and (now - self._last_ob_sync_ts < 2.0):
+            return True
+        self._last_ob_sync_ts = now
+
+        try:
+            endpoint = f"/markets/{ticker}/orderbook"
+            headers = self.auth.sign_request("GET", endpoint) if self.auth and self.auth.is_configured else {}
+            resp = await http_client.get(f"{self.rest_url}{endpoint}", headers=headers, timeout=2.5)
+            if resp.status_code == 200:
+                ob_data = resp.json().get("orderbook_fp") or resp.json().get("orderbook", {})
+                yes_bids = []
+                for p_str, q_str in ob_data.get("yes_dollars", []):
+                    try:
+                        p_c = int(round(float(p_str) * 100))
+                        q = int(round(float(q_str)))
+                        if p_c >= 1 and q > 0:
+                            yes_bids.append([p_c, q])
+                    except (ValueError, TypeError):
+                        pass
+
+                # In Kalshi single-book, NO bids represent YES asks at (100 - p_no)
+                yes_asks = []
+                for p_str, q_str in ob_data.get("no_dollars", []):
+                    try:
+                        p_no_c = int(round(float(p_str) * 100))
+                        p_yes_ask = 100 - p_no_c
+                        q = int(round(float(q_str)))
+                        if 1 <= p_yes_ask <= 99 and q > 0:
+                            yes_asks.append([p_yes_ask, q])
+                    except (ValueError, TypeError):
+                        pass
+
+                # Legacy format fallback
+                if not yes_bids and "bids" in ob_data:
+                    yes_bids = [[int(p), int(q)] for p, q in ob_data.get("bids", []) if int(q) > 0 and int(p) >= 1]
+                if not yes_asks and "asks" in ob_data:
+                    yes_asks = [[int(p), int(q)] for p, q in ob_data.get("asks", []) if int(q) > 0 and int(p) <= 99]
+
+                book = self.ws_client.get_or_create_book(ticker)
+                if yes_bids or yes_asks:
+                    book.apply_snapshot(yes_bids, yes_asks)
+                    return True
+        except Exception as e:
+            logger.debug(f"Failed to sync exchange orderbook for {ticker}: {e}")
+        return False
+
     async def _scalp_tick(self, http_client: httpx.AsyncClient):
         """Single 1-second iteration of the scalping loop (100% identical to PaperTradingBot + KalshiBitcoinScanner)."""
         # 1. Update spot feeds from Coinbase & Kraken USD Spot (CF Benchmarks BRTI constituents)
@@ -370,13 +419,15 @@ class KalshiLiveScalper:
         if n_bid <= 0.0 and y_ask > 0.0:
             n_bid = round(1.0 - y_ask, 2)
 
-        # Synchronize L2 book cache for OMS execution
+        # Synchronize L2 book cache for OMS execution with real exchange resting depth
+        ob_synced = await self.sync_exchange_orderbook(ticker, http_client)
         book = self.ws_client.get_or_create_book(ticker)
-        best_bid = int(round(y_bid * 100)) if y_bid > 0 else 1
-        best_ask = int(round(y_ask * 100)) if y_ask > 0 else 99
-        ask_size = max(250, int(float(mkt.get("yes_ask_size_fp") or 250)))
-        bid_size = max(250, int(float(mkt.get("yes_bid_size_fp") or 250)))
-        book.apply_snapshot([[best_bid, bid_size]], [[best_ask, ask_size]])
+        if not ob_synced or (not book.bids and not book.asks):
+            best_bid = int(round(y_bid * 100)) if y_bid > 0 else 1
+            best_ask = int(round(y_ask * 100)) if y_ask > 0 else 99
+            ask_size = max(10, int(float(mkt.get("yes_ask_size_fp") or 10)))
+            bid_size = max(10, int(float(mkt.get("yes_bid_size_fp") or 10)))
+            book.apply_snapshot([[best_bid, bid_size]], [[best_ask, ask_size]])
 
         # 4. Run Quantitative Drift-Diffusion / BRTI Model (matching kalshi_btc_scanner.py 1:1)
         scalp_res = self.engine.evaluate_15m_scalp(
@@ -476,6 +527,7 @@ class KalshiLiveScalper:
             # B. Dynamic Profit Securing (Take Profit Exit +25% ROI)
             if unrealized_pct >= self.take_profit_roi_pct and (time.time() - pos["entry_ts"] >= 5.0):
                 logger.info(f"[Take Profit] ROI +{unrealized_pct}% reached! Executing guaranteed complete exit...")
+                await self.sync_exchange_orderbook(ticker, http_client, force=True)
                 min_tp_floor = max(15, int(round(entry_p * 100)))  # Never sell below entry on take profit
                 exit_res = await self.oms.execute_complete_exit(
                     ticker=ticker,
@@ -526,6 +578,7 @@ class KalshiLiveScalper:
 
             # C. Dynamic Risk Cut (Stop Loss -25% ROI AND model_prob <= 35.0%, with thin-book guard matching PaperTradingBot)
             if unrealized_pct <= -self.stop_loss_roi_pct and curr_model_prob <= 35.0:
+                await self.sync_exchange_orderbook(ticker, http_client, force=True)
                 safe_exit_bid = max(curr_bid, round(entry_p * 0.65, 2)) if curr_model_prob >= 18.0 else curr_bid
                 floor_c = max(15, int(round(safe_exit_bid * 100)))
                 logger.info(f"[Stop Loss] ROI {unrealized_pct}% & Model Prob {curr_model_prob}%! Dispatching Complete Exit Stop Loss (floor {floor_c}¢)...")
@@ -635,6 +688,9 @@ class KalshiLiveScalper:
             cost = target_contracts * target_ask
             fees = target_contracts * fee_per_contract
             total_debit = cost + fees
+
+        # Force fresh orderbook sync immediately before sizing and execution
+        await self.sync_exchange_orderbook(ticker, http_client, force=True)
 
         # Execute trade with OMS VWAP depth check
         logger.info(

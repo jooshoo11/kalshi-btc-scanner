@@ -926,11 +926,11 @@ class KalshiOrderManagementSystem:
                 }
 
         # 4. Dispatch Marketable Limit Order with Bounded Taker Spread Crossing (Phase 1 Speedup)
-        # Allows crossing the spread by up to +2¢ as long as mathematical edge strictly remains >= min_edge_pct
+        # Allows crossing the spread by up to +3¢ as long as mathematical edge strictly remains >= min_edge_pct
         effective_cap_cents = worst_price_cents
         if model_prob is not None:
             max_tolerable_cap = worst_price_cents
-            for test_cap in range(worst_price_cents, min(78, worst_price_cents + 3)):
+            for test_cap in range(worst_price_cents, min(78, worst_price_cents + 4)):
                 test_dollars = test_cap / 100.0
                 test_fee = calculate_kalshi_fee(1, test_dollars)
                 test_edge = (model_prob - (test_dollars + test_fee)) * 100.0
