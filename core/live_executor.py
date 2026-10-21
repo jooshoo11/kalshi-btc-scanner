@@ -34,8 +34,12 @@ from prediction_engine import calculate_kalshi_fee
 from phoenix.otel import register
 
 # Initialize Phoenix OpenInference tracer for execution tracing
-tracer_provider = register(project_name="kalshi-multi-coin-bot")
-tracer = tracer_provider.get_tracer(__name__)
+try:
+    tracer_provider = register(project_name="kalshi-multi-coin-bot", set_global_tracer_provider=False)
+    tracer = tracer_provider.get_tracer(__name__)
+except Exception:
+    from opentelemetry import trace
+    tracer = trace.get_tracer(__name__)
 
 logger = logging.getLogger("KalshiOMS")
 if not logger.handlers:
@@ -1430,6 +1434,11 @@ class KalshiOrderManagementSystem:
                     pass
                 return ord_data
             return {"status": "unknown"}
+
+    @tracer.tool
+    async def cancel_order(self, order_id: str, market_ticker: Optional[str] = None) -> bool:
+        """Cancel an open order (public method)."""
+        return await self._cancel_rest_order(order_id=order_id, ticker=market_ticker)
 
     async def _cancel_rest_order(self, order_id: str, ticker: Optional[str] = None) -> bool:
         """Cancel an open order via Kalshi V2 events API."""

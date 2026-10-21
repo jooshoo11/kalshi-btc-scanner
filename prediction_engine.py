@@ -5,8 +5,12 @@ import numpy as np
 from phoenix.otel import register
 
 # Initialize Phoenix OpenInference tracer
-tracer_provider = register(project_name="kalshi-multi-coin-bot")
-tracer = tracer_provider.get_tracer(__name__)
+try:
+    tracer_provider = register(project_name="kalshi-multi-coin-bot", set_global_tracer_provider=False)
+    tracer = tracer_provider.get_tracer(__name__)
+except Exception:
+    from opentelemetry import trace
+    tracer = trace.get_tracer(__name__)
 
 def normal_cdf(x: float) -> float:
     """Standard normal cumulative distribution function (CDF)."""
