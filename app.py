@@ -47,6 +47,8 @@ db = AuditDatabase("kalshi_audit.db")
 live_db = AuditDatabase("kalshi_live_demo.db")
 paper_bot = PaperTradingBot(db, initial_balance=50.0, watchdog=watchdog)
 multicoin_engine = MultiCoinPaperEngine(initial_balance=100.0, db_path="multi_coin_paper.db")
+multicoin_live_matrix: Dict[str, Dict[str, Any]] = {}
+multicoin_brain_logs: List[Dict[str, Any]] = []
 
 # Live Kalshi Demo OMS & WebSocket instances
 live_auth = KalshiAuth.from_env()
@@ -246,19 +248,33 @@ async def multi_coin_production_loop():
                     prob_yes_pct = prob_yes * 100.0
                     prob_no_pct = prob_no * 100.0
 
+                    # Calculate net post-fee edges
+                    fee_y = calculate_kalshi_taker_fee(1, y_ask) if y_ask > 0 else 0.0
+                    fee_n = calculate_kalshi_taker_fee(1, n_ask) if n_ask > 0 else 0.0
+                    edge_y = (prob_yes - (y_ask + fee_y)) * 100.0 if y_ask > 0 else -100.0
+                    edge_n = (prob_no - (n_ask + fee_n)) * 100.0 if n_ask > 0 else -100.0
+
                     # Evaluate open positions
                     if coin in multicoin_engine.active_positions:
                         pos = multicoin_engine.active_positions[coin]
                         cur_bid = y_bid if pos["side"] == "YES" else n_bid
                         if cur_bid <= 0.01:
                             cur_bid = pos.get("current_bid", pos["entry_price"])
-                        multicoin_engine.update_position(
+                        closed_trade = multicoin_engine.update_position(
                             coin=coin,
                             current_bid=cur_bid,
                             seconds_left=seconds_left,
                             settle_spot=spot,
                             strike=open_p
                         )
+                        if closed_trade:
+                            icon = "🎯" if closed_trade["pnl"] >= 0 else "🛑"
+                            multicoin_brain_logs.append({
+                                "time": time.strftime("%H:%M:%S", time.localtime(now)),
+                                "coin": coin,
+                                "type": "EXIT",
+                                "text": f"{icon} EXITED {closed_trade['coin']} ({closed_trade['reason']}): PnL {closed_trade['pnl']:+.2f} ({closed_trade['roi']:+.1f}%) | Equity: ${closed_trade['equity']:.2f}"
+                            })
 
                     # Evaluate new entry
                     else:
@@ -267,18 +283,14 @@ async def multi_coin_production_loop():
                         prob_val = 50.0
 
                         if prob_yes_pct >= 60.0 and 0.20 <= y_ask <= 0.80:
-                            fee_y = calculate_kalshi_taker_fee(1, y_ask)
-                            edge = (prob_yes - (y_ask + fee_y)) * 100.0
-                            if edge >= 4.0:
+                            if edge_y >= 4.0:
                                 signal = "BUY YES"
-                                edge_pct = edge
+                                edge_pct = edge_y
                                 prob_val = prob_yes_pct
                         elif prob_no_pct >= 60.0 and 0.20 <= n_ask <= 0.80:
-                            fee_n = calculate_kalshi_taker_fee(1, n_ask)
-                            edge = (prob_no - (n_ask + fee_n)) * 100.0
-                            if edge >= 4.0:
+                            if edge_n >= 4.0:
                                 signal = "BUY NO"
-                                edge_pct = edge
+                                edge_pct = edge_n
                                 prob_val = prob_no_pct
 
                         if signal:
@@ -297,12 +309,79 @@ async def multi_coin_production_loop():
                             )
                             if trade_pos:
                                 print(f"[MultiCoinProd] TRADE ENTERED: {coin} {trade_pos.get('side')} {trade_pos.get('contracts')}x @ {trade_pos.get('entry_price')} on {ticker}")
+                                multicoin_brain_logs.append({
+                                    "time": time.strftime("%H:%M:%S", time.localtime(now)),
+                                    "coin": coin,
+                                    "type": "ENTRY",
+                                    "text": f"🚀 ENTERED {trade_pos.get('side')} ({trade_pos.get('contracts')}x @ {int(trade_pos.get('entry_price',0)*100)}¢) on {ticker} | Edge: +{edge_pct:.1f}% | Prob: {prob_val:.1f}%"
+                                })
 
-                if now - last_heartbeat > 30.0:
+                    # Update live cockpit matrix for frontend
+                    pos = multicoin_engine.active_positions.get(coin)
+                    action_status = "HOLD"
+                    action_reason = ""
+
+                    if pos:
+                        cur_bid = y_bid if pos["side"] == "YES" else n_bid
+                        roi_unrealized = ((cur_bid - pos["entry_price"]) / max(0.01, pos["entry_price"])) * 100.0
+                        action_status = f"IN_POSITION_{pos['side']}"
+                        action_reason = f"Holding {pos['contracts']}x {pos['side']} @ {int(pos['entry_price']*100)}¢ (Now: {int(cur_bid*100)}¢ | ROI: {roi_unrealized:+.1f}%)"
+                    elif seconds_left < 60:
+                        action_status = "HOLD_EXPIRE"
+                        action_reason = f"Expiration gate active ({int(seconds_left)}s < 60s cutoff)"
+                    elif prob_yes_pct >= 60.0 and edge_y >= 4.0 and 0.20 <= y_ask <= 0.80:
+                        action_status = "BUY_YES"
+                        action_reason = f"Conviction {prob_yes_pct:.1f}% & Edge +{edge_y:.1f}% meets criteria"
+                    elif prob_no_pct >= 60.0 and edge_n >= 4.0 and 0.20 <= n_ask <= 0.80:
+                        action_status = "BUY_NO"
+                        action_reason = f"Conviction {prob_no_pct:.1f}% & Edge +{edge_n:.1f}% meets criteria"
+                    else:
+                        best_p = max(prob_yes_pct, prob_no_pct)
+                        best_e = max(edge_y, edge_n)
+                        if best_p < 60.0:
+                            action_reason = f"Low Conviction ({best_p:.1f}% < 60%)"
+                        else:
+                            action_reason = f"Negative Edge ({best_e:+.1f}% < +4.0%)"
+
+                    multicoin_live_matrix[coin] = {
+                        "coin": coin,
+                        "ticker": ticker,
+                        "spot": spot,
+                        "open": open_p,
+                        "delta": round(delta, 4),
+                        "seconds_left": int(seconds_left),
+                        "z_score": round(z, 2),
+                        "prob_yes_pct": round(prob_yes_pct, 1),
+                        "prob_no_pct": round(prob_no_pct, 1),
+                        "yes_ask": y_ask,
+                        "yes_bid": y_bid,
+                        "no_ask": n_ask,
+                        "no_bid": n_bid,
+                        "spread_cents": int(round((y_ask - y_bid) * 100)) if (y_ask and y_bid) else 0,
+                        "fee_y": round(fee_y, 4),
+                        "fee_n": round(fee_n, 4),
+                        "edge_y": round(edge_y, 1),
+                        "edge_n": round(edge_n, 1),
+                        "action": action_status,
+                        "action_reason": action_reason,
+                        "active_position": pos,
+                        "equity": multicoin_engine.coin_equities.get(coin, 25.0),
+                        "weight": multicoin_engine.coin_weights.get(coin, 0.25)
+                    }
+
+                # Periodic brain scan log
+                if now - last_heartbeat > 15.0:
                     last_heartbeat = now
                     summary = " | ".join([f"{c}: d={spot_prices.get(c,0)-candle_opens.get(c,0):+.2f}" for c in coin_configs])
                     mkts_str = ", ".join([f"{c}:{cached_markets.get(c, {}).get('ticker', 'none')}" for c in coin_configs])
                     print(f"[MultiCoinProd] Heartbeat | {summary} | Markets: [{mkts_str}] | Active: {list(multicoin_engine.active_positions.keys())}")
+                    multicoin_brain_logs.append({
+                        "time": time.strftime("%H:%M:%S", time.localtime(now)),
+                        "type": "SCAN",
+                        "text": f"Scanned 4 coins ({int(seconds_left)}s left) | BTC: {spot_prices.get('BTC',0)-candle_opens.get('BTC',0):+.1f} | ETH: {spot_prices.get('ETH',0)-candle_opens.get('ETH',0):+.2f} | SOL: {spot_prices.get('SOL',0)-candle_opens.get('SOL',0):+.2f} | XRP: {spot_prices.get('XRP',0)-candle_opens.get('XRP',0):+.4f} | Equity: ${multicoin_engine.total_equity:.2f}"
+                    })
+                    if len(multicoin_brain_logs) > 30:
+                        multicoin_brain_logs.pop(0)
 
             except Exception as e:
                 print(f"[MultiCoinProd] Exception: {e}")
@@ -408,6 +487,8 @@ def assemble_full_payload() -> Dict[str, Any]:
         "stats": scan_data.get("stats", {}),
         "bot": bot_data,
         "multicoin": multicoin_engine.get_status_dict(),
+        "multicoin_matrix": multicoin_live_matrix,
+        "multicoin_brain_logs": multicoin_brain_logs[-20:],
         "live_kalshi": live_kalshi_payload
     }
 
@@ -459,6 +540,8 @@ def assemble_tick_payload() -> Dict[str, Any]:
         "stats": scan_data.get("stats", {}),
         "bot": bot_data,
         "multicoin": multicoin_engine.get_status_dict(),
+        "multicoin_matrix": multicoin_live_matrix,
+        "multicoin_brain_logs": multicoin_brain_logs[-20:],
         "live_kalshi": live_kalshi_payload
     }
 

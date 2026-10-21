@@ -393,29 +393,28 @@ class MultiCoinPaperEngine:
             payout = pos["contracts"] * 1.00 if won else 0.00
             pnl = payout - (pos["cost_dollars"] + pos["fee_dollars"])
             reason = "SETTLED_WIN" if won else "SETTLED_LOSS"
-            self._close_position(coin, exit_price=1.0 if won else 0.0, reason=reason, pnl=pnl, payout=payout, current_time=now)
-            return
+            return self._close_position(coin, exit_price=1.0 if won else 0.0, reason=reason, pnl=pnl, payout=payout, current_time=now)
 
         # B. Take Profit Exit (+25% ROI)
         if roi_pct >= self.take_profit_roi_pct:
             exit_fee = calculate_kalshi_taker_fee(pos["contracts"], current_bid)
             gross = pos["contracts"] * current_bid
             pnl = gross - exit_fee - (pos["cost_dollars"] + pos["fee_dollars"])
-            self._close_position(coin, exit_price=current_bid, reason="TAKE_PROFIT", pnl=pnl, payout=gross - exit_fee, current_time=now)
-            return
+            return self._close_position(coin, exit_price=current_bid, reason="TAKE_PROFIT", pnl=pnl, payout=gross - exit_fee, current_time=now)
 
         # C. Stop Loss Exit (-25% ROI)
         if roi_pct <= -self.stop_loss_roi_pct:
             exit_fee = calculate_kalshi_taker_fee(pos["contracts"], current_bid)
             gross = pos["contracts"] * current_bid
             pnl = gross - exit_fee - (pos["cost_dollars"] + pos["fee_dollars"])
-            self._close_position(coin, exit_price=current_bid, reason="STOP_LOSS", pnl=pnl, payout=gross - exit_fee, current_time=now)
-            return
+            return self._close_position(coin, exit_price=current_bid, reason="STOP_LOSS", pnl=pnl, payout=gross - exit_fee, current_time=now)
 
-    def _close_position(self, coin: str, exit_price: float, reason: str, pnl: float, payout: float, current_time: Optional[float] = None):
+        return None
+
+    def _close_position(self, coin: str, exit_price: float, reason: str, pnl: float, payout: float, current_time: Optional[float] = None) -> Optional[Dict[str, Any]]:
         pos = self.active_positions.pop(coin, None)
         if not pos:
-            return
+            return None
 
         now = current_time or time.time()
         self.total_cash += payout
@@ -434,6 +433,18 @@ class MultiCoinPaperEngine:
         self._update_total_equity()
         self.rebalance_weights_on_performance()
         logger.info(f"[MultiCoin Close] {coin} | {pos['ticker']} {reason} | PnL: ${pnl:.2f} ({roi:+.1f}%) | Equity: ${self.total_equity:.2f}")
+        return {
+            "coin": coin,
+            "ticker": pos["ticker"],
+            "side": pos["side"],
+            "contracts": pos["contracts"],
+            "entry_price": pos["entry_price"],
+            "exit_price": exit_price,
+            "reason": reason,
+            "pnl": round(pnl, 2),
+            "roi": round(roi, 1),
+            "equity": self.total_equity
+        }
 
     def _update_total_equity(self):
         open_val = sum(p["cost_dollars"] for p in self.active_positions.values())

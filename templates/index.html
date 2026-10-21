@@ -246,36 +246,30 @@
   <!-- Navigation Tab Bar -->
   <div class="px-4 lg:px-8 border-b border-slate-800 bg-dark-950">
     <div class="max-w-7xl mx-auto flex items-center overflow-x-auto gap-2 py-2.5 scrollbar-none">
-      <button onclick="switchTab('tab-live')" id="btn-tab-live" class="tab-btn px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-rose-300 border border-rose-500/40 bg-rose-500/10 whitespace-nowrap flex items-center gap-1.5 transition">
-        <span class="w-2 h-2 rounded-full bg-rose-400 animate-pulse"></span>
+      <button onclick="switchTab('tab-multicoin')" id="btn-tab-multicoin" class="tab-btn active px-4 py-2 rounded-xl text-xs font-mono font-bold text-cyan-300 border border-cyan-500/40 bg-cyan-500/15 whitespace-nowrap flex items-center gap-2 shadow-lg shadow-cyan-500/10 transition">
+        <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
+        🌐 4-Coin Command Center
+      </button>
+      <button onclick="switchTab('tab-live')" id="btn-tab-live" class="tab-btn px-4 py-2 rounded-xl text-xs font-mono font-bold text-rose-300 border border-rose-500/30 hover:bg-rose-500/10 whitespace-nowrap flex items-center gap-2 transition">
+        <span class="w-2 h-2 rounded-full bg-rose-400"></span>
         🔴 Live Kalshi Demo & OMS
       </button>
-      <button onclick="switchTab('tab-bot')" id="btn-tab-bot" class="tab-btn active px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold whitespace-nowrap flex items-center gap-1.5 transition">
-        🤖 15M Trading Bot & Audit
+      <button onclick="switchTab('tab-bot')" id="btn-tab-bot" class="tab-btn px-4 py-2 rounded-xl text-xs font-mono font-bold text-slate-300 border border-slate-800 hover:bg-slate-800/60 whitespace-nowrap flex items-center gap-2 transition">
+        🤖 Single Paper Bot & Audit
       </button>
-      <button onclick="switchTab('tab-multicoin')" id="btn-tab-multicoin" class="tab-btn px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-cyan-300 border border-cyan-500/40 bg-cyan-500/10 whitespace-nowrap flex items-center gap-1.5 transition">
-        <span class="w-2 h-2 rounded-full bg-cyan-400"></span>
-        🌐 Multi-Coin Engine ($100)
-      </button>
-      <button onclick="switchTab('tab-scalp')" id="btn-tab-scalp" class="tab-btn px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-slate-400 whitespace-nowrap flex items-center gap-1.5 transition">
+      <button onclick="switchTab('tab-scalp')" id="btn-tab-scalp" class="tab-btn px-3.5 py-2 rounded-xl text-xs font-mono text-slate-400 hover:text-white transition">
         ⚡ 15M Scalp Sniper
       </button>
-      <button onclick="switchTab('tab-radar')" id="btn-tab-radar" class="tab-btn px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-slate-400 whitespace-nowrap flex items-center gap-1.5 transition">
-        🎯 Top +EV Radar (<span id="radarCountBadge">0</span>)
+      <button onclick="switchTab('tab-radar')" id="btn-tab-radar" class="tab-btn px-3.5 py-2 rounded-xl text-xs font-mono text-slate-400 hover:text-white transition">
+        🎯 +EV Radar (<span id="radarCountBadge">0</span>)
       </button>
-      <button onclick="switchTab('tab-ladder')" id="btn-tab-ladder" class="tab-btn px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-slate-400 whitespace-nowrap flex items-center gap-1.5 transition">
+      <button onclick="switchTab('tab-ladder')" id="btn-tab-ladder" class="tab-btn px-3.5 py-2 rounded-xl text-xs font-mono text-slate-400 hover:text-white transition">
         📊 Strike Ladder Curve
       </button>
-      <button onclick="switchTab('tab-range')" id="btn-tab-range" class="tab-btn px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-slate-400 whitespace-nowrap flex items-center gap-1.5 transition">
-        📈 Price Range Brackets
-      </button>
-      <button onclick="switchTab('tab-macro')" id="btn-tab-macro" class="tab-btn px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-slate-400 whitespace-nowrap flex items-center gap-1.5 transition">
-        🏔️ Macro & Yearly Targets
-      </button>
-      <button onclick="switchTab('tab-mc')" id="btn-tab-mc" class="tab-btn px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-slate-400 whitespace-nowrap flex items-center gap-1.5 transition">
+      <button onclick="switchTab('tab-mc')" id="btn-tab-mc" class="tab-btn px-3.5 py-2 rounded-xl text-xs font-mono text-slate-400 hover:text-white transition">
         🎲 Monte Carlo Sim Lab
       </button>
-      <button onclick="switchTab('tab-tech')" id="btn-tab-tech" class="tab-btn px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-slate-400 whitespace-nowrap flex items-center gap-1.5 transition">
+      <button onclick="switchTab('tab-tech')" id="btn-tab-tech" class="tab-btn px-3.5 py-2 rounded-xl text-xs font-mono text-slate-400 hover:text-white transition">
         🔬 Technicals & Microstructure
       </button>
     </div>
@@ -305,7 +299,7 @@
     <!-- ================================================================= -->
     <!-- TAB 0: 15-MINUTE PAPER TRADING BOT & AUDIT TERMINAL               -->
     <!-- ================================================================= -->
-    <section id="tab-bot" class="space-y-6">
+    <section id="tab-bot" class="space-y-6 hidden">
       
       <!-- Account Performance Banner -->
       <div class="glass-card p-6 rounded-2xl relative overflow-hidden">
@@ -579,7 +573,7 @@
     <!-- ================================================================= -->
     <!-- TAB: MULTI-COIN AUTONOMOUS PAPER PORTFOLIO (BTC, ETH, SOL, XRP)  -->
     <!-- ================================================================= -->
-    <section id="tab-multicoin" class="space-y-6 hidden">
+    <section id="tab-multicoin" class="space-y-6">
 
       <!-- Portfolio Banner -->
       <div class="glass-card p-6 rounded-2xl relative overflow-hidden border border-cyan-500/20">
@@ -589,14 +583,15 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-400 text-xs font-mono font-bold">MULTI-ASSET DYNAMIC ALLOCATION</span>
-              <h2 class="text-xl font-black text-white">4-Coin Autonomous Paper Portfolio</h2>
+              <h2 class="text-xl font-black text-white">4-Coin Autonomous Command Center</h2>
             </div>
             <p class="text-xs text-slate-400 mt-1">Unified $100 baseline bankroll with performance-weighted capital reallocation across BTC, ETH, SOL, and XRP.</p>
           </div>
 
           <div class="flex items-center gap-2">
-            <span class="px-3 py-1.5 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 font-mono text-xs font-bold">
-              ⚡ 20% Max Risk / Trade | 60s Cutoff
+            <span class="px-3 py-1.5 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 font-mono text-xs font-bold flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
+              ⚡ 20% Max Risk / Trade • 60s Cutoff
             </span>
           </div>
         </div>
@@ -637,7 +632,7 @@
           <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
             <span class="text-slate-400 text-[10px] uppercase font-bold">Rebalancing Engine</span>
             <div class="text-sm font-black text-cyan-300 mt-1">DYNAMIC</div>
-            <div class="text-[10px] text-slate-500 mt-0.5">Profit-Weighted</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">Performance-Weighted</div>
           </div>
 
         </div>
@@ -646,7 +641,7 @@
         <div class="mt-6 pt-5 border-t border-slate-800/80">
           <div class="flex items-center justify-between text-xs font-mono mb-2">
             <span class="text-slate-400 uppercase font-bold text-[10px]">Capital Allocation Breakdown</span>
-            <span class="text-slate-500 text-[10px]">Auto-rebalances on trade outcome</span>
+            <span class="text-slate-500 text-[10px]">Auto-rebalances on every closed trade</span>
           </div>
           <div class="w-full h-4 bg-slate-950 rounded-full overflow-hidden flex border border-slate-800">
             <div id="mcBarBtc" class="h-full bg-amber-500 transition-all duration-500 flex items-center justify-center text-[9px] font-bold text-slate-950" style="width: 30%">BTC 30%</div>
@@ -658,85 +653,261 @@
 
       </div>
 
-      <!-- 4 Coin Performance Cards Grid -->
+      <!-- 4-Coin Live Cockpit Matrix Cards (BTC, ETH, SOL, XRP) -->
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 font-mono">
         
-        <!-- BTC Card -->
-        <div class="glass-card p-5 rounded-xl border border-amber-500/20 bg-amber-950/5 flex flex-col justify-between">
+        <!-- BTC Live Card -->
+        <div class="glass-card p-5 rounded-2xl border border-amber-500/30 bg-amber-950/10 flex flex-col justify-between space-y-4 shadow-xl shadow-amber-500/5">
           <div>
             <div class="flex items-center justify-between pb-2 border-b border-slate-800">
               <span class="text-sm font-bold text-amber-400 flex items-center gap-1.5">
-                <span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span> Bitcoin (BTC)
+                <span class="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span> ₿ Bitcoin
               </span>
-              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-300">KXBTC15M</span>
+              <span id="mcBtcTicker" class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">KXBTC15M</span>
             </div>
-            <div class="mt-3 space-y-2 text-xs">
-              <div class="flex justify-between"><span class="text-slate-400">Weight:</span><span id="mcBtcWeight" class="text-white font-bold">30.1%</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Allocated Equity:</span><span id="mcBtcEquity" class="text-amber-400 font-bold">$0.00</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Win Rate:</span><span id="mcBtcWinRate" class="text-emerald-400 font-bold">--%</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Realized PnL:</span><span id="mcBtcPnl" class="text-slate-200 font-bold">$0.00</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Trades:</span><span id="mcBtcTrades" class="text-slate-400">0</span></div>
+
+            <!-- Live Spot & Delta -->
+            <div class="mt-3">
+              <div class="text-[10px] text-slate-400 uppercase font-semibold">Live Spot Price</div>
+              <div id="mcBtcSpot" class="text-2xl font-black text-white mt-0.5">$0.00</div>
+              <div id="mcBtcDelta" class="text-xs font-bold text-slate-400 mt-0.5">Delta: $0.00 (0.00%)</div>
             </div>
+
+            <!-- Model Conviction Bar -->
+            <div class="mt-3 space-y-1">
+              <div id="mcBtcProbLabel" class="text-[10px] font-bold text-slate-300 flex justify-between">
+                <span>YES: <b class="text-emerald-400">50.0%</b></span>
+                <span>NO: <b class="text-rose-400">50.0%</b></span>
+              </div>
+              <div class="w-full h-2 bg-slate-950 rounded-full overflow-hidden flex border border-slate-800">
+                <div id="mcBtcProbBar" class="h-full bg-emerald-500 transition-all duration-300" style="width: 50%"></div>
+              </div>
+            </div>
+
+            <!-- Kalshi Production Quotes -->
+            <div class="mt-3 grid grid-cols-3 gap-1 p-2 rounded-xl bg-slate-950/80 border border-slate-800/80 text-[11px] text-center">
+              <div>
+                <span class="text-slate-500 text-[9px] uppercase font-bold block">Ask</span>
+                <span id="mcBtcAsk" class="font-bold text-rose-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-slate-500 text-[9px] uppercase font-bold block">Bid</span>
+                <span id="mcBtcBid" class="font-bold text-emerald-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-slate-500 text-[9px] uppercase font-bold block">Spread</span>
+                <span id="mcBtcSpread" class="font-bold text-cyan-400">--¢</span>
+              </div>
+            </div>
+
+            <!-- Action Status Badge -->
+            <div id="mcBtcActionBadge" class="mt-3 p-2 rounded-xl border text-[11px] font-bold text-center flex items-center justify-center gap-1.5 bg-slate-900 border-slate-800 text-slate-400">
+              ⚪ HOLD: Initializing
+            </div>
+          </div>
+
+          <!-- Card Footer (Sub-Equity & Performance) -->
+          <div class="pt-3 border-t border-slate-800/80 text-[11px] space-y-1">
+            <div class="flex justify-between"><span class="text-slate-400">Sub-Equity:</span><span id="mcBtcEquity" class="text-amber-400 font-bold">$0.00</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Weight:</span><span id="mcBtcWeight" class="text-white font-bold">--%</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Win Rate:</span><span id="mcBtcWinRate" class="text-emerald-400 font-bold">--%</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Trades:</span><span id="mcBtcTrades" class="text-slate-300">0</span></div>
           </div>
         </div>
 
-        <!-- ETH Card -->
-        <div class="glass-card p-5 rounded-xl border border-blue-500/20 bg-blue-950/5 flex flex-col justify-between">
+        <!-- ETH Live Card -->
+        <div class="glass-card p-5 rounded-2xl border border-blue-500/30 bg-blue-950/10 flex flex-col justify-between space-y-4 shadow-xl shadow-blue-500/5">
           <div>
             <div class="flex items-center justify-between pb-2 border-b border-slate-800">
               <span class="text-sm font-bold text-blue-400 flex items-center gap-1.5">
-                <span class="w-2.5 h-2.5 rounded-full bg-blue-400"></span> Ethereum (ETH)
+                <span class="w-2.5 h-2.5 rounded-full bg-blue-400 animate-pulse"></span> Ξ Ethereum
               </span>
-              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-500/15 text-blue-300">KXETH15M</span>
+              <span id="mcEthTicker" class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-500/15 text-blue-300 border border-blue-500/30">KXETH15M</span>
             </div>
-            <div class="mt-3 space-y-2 text-xs">
-              <div class="flex justify-between"><span class="text-slate-400">Weight:</span><span id="mcEthWeight" class="text-white font-bold">22.3%</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Allocated Equity:</span><span id="mcEthEquity" class="text-blue-400 font-bold">$0.00</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Win Rate:</span><span id="mcEthWinRate" class="text-emerald-400 font-bold">--%</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Realized PnL:</span><span id="mcEthPnl" class="text-slate-200 font-bold">$0.00</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Trades:</span><span id="mcEthTrades" class="text-slate-400">0</span></div>
+
+            <div class="mt-3">
+              <div class="text-[10px] text-slate-400 uppercase font-semibold">Live Spot Price</div>
+              <div id="mcEthSpot" class="text-2xl font-black text-white mt-0.5">$0.00</div>
+              <div id="mcEthDelta" class="text-xs font-bold text-slate-400 mt-0.5">Delta: $0.00 (0.00%)</div>
             </div>
+
+            <div class="mt-3 space-y-1">
+              <div id="mcEthProbLabel" class="text-[10px] font-bold text-slate-300 flex justify-between">
+                <span>YES: <b class="text-emerald-400">50.0%</b></span>
+                <span>NO: <b class="text-rose-400">50.0%</b></span>
+              </div>
+              <div class="w-full h-2 bg-slate-950 rounded-full overflow-hidden flex border border-slate-800">
+                <div id="mcEthProbBar" class="h-full bg-emerald-500 transition-all duration-300" style="width: 50%"></div>
+              </div>
+            </div>
+
+            <div class="mt-3 grid grid-cols-3 gap-1 p-2 rounded-xl bg-slate-950/80 border border-slate-800/80 text-[11px] text-center">
+              <div>
+                <span class="text-slate-500 text-[9px] uppercase font-bold block">Ask</span>
+                <span id="mcEthAsk" class="font-bold text-rose-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-slate-500 text-[9px] uppercase font-bold block">Bid</span>
+                <span id="mcEthBid" class="font-bold text-emerald-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-slate-500 text-[9px] uppercase font-bold block">Spread</span>
+                <span id="mcEthSpread" class="font-bold text-cyan-400">--¢</span>
+              </div>
+            </div>
+
+            <div id="mcEthActionBadge" class="mt-3 p-2 rounded-xl border text-[11px] font-bold text-center flex items-center justify-center gap-1.5 bg-slate-900 border-slate-800 text-slate-400">
+              ⚪ HOLD: Initializing
+            </div>
+          </div>
+
+          <div class="pt-3 border-t border-slate-800/80 text-[11px] space-y-1">
+            <div class="flex justify-between"><span class="text-slate-400">Sub-Equity:</span><span id="mcEthEquity" class="text-blue-400 font-bold">$0.00</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Weight:</span><span id="mcEthWeight" class="text-white font-bold">--%</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Win Rate:</span><span id="mcEthWinRate" class="text-emerald-400 font-bold">--%</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Trades:</span><span id="mcEthTrades" class="text-slate-300">0</span></div>
           </div>
         </div>
 
-        <!-- SOL Card -->
-        <div class="glass-card p-5 rounded-xl border border-purple-500/20 bg-purple-950/5 flex flex-col justify-between">
+        <!-- SOL Live Card -->
+        <div class="glass-card p-5 rounded-2xl border border-purple-500/30 bg-purple-950/10 flex flex-col justify-between space-y-4 shadow-xl shadow-purple-500/5">
           <div>
             <div class="flex items-center justify-between pb-2 border-b border-slate-800">
               <span class="text-sm font-bold text-purple-400 flex items-center gap-1.5">
-                <span class="w-2.5 h-2.5 rounded-full bg-purple-400"></span> Solana (SOL)
+                <span class="w-2.5 h-2.5 rounded-full bg-purple-400 animate-pulse"></span> ◎ Solana
               </span>
-              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/15 text-purple-300">KXSOL15M</span>
+              <span id="mcSolTicker" class="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/15 text-purple-300 border border-purple-500/30">KXSOL15M</span>
             </div>
-            <div class="mt-3 space-y-2 text-xs">
-              <div class="flex justify-between"><span class="text-slate-400">Weight:</span><span id="mcSolWeight" class="text-white font-bold">24.4%</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Allocated Equity:</span><span id="mcSolEquity" class="text-purple-400 font-bold">$0.00</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Win Rate:</span><span id="mcSolWinRate" class="text-emerald-400 font-bold">--%</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Realized PnL:</span><span id="mcSolPnl" class="text-slate-200 font-bold">$0.00</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Trades:</span><span id="mcSolTrades" class="text-slate-400">0</span></div>
+
+            <div class="mt-3">
+              <div class="text-[10px] text-slate-400 uppercase font-semibold">Live Spot Price</div>
+              <div id="mcSolSpot" class="text-2xl font-black text-white mt-0.5">$0.00</div>
+              <div id="mcSolDelta" class="text-xs font-bold text-slate-400 mt-0.5">Delta: $0.00 (0.00%)</div>
             </div>
+
+            <div class="mt-3 space-y-1">
+              <div id="mcSolProbLabel" class="text-[10px] font-bold text-slate-300 flex justify-between">
+                <span>YES: <b class="text-emerald-400">50.0%</b></span>
+                <span>NO: <b class="text-rose-400">50.0%</b></span>
+              </div>
+              <div class="w-full h-2 bg-slate-950 rounded-full overflow-hidden flex border border-slate-800">
+                <div id="mcSolProbBar" class="h-full bg-emerald-500 transition-all duration-300" style="width: 50%"></div>
+              </div>
+            </div>
+
+            <div class="mt-3 grid grid-cols-3 gap-1 p-2 rounded-xl bg-slate-950/80 border border-slate-800/80 text-[11px] text-center">
+              <div>
+                <span class="text-slate-500 text-[9px] uppercase font-bold block">Ask</span>
+                <span id="mcSolAsk" class="font-bold text-rose-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-slate-500 text-[9px] uppercase font-bold block">Bid</span>
+                <span id="mcSolBid" class="font-bold text-emerald-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-slate-500 text-[9px] uppercase font-bold block">Spread</span>
+                <span id="mcSolSpread" class="font-bold text-cyan-400">--¢</span>
+              </div>
+            </div>
+
+            <div id="mcSolActionBadge" class="mt-3 p-2 rounded-xl border text-[11px] font-bold text-center flex items-center justify-center gap-1.5 bg-slate-900 border-slate-800 text-slate-400">
+              ⚪ HOLD: Initializing
+            </div>
+          </div>
+
+          <div class="pt-3 border-t border-slate-800/80 text-[11px] space-y-1">
+            <div class="flex justify-between"><span class="text-slate-400">Sub-Equity:</span><span id="mcSolEquity" class="text-purple-400 font-bold">$0.00</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Weight:</span><span id="mcSolWeight" class="text-white font-bold">--%</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Win Rate:</span><span id="mcSolWinRate" class="text-emerald-400 font-bold">--%</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Trades:</span><span id="mcSolTrades" class="text-slate-300">0</span></div>
           </div>
         </div>
 
-        <!-- XRP Card -->
-        <div class="glass-card p-5 rounded-xl border border-cyan-500/20 bg-cyan-950/5 flex flex-col justify-between">
+        <!-- XRP Live Card -->
+        <div class="glass-card p-5 rounded-2xl border border-cyan-500/30 bg-cyan-950/10 flex flex-col justify-between space-y-4 shadow-xl shadow-cyan-500/5">
           <div>
             <div class="flex items-center justify-between pb-2 border-b border-slate-800">
               <span class="text-sm font-bold text-cyan-400 flex items-center gap-1.5">
-                <span class="w-2.5 h-2.5 rounded-full bg-cyan-400"></span> Ripple (XRP)
+                <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span> ✕ Ripple
               </span>
-              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-500/15 text-cyan-300">KXXRP15M</span>
+              <span id="mcXrpTicker" class="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">KXXRP15M</span>
             </div>
-            <div class="mt-3 space-y-2 text-xs">
-              <div class="flex justify-between"><span class="text-slate-400">Weight:</span><span id="mcXrpWeight" class="text-white font-bold">23.1%</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Allocated Equity:</span><span id="mcXrpEquity" class="text-cyan-400 font-bold">$0.00</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Win Rate:</span><span id="mcXrpWinRate" class="text-emerald-400 font-bold">--%</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Realized PnL:</span><span id="mcXrpPnl" class="text-slate-200 font-bold">$0.00</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Trades:</span><span id="mcXrpTrades" class="text-slate-400">0</span></div>
+
+            <div class="mt-3">
+              <div class="text-[10px] text-slate-400 uppercase font-semibold">Live Spot Price</div>
+              <div id="mcXrpSpot" class="text-2xl font-black text-white mt-0.5">$0.0000</div>
+              <div id="mcXrpDelta" class="text-xs font-bold text-slate-400 mt-0.5">Delta: $0.0000 (0.00%)</div>
             </div>
+
+            <div class="mt-3 space-y-1">
+              <div id="mcXrpProbLabel" class="text-[10px] font-bold text-slate-300 flex justify-between">
+                <span>YES: <b class="text-emerald-400">50.0%</b></span>
+                <span>NO: <b class="text-rose-400">50.0%</b></span>
+              </div>
+              <div class="w-full h-2 bg-slate-950 rounded-full overflow-hidden flex border border-slate-800">
+                <div id="mcXrpProbBar" class="h-full bg-emerald-500 transition-all duration-300" style="width: 50%"></div>
+              </div>
+            </div>
+
+            <div class="mt-3 grid grid-cols-3 gap-1 p-2 rounded-xl bg-slate-950/80 border border-slate-800/80 text-[11px] text-center">
+              <div>
+                <span class="text-slate-500 text-[9px] uppercase font-bold block">Ask</span>
+                <span id="mcXrpAsk" class="font-bold text-rose-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-slate-500 text-[9px] uppercase font-bold block">Bid</span>
+                <span id="mcXrpBid" class="font-bold text-emerald-400">--¢</span>
+              </div>
+              <div>
+                <span class="text-slate-500 text-[9px] uppercase font-bold block">Spread</span>
+                <span id="mcXrpSpread" class="font-bold text-cyan-400">--¢</span>
+              </div>
+            </div>
+
+            <div id="mcXrpActionBadge" class="mt-3 p-2 rounded-xl border text-[11px] font-bold text-center flex items-center justify-center gap-1.5 bg-slate-900 border-slate-800 text-slate-400">
+              ⚪ HOLD: Initializing
+            </div>
+          </div>
+
+          <div class="pt-3 border-t border-slate-800/80 text-[11px] space-y-1">
+            <div class="flex justify-between"><span class="text-slate-400">Sub-Equity:</span><span id="mcXrpEquity" class="text-cyan-400 font-bold">$0.00</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Weight:</span><span id="mcXrpWeight" class="text-white font-bold">--%</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Win Rate:</span><span id="mcXrpWinRate" class="text-emerald-400 font-bold">--%</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Trades:</span><span id="mcXrpTrades" class="text-slate-300">0</span></div>
           </div>
         </div>
 
+      </div>
+
+      <!-- Embedded Live Agent Brain & Thought Process Console -->
+      <div class="glass-card p-6 rounded-2xl border border-cyan-500/20 bg-dark-950/80">
+        <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+          <div class="flex items-center gap-2.5">
+            <span class="relative flex h-3 w-3">
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span class="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+            </span>
+            <h3 class="text-sm font-bold font-mono text-white flex items-center gap-2">
+              🧠 Live Agent Brain & Quantitative Thought Process
+            </h3>
+            <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-cyan-500/20 text-cyan-300">
+              REAL-TIME SSE
+            </span>
+          </div>
+          <div class="text-xs font-mono text-slate-400 flex items-center gap-2">
+            <span>Model: <b class="text-white">Drift-Diffusion Gaussian (BSM)</b></span>
+            <span>•</span>
+            <span>Min Edge: <b class="text-emerald-400">+4.0%</b></span>
+            <span>•</span>
+            <span>Conviction: <b class="text-cyan-400">&ge;60%</b></span>
+          </div>
+        </div>
+
+        <div id="mcBrainConsole" class="mt-4 p-4 rounded-xl bg-black/80 border border-slate-800/80 font-mono text-xs text-slate-300 space-y-2 max-h-56 overflow-y-auto scrollbar-none">
+          <div class="text-slate-500 flex items-center gap-2">
+            <span class="animate-pulse">⏳</span> Listening to live 4-coin quantitative streaming ticks...
+          </div>
+        </div>
       </div>
 
       <!-- Multi-Coin Trade History Table -->
@@ -1783,7 +1954,7 @@
 
       // 12. Update Multi-Coin Portfolio Tab
       if (data.multicoin) {
-        renderMultiCoinTab(data.multicoin);
+        renderMultiCoinTab(data.multicoin, data.multicoin_matrix, data.multicoin_brain_logs);
       }
 
       // 13. Synchronize Header Quick Widgets with Live State
@@ -1928,7 +2099,7 @@
     }
 
     // Render Multi-Coin Dynamic Performance Portfolio Tab
-    function renderMultiCoinTab(mc) {
+    function renderMultiCoinTab(mc, matrix, brainLogs) {
       if (!mc) return;
 
       const equity = mc.total_equity || 100.0;
@@ -1979,7 +2150,7 @@
       const barXrp = document.getElementById('mcBarXrp');
       if (barXrp) { barXrp.style.width = xrpW + '%'; barXrp.innerText = 'XRP ' + xrpW + '%'; }
 
-      // 3. 4 Individual Coin Performance Cards
+      // 3. 4-Coin Live Cockpit Matrix Cards (BTC, ETH, SOL, XRP)
       const stats = mc.coin_stats || {};
       const equities = mc.coin_equities || {};
 
@@ -1989,6 +2160,7 @@
         const cW = ((weights[coin] || 0.25) * 100).toFixed(1);
         const prefix = 'mc' + coin[0] + coin.slice(1).toLowerCase();
 
+        // Sub-equity and stats
         const wEl = document.getElementById(prefix + 'Weight');
         if (wEl) wEl.innerText = cW + '%';
 
@@ -1998,18 +2170,118 @@
         const cWrEl = document.getElementById(prefix + 'WinRate');
         if (cWrEl) cWrEl.innerText = (cStat.win_rate_pct !== undefined ? cStat.win_rate_pct.toFixed(1) + '%' : '--%');
 
-        const cPnlEl = document.getElementById(prefix + 'Pnl');
-        if (cPnlEl) {
-          const cp = cStat.total_pnl || 0.0;
-          cPnlEl.innerText = (cp >= 0 ? '+' : '') + '$' + cp.toFixed(2);
-          cPnlEl.className = 'font-bold ' + (cp >= 0 ? 'text-emerald-400' : 'text-rose-400');
-        }
-
         const trEl = document.getElementById(prefix + 'Trades');
         if (trEl) trEl.innerText = (cStat.total_trades || 0) + ' (' + (cStat.wins || 0) + 'W / ' + (cStat.losses || 0) + 'L)';
+
+        // Live stream matrix data for each coin
+        if (matrix && matrix[coin]) {
+          const m = matrix[coin];
+
+          // Ticker
+          const tickerEl = document.getElementById(prefix + 'Ticker');
+          if (tickerEl && m.ticker) tickerEl.innerText = m.ticker;
+
+          // Spot price formatting
+          const spotEl = document.getElementById(prefix + 'Spot');
+          if (spotEl && m.spot) {
+            if (coin === 'XRP') {
+              spotEl.innerText = '$' + m.spot.toFixed(4);
+            } else if (coin === 'BTC') {
+              spotEl.innerText = '$' + m.spot.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            } else {
+              spotEl.innerText = '$' + m.spot.toFixed(2);
+            }
+          }
+
+          // Delta
+          const deltaEl = document.getElementById(prefix + 'Delta');
+          if (deltaEl && m.delta !== undefined) {
+            const pct = m.open > 0 ? (m.delta / m.open * 100) : 0;
+            const sign = m.delta >= 0 ? '+' : '';
+            const dec = (coin === 'XRP') ? 4 : 2;
+            const col = m.delta >= 0 ? 'text-emerald-400' : 'text-rose-400';
+            deltaEl.innerHTML = `Delta: <span class="${col} font-bold">${sign}$${m.delta.toFixed(dec)} (${sign}${pct.toFixed(2)}%)</span>`;
+          }
+
+          // Probabilities
+          const pYes = m.prob_yes_pct !== undefined ? m.prob_yes_pct : 50.0;
+          const pNo = m.prob_no_pct !== undefined ? m.prob_no_pct : (100.0 - pYes);
+          const probLbl = document.getElementById(prefix + 'ProbLabel');
+          if (probLbl) {
+            probLbl.innerHTML = `<span>YES: <b class="text-emerald-400">${pYes.toFixed(1)}%</b></span><span>NO: <b class="text-rose-400">${pNo.toFixed(1)}%</b></span>`;
+          }
+          const probBar = document.getElementById(prefix + 'ProbBar');
+          if (probBar) {
+            probBar.style.width = Math.min(100, Math.max(0, pYes)) + '%';
+          }
+
+          // Kalshi Ask / Bid / Spread
+          const askEl = document.getElementById(prefix + 'Ask');
+          if (askEl) askEl.innerText = m.yes_ask ? Math.round(m.yes_ask * 100) + '¢' : '--¢';
+
+          const bidEl = document.getElementById(prefix + 'Bid');
+          if (bidEl) bidEl.innerText = m.yes_bid ? Math.round(m.yes_bid * 100) + '¢' : '--¢';
+
+          const spreadEl = document.getElementById(prefix + 'Spread');
+          if (spreadEl) spreadEl.innerText = m.spread_cents ? m.spread_cents + '¢' : '--¢';
+
+          // Action Status Badge
+          const badgeEl = document.getElementById(prefix + 'ActionBadge');
+          if (badgeEl) {
+            const act = m.action || 'HOLD';
+            const reason = m.action_reason || '';
+            if (act === 'BUY_YES') {
+              badgeEl.className = 'mt-3 p-2 rounded-xl border text-[11px] font-bold text-center flex items-center justify-center gap-1.5 bg-emerald-500/20 text-emerald-300 border-emerald-500/40 animate-pulse';
+              badgeEl.innerHTML = `🟢 BUY YES: +${m.edge_y ? m.edge_y.toFixed(1) : 0}% Edge`;
+            } else if (act === 'BUY_NO') {
+              badgeEl.className = 'mt-3 p-2 rounded-xl border text-[11px] font-bold text-center flex items-center justify-center gap-1.5 bg-rose-500/20 text-rose-300 border-rose-500/40 animate-pulse';
+              badgeEl.innerHTML = `🔴 BUY NO: +${m.edge_n ? m.edge_n.toFixed(1) : 0}% Edge`;
+            } else if (act.startsWith('IN_POSITION')) {
+              const side = act.includes('YES') ? 'YES' : 'NO';
+              const bg = side === 'YES' ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40' : 'bg-purple-500/20 text-purple-300 border-purple-500/40';
+              badgeEl.className = `mt-3 p-2 rounded-xl border text-[11px] font-bold text-center flex items-center justify-center gap-1.5 ${bg}`;
+              badgeEl.innerHTML = `🔵 ACTIVE: ${reason || side}`;
+            } else if (act === 'HOLD_EXPIRE') {
+              badgeEl.className = 'mt-3 p-2 rounded-xl border text-[11px] font-bold text-center flex items-center justify-center gap-1.5 bg-amber-500/10 border-amber-500/30 text-amber-300';
+              badgeEl.innerHTML = `⏱️ LOCKED: <60s Expiration Gate`;
+            } else {
+              badgeEl.className = 'mt-3 p-2 rounded-xl border text-[11px] font-bold text-center flex items-center justify-center gap-1.5 bg-slate-900 border-slate-800 text-slate-400';
+              badgeEl.innerHTML = `⚪ HOLD: ${reason || 'Evaluating...'}`;
+            }
+          }
+        }
       });
 
-      // 4. Multi-Coin Trade History Table
+      // 4. Live Agent Brain Console
+      const brainEl = document.getElementById('mcBrainConsole');
+      if (brainEl && brainLogs && brainLogs.length) {
+        let bHtml = '';
+        brainLogs.forEach(log => {
+          let badge = '<span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-800 text-slate-400">INFO</span>';
+          let textColor = 'text-slate-300';
+          if (log.type === 'ENTRY') {
+            badge = '<span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">ENTRY</span>';
+            textColor = 'text-emerald-300 font-bold';
+          } else if (log.type === 'EXIT') {
+            badge = '<span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">EXIT</span>';
+            textColor = 'text-cyan-300 font-bold';
+          } else if (log.type === 'SCAN') {
+            badge = '<span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-800 text-slate-400 border border-slate-700">QUANT SCAN</span>';
+            textColor = 'text-slate-400';
+          }
+          bHtml += `
+            <div class="flex items-start gap-2 py-0.5 border-b border-slate-900/60 font-mono text-[11px]">
+              <span class="text-slate-500 text-[10px] shrink-0">${log.time || ''}</span>
+              <span class="shrink-0">${badge}</span>
+              <span class="${textColor} break-all">${log.text || ''}</span>
+            </div>
+          `;
+        });
+        brainEl.innerHTML = bHtml;
+        brainEl.scrollTop = brainEl.scrollHeight;
+      }
+
+      // 5. Multi-Coin Trade History Table
       const tbody = document.getElementById('mcTradesBody');
       const trades = mc.recent_trades || [];
       if (!tbody || !trades.length) return;
