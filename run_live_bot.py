@@ -95,7 +95,8 @@ class KalshiLiveScalper:
         self.stop_loss_roi_pct = 25.0
         self.min_entry_price = 0.20
         self.max_entry_price = 0.80
-        self.max_allocation_pct = 15.0  # 15% of total equity per trade (matching PaperTradingBot)
+        self.max_allocation_pct = 20.0  # 20% of total equity per trade (matching user directive)
+        self.min_seconds_left_for_entry = 90  # Avoid late-candle expiration traps (<90s)
         self.max_trades_per_candle = 3
         self.taker_fee_cents = 0.5
 
@@ -588,7 +589,7 @@ class KalshiLiveScalper:
             return
         if time.time() - self.last_exit_ts < 4.0:
             return
-        if seconds_left < 10 or seconds_left > 855:
+        if seconds_left < self.min_seconds_left_for_entry or seconds_left > 855:
             return
 
         yes_ask_price = float(yes_ask_cents) / 100.0

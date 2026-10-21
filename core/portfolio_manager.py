@@ -24,8 +24,8 @@ class PortfolioManager:
         auth: Any,
         rest_url: str,
         initial_balance: float = 50.0,
-        max_portfolio_allocation_pct: float = 30.0,
-        max_single_trade_pct: float = 15.0,
+        max_portfolio_allocation_pct: float = 40.0,
+        max_single_trade_pct: float = 20.0,
         max_concurrent_positions: int = 2
     ):
         self.auth = auth

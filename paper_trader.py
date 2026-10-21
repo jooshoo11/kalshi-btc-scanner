@@ -27,7 +27,8 @@ class PaperTradingBot:
         self.enabled = True
         self.take_profit_roi_pct = 25.0    # Take profit when up 25%
         self.stop_loss_roi_pct = 25.0      # Cut loss when down 25% AND model prob <= 35%
-        self.max_allocation_pct = 15.0     # Compound 15% of total equity per trade
+        self.max_allocation_pct = 20.0     # Compound 20% of total equity per trade
+        self.min_seconds_left_for_entry = 90  # Avoid late-candle expiration traps (<90s)
         self.min_entry_price = 0.20        # Avoid <20¢ lottery tickets while capturing 20¢-80¢ setups
         self.max_entry_price = 0.80        # Ceiling: allow up to 80¢ high-probability continuation scalps
         self.min_edge_pct = 4.0            # Minimum model edge required to enter
@@ -215,8 +216,8 @@ class PaperTradingBot:
         if time.time() - self.last_exit_ts < 4.0:
             return # 4-second cooldown after exit (matching run_live_bot.py)
 
-        # Timing constraints: Avoid first 45s (noise) and allow down to 10s for BRTI variance collapse (matching 8763b86)
-        if seconds_left < 10 or seconds_left > 855:
+        # Timing constraints: Avoid first 45s (noise) and final 90s to avoid binary settlement trap
+        if seconds_left < self.min_seconds_left_for_entry or seconds_left > 855:
             return
 
         # Evaluate Signal & Edge
