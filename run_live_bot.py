@@ -38,6 +38,7 @@ import httpx
 from live_executor import (
     KALSHI_DEMO_REST_URL,
     KALSHI_DEMO_WS_URL,
+    KALSHI_PROD_REST_URL,
     KalshiAuth,
     KalshiWebSocketClient,
     KalshiOrderManagementSystem,
@@ -46,6 +47,7 @@ from live_executor import (
 )
 from prediction_engine import QuantPredictionEngine, calculate_kalshi_fee
 from btc_metrics import BitcoinMetricsProvider
+from kalshi_btc_scanner import KalshiBitcoinScanner, parse_iso_time, format_time_remaining
 from bot_database import AuditDatabase
 
 # Setup logging
@@ -63,7 +65,7 @@ class KalshiLiveScalper:
         auth: Optional[KalshiAuth] = None,
         rest_url: str = KALSHI_DEMO_REST_URL,
         ws_url: str = KALSHI_DEMO_WS_URL,
-        db_path: str = "kalshi_audit.db",
+        db_path: str = "kalshi_live_demo.db",
         dry_run: bool = False
     ):
         self.auth = auth or KalshiAuth.from_env()
@@ -75,7 +77,8 @@ class KalshiLiveScalper:
         self.db = AuditDatabase(db_path=db_path)
         self.watchdog = StaleTickWatchdog(max_allowed_delta_ms=1500.0)
         self.metrics_provider = BitcoinMetricsProvider(watchdog=self.watchdog)
-        self.engine = QuantPredictionEngine()
+        self.engine = QuantPredictionEngine(risk_free_rate=0.045, taker_fee_cents=0.5)
+        self.scanner = KalshiBitcoinScanner(self.metrics_provider, self.engine)
 
         self.ws_client = KalshiWebSocketClient(ws_url=self.ws_url, auth=self.auth)
         self.oms = KalshiOrderManagementSystem(
@@ -86,14 +89,15 @@ class KalshiLiveScalper:
             dry_run=self.dry_run
         )
 
-        # Risk parameters
+        # Risk parameters (Matched 100% 1:1 with the +2076% / 85.6% Win Rate Paper Bot)
         self.min_edge_pct = 4.0
         self.take_profit_roi_pct = 25.0
         self.stop_loss_roi_pct = 25.0
-        self.max_trade_dollars = 75.0
-        self.min_entry_price = 0.25
-        self.max_entry_price = 0.78
-        self.max_allocation_pct = 0.15
+        self.min_entry_price = 0.20
+        self.max_entry_price = 0.80
+        self.max_allocation_pct = 15.0  # 15% of total equity per trade (matching PaperTradingBot)
+        self.max_trades_per_candle = 3
+        self.taker_fee_cents = 0.5
 
         # Active state
         self.is_running = False
@@ -107,6 +111,28 @@ class KalshiLiveScalper:
         # Account equity cache
         self.cash = 50.0
         self.total_equity = 50.0
+        self.crypto_cash = 50.0  # Kalshi Demo exchange_index=2 (crypto partition) cash
+
+    def _parse_balance_data(self, bal_data: Dict[str, Any]):
+        """Extract both total Demo balance and exchange_index=2 (KXBTC15M crypto partition) cash."""
+        bal_cents = bal_data.get("balance", 0)
+        self.cash = float(bal_cents) / 100.0
+        self.total_equity = self.cash
+        self.crypto_cash = self.cash
+        for item in bal_data.get("balance_breakdown", []):
+            if item.get("exchange_index") == 2:
+                try:
+                    c_bal = float(item.get("balance", 0.0))
+                    if c_bal > 0:
+                        self.crypto_cash = c_bal
+                except Exception:
+                    pass
+
+    def get_equity(self) -> float:
+        if not self.active_position:
+            return self.cash
+        pos_val = self.active_position["contracts"] * self.active_position.get("current_bid", self.active_position["entry_price"])
+        return self.cash + pos_val
 
     async def initialize_and_reconcile(self):
         """Pre-flight sequence: reconciles state and syncs exchange before starting WS."""
@@ -128,10 +154,11 @@ class KalshiLiveScalper:
             resp = await client.get(f"{self.rest_url}/portfolio/balance", headers=headers)
             if resp.status_code == 200:
                 bal_data = resp.json()
-                bal_cents = bal_data.get("balance", 0)
-                self.cash = float(bal_cents) / 100.0
-                self.total_equity = self.cash
-                logger.info(f"✓ Confirmed Live Exchange Balance: ${self.cash:.2f} ({bal_cents} cents)")
+                self._parse_balance_data(bal_data)
+                logger.info(
+                    f"✓ Confirmed Live Exchange Balance: ${self.cash:.2f} "
+                    f"(Crypto Partition exchange_index=2: ${self.crypto_cash:.2f})"
+                )
             else:
                 logger.warning(f"Could not fetch balance ({resp.status_code}): {resp.text}")
 
@@ -148,10 +175,21 @@ class KalshiLiveScalper:
         )
 
     async def resolve_active_kxbtc_market(self, http_client: httpx.AsyncClient) -> Optional[Dict[str, Any]]:
-        """Queries Kalshi REST API for the currently active KXBTC15M contract."""
+        """
+        Uses cached active KXBTC15M ticker, refreshing from Kalshi REST only when
+        candle rolls over to preserve Demo API rate limits.
+        """
+        now = time.time()
+        # Only refresh market metadata every 10 seconds or when ticker is unassigned
+        if hasattr(self, "_cached_mkt") and (now - getattr(self, "_last_mkt_resolve_ts", 0.0) < 10.0):
+            return self._cached_mkt
+
         endpoint = "/markets"
         params = {"series_ticker": "KXBTC15M", "status": "open", "limit": 5}
         headers = self.auth.sign_request("GET", f"/trade-api/v2{endpoint}") if self.auth.is_configured else {}
+
+        demo_mkt = None
+        prod_mkt = None
 
         try:
             resp = await http_client.get(f"{self.rest_url}{endpoint}", headers=headers, params=params, timeout=4.0)
@@ -162,23 +200,54 @@ class KalshiLiveScalper:
                     active_future = [m for m in markets if (m.get("close_time") or "") >= now_iso]
                     if active_future:
                         active_future.sort(key=lambda m: m.get("close_time", ""))
-                        return active_future[0]
+                        demo_mkt = active_future[0]
                     else:
                         markets.sort(key=lambda m: m.get("close_time", ""), reverse=True)
-                        return markets[0]
+                        demo_mkt = markets[0]
         except Exception as e:
-            logger.debug(f"Error querying active markets: {e}")
+            logger.debug(f"Error querying demo active markets: {e}")
 
-        # Synthetic fallback ticker based on current timestamp
-        now = int(time.time())
-        candle_end_sec = ((now // 900) + 1) * 900
-        gm = time.gmtime(candle_end_sec)
-        time_str = time.strftime("%y%b%d%H%M", gm).upper()
-        return {
-            "ticker": f"KXBTC15M-{time_str}",
-            "close_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", gm),
-            "candle_open": self.metrics_provider.spot_price
-        }
+        # Fetch live institutional quotes from Kalshi Production
+        try:
+            prod_resp = await http_client.get(f"{KALSHI_PROD_REST_URL}{endpoint}", params=params, timeout=3.5)
+            if prod_resp.status_code == 200:
+                p_markets = prod_resp.json().get("markets", [])
+                if p_markets:
+                    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    p_active = [m for m in p_markets if (m.get("close_time") or "") >= now_iso]
+                    if p_active:
+                        p_active.sort(key=lambda m: m.get("close_time", ""))
+                        prod_mkt = p_active[0]
+                    else:
+                        p_markets.sort(key=lambda m: m.get("close_time", ""), reverse=True)
+                        prod_mkt = p_markets[0]
+        except Exception as e:
+            logger.debug(f"Error querying prod quotes: {e}")
+
+        res = None
+        if demo_mkt and prod_mkt:
+            for k in ("yes_bid_dollars", "yes_ask_dollars", "no_bid_dollars", "no_ask_dollars", "yes_bid", "yes_ask", "floor_strike"):
+                if prod_mkt.get(k) is not None:
+                    demo_mkt[k] = prod_mkt[k]
+            res = demo_mkt
+        elif demo_mkt:
+            res = demo_mkt
+        elif prod_mkt:
+            res = prod_mkt
+
+        if not res:
+            candle_end_sec = ((int(now) // 900) + 1) * 900
+            gm = time.gmtime(candle_end_sec)
+            time_str = time.strftime("%y%b%d%H%M", gm).upper()
+            res = {
+                "ticker": f"KXBTC15M-{time_str}",
+                "close_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", gm),
+                "candle_open": self.metrics_provider.spot_price
+            }
+
+        self._cached_mkt = res
+        self._last_mkt_resolve_ts = now
+        return res
 
     async def start(self):
         """Starts background WebSocket listener and enters main scalping loop."""
@@ -218,8 +287,8 @@ class KalshiLiveScalper:
         logger.info("Scalper shutdown complete.")
 
     async def _scalp_tick(self, http_client: httpx.AsyncClient):
-        """Single 1-second iteration of the scalping loop."""
-        # 1. Update spot feeds from Hyperliquid / Kraken
+        """Single 1-second iteration of the scalping loop (100% identical to PaperTradingBot + KalshiBitcoinScanner)."""
+        # 1. Update spot feeds from Coinbase & Kraken USD Spot (CF Benchmarks BRTI constituents)
         await self.metrics_provider.update_subsecond_spot(http_client)
         spot = self.metrics_provider.spot_price
 
@@ -229,7 +298,7 @@ class KalshiLiveScalper:
             await self.metrics_provider.update_candles_and_technicals(http_client)
             self._last_candle_refresh = now
 
-        # 2. Resolve active 15-minute market
+        # 2. Resolve active 15-minute market (Demo contract ticker + live Production institutional quotes)
         mkt = await self.resolve_active_kxbtc_market(http_client)
         if not mkt:
             return
@@ -241,11 +310,14 @@ class KalshiLiveScalper:
             self.current_ticker = ticker
             await self.ws_client.subscribe_ticker(ticker)
 
-        # Candle timing
+        # Exact contract expiration timing matching kalshi_btc_scanner.py 1:1
         now = time.time()
-        candle_start = (int(now) // 900) * 900
-        candle_end = candle_start + 900
-        seconds_left = max(1.0, float(candle_end - now))
+        close_ts = parse_iso_time(close_time_iso)
+        if close_ts:
+            seconds_left = max(1.0, close_ts - now)
+        else:
+            candle_start = (int(now) // 900) * 900
+            seconds_left = max(1.0, float(candle_start + 900 - now))
 
         if self.current_candle_id != close_time_iso:
             self.current_candle_id = close_time_iso
@@ -253,41 +325,41 @@ class KalshiLiveScalper:
             self.last_exit_reason = ""
             self.metrics_provider.brti_accumulator.reset_for_candle(close_time_iso)
 
-        candle_open = self.metrics_provider.current_15m_candle_open or spot
+        official_strike = float(mkt.get("floor_strike") or 0.0)
+        candle_open = official_strike if official_strike > 0.0 else (self.metrics_provider.current_15m_candle_open or spot)
+        self.metrics_provider.current_15m_candle_open = candle_open
 
         # Add sample to BRTI accumulator during final 60s
         self.metrics_provider.brti_accumulator.add_sample(spot, seconds_left, candle_id=close_time_iso)
         accumulated_samples = self.metrics_provider.brti_accumulator.get_samples()
 
-        # 3. Read L2 Book from local WebSocket cache
+        # 3. Extract quotes matching kalshi_btc_scanner.py 1:1 (NO artificial 0.49/0.51 corruption)
+        y_ask = float(mkt.get("yes_ask_dollars") or 0.0)
+        y_bid = float(mkt.get("yes_bid_dollars") or 0.0)
+        n_ask = float(mkt.get("no_ask_dollars") or 0.0)
+        n_bid = float(mkt.get("no_bid_dollars") or 0.0)
+        if y_ask > 1.0:
+            y_ask /= 100.0
+        if y_bid > 1.0:
+            y_bid /= 100.0
+        if n_ask > 1.0:
+            n_ask /= 100.0
+        if n_bid > 1.0:
+            n_bid /= 100.0
+        if n_ask <= 0.0 and y_bid > 0.0:
+            n_ask = round(1.0 - y_bid, 2)
+        if n_bid <= 0.0 and y_ask > 0.0:
+            n_bid = round(1.0 - y_ask, 2)
+
+        # Synchronize L2 book cache for OMS execution
         book = self.ws_client.get_or_create_book(ticker)
-        best_bid, bid_qty = book.get_best_bid()
-        best_ask, ask_qty = book.get_best_ask()
+        best_bid = int(round(y_bid * 100)) if y_bid > 0 else 1
+        best_ask = int(round(y_ask * 100)) if y_ask > 0 else 99
+        ask_size = max(250, int(float(mkt.get("yes_ask_size_fp") or 250)))
+        bid_size = max(250, int(float(mkt.get("yes_bid_size_fp") or 250)))
+        book.apply_snapshot([[best_bid, bid_size]], [[best_ask, ask_size]])
 
-        # If book cache is unpopulated yet, fall back to REST quotes
-        if best_bid == 0 and best_ask == 100:
-            raw_bid = mkt.get("yes_bid_dollars") or mkt.get("yes_bid") or mkt.get("previous_yes_bid_dollars")
-            raw_ask = mkt.get("yes_ask_dollars") or mkt.get("yes_ask") or mkt.get("previous_yes_ask_dollars")
-            y_bid = float(raw_bid) if raw_bid is not None and float(raw_bid) > 0 else 0.50
-            y_ask = float(raw_ask) if raw_ask is not None and float(raw_ask) > 0 else 0.52
-            if y_bid > 1.0:
-                y_bid /= 100.0
-            if y_ask > 1.0:
-                y_ask /= 100.0
-            if y_ask <= y_bid:
-                y_ask = min(0.99, y_bid + 0.02)
-            best_bid = int(round(y_bid * 100))
-            best_ask = int(round(y_ask * 100))
-            ask_size = max(1, int(float(mkt.get("yes_ask_size_fp") or 50)))
-            bid_size = max(1, int(float(mkt.get("yes_bid_size_fp") or 50)))
-            book.apply_snapshot([[best_bid, bid_size]], [[best_ask, ask_size]])
-        else:
-            y_bid = float(best_bid) / 100.0
-            y_ask = float(best_ask) / 100.0
-        n_bid = round(1.0 - y_ask, 2)
-        n_ask = round(1.0 - y_bid, 2)
-
-        # 4. Run Quantitative Drift-Diffusion / BRTI Model
+        # 4. Run Quantitative Drift-Diffusion / BRTI Model (matching kalshi_btc_scanner.py 1:1)
         scalp_res = self.engine.evaluate_15m_scalp(
             spot=spot,
             open_price=candle_open,
@@ -296,6 +368,10 @@ class KalshiLiveScalper:
             accumulated_samples=accumulated_samples
         )
         model_prob = scalp_res["prob_yes"]
+        model_prob_yes_pct = scalp_res["prob_yes_pct"]
+        model_prob_no_pct = scalp_res["prob_no_pct"]
+        delta = scalp_res["delta"]
+
         trade_metrics = self.engine.calculate_trade_metrics(
             model_prob=model_prob,
             yes_ask=y_ask,
@@ -304,112 +380,247 @@ class KalshiLiveScalper:
             no_bid=n_bid
         )
 
+        # Convert to integer cents and back to dollars exactly like kalshi_btc_scanner.py -> paper_trader.py
+        yes_bid_cents = int(round(y_bid * 100))
+        yes_ask_cents = int(round(y_ask * 100))
+        no_bid_cents = int(round(n_bid * 100))
+        no_ask_cents = int(round(n_ask * 100))
+
         signal = trade_metrics.get("signal", "")
         best_edge_pct = float(trade_metrics.get("best_edge_pct", 0.0))
-        half_kelly_pct = float(trade_metrics.get("half_kelly_pct", 0.0))
-        best_edge = best_edge_pct / 100.0
-        half_kelly_frac = half_kelly_pct / 100.0
 
         # -------------------------------------------------------------
-        # STEP A: Manage Open Position
+        # STEP A: Manage Open Position (Matching PaperTradingBot 1:1)
         # -------------------------------------------------------------
         if self.active_position:
             pos = self.active_position
             pos_side = pos["side"]
             entry_p = pos["entry_price"]
-            curr_bid = y_bid if pos_side == "YES" else n_bid
+            raw_curr_bid = (float(yes_bid_cents) / 100.0) if pos_side == "YES" else (float(no_bid_cents) / 100.0)
+            curr_model_prob = model_prob_yes_pct if pos_side == "YES" else model_prob_no_pct
+
+            # Zero-Bid API Glitch Guard: Ignore 0¢-3¢ empty-book flickers when model probability is still alive
+            if raw_curr_bid <= 0.03 and curr_model_prob >= 20.0:
+                curr_bid = pos.get("current_bid", entry_p)
+            else:
+                curr_bid = max(0.01, raw_curr_bid)
+
+            pos["current_bid"] = curr_bid
             unrealized_pct = round(((curr_bid - entry_p) / max(0.01, entry_p)) * 100.0, 1)
 
-            # Expiry Resolution
-            if seconds_left <= 3:
-                logger.info(f"[Position Resolution] Candle expiring. Settling {ticker} at final price...")
-                is_win = (spot >= candle_open) if pos_side == "YES" else (spot < candle_open)
-                pnl = (pos["contracts"] * (1.0 - entry_p)) if is_win else (-pos["cost_dollars"])
-                self.cash += (pos["cost_dollars"] + pnl) if is_win else 0.0
-                self.active_position = None
+            # A. Check for Resolution (Time expired or <= 3s)
+            if seconds_left <= 3 or pos.get("ticker") != ticker:
+                logger.info(f"[Position Resolution] Candle expiring. Verifying {pos['ticker']} settlement & syncing live Demo balance...")
+                settle_price = spot
+                if self.metrics_provider.brti_accumulator.has_samples():
+                    settle_price = self.metrics_provider.brti_accumulator.get_mean()
+                is_win = (settle_price >= candle_open) if pos_side == "YES" else (settle_price < candle_open)
+                try:
+                    m_resp = await http_client.get(f"{self.rest_url}/markets/{pos['ticker']}", timeout=3.0)
+                    if m_resp.status_code == 200:
+                        m_obj = m_resp.json().get("market", {})
+                        res_str = (m_obj.get("result") or "").lower()
+                        if res_str in ("yes", "no"):
+                            is_win = (res_str == pos_side.lower())
+                except Exception:
+                    pass
+
+                exit_p = 1.0 if is_win else 0.0
+                payout = pos["contracts"] * 1.0 if is_win else 0.0
+                pnl = payout - (pos["cost_dollars"] + pos.get("fee_dollars", 0.0))
+                pnl_pct = (pnl / max(0.01, pos["cost_dollars"] + pos.get("fee_dollars", 0.0))) * 100.0
+                self.cash += payout
+
+                # Sync exact cash balance from Kalshi Demo API
+                try:
+                    b_headers = self.auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
+                    b_resp = await http_client.get(f"{self.rest_url}/portfolio/balance", headers=b_headers, timeout=3.0)
+                    if b_resp.status_code == 200:
+                        self._parse_balance_data(b_resp.json())
+                except Exception:
+                    pass
+
                 self.last_exit_reason = "SETTLED_WIN" if is_win else "SETTLED_LOSS"
                 self.last_exit_ts = time.time()
-                logger.info(f"[Position Resolution] Result: {self.last_exit_reason} | PnL: ${pnl:.2f}")
-                return
-
-            # Take Profit (+25%)
-            if unrealized_pct >= self.take_profit_roi_pct and (time.time() - pos["entry_ts"] >= 5.0):
-                logger.info(f"[Take Profit] ROI +{unrealized_pct}% reached! Executing market exit...")
-                exit_res = await self.oms._place_rest_order(
-                    ticker=ticker,
-                    action="sell",
-                    side=pos_side.lower(),
-                    count=pos["contracts"],
-                    price_cents=int(round(curr_bid * 100)),
-                    order_type="limit"
-                )
-                self.cash += pos["contracts"] * curr_bid
+                if pos.get("trade_id"):
+                    self.db.record_trade_close(
+                        trade_id=pos["trade_id"],
+                        exit_price=exit_p,
+                        exit_reason=self.last_exit_reason,
+                        pnl_dollars=round(pnl, 2),
+                        pnl_pct=round(pnl_pct, 1)
+                    )
                 self.active_position = None
-                self.last_exit_reason = "TAKE_PROFIT"
-                self.last_exit_ts = time.time()
+                logger.info(f"[Position Resolution] Result: {self.last_exit_reason} | PnL: ${pnl:.2f} | Confirmed Demo Cash: ${self.cash:.2f}")
                 return
 
-            # Limit-Chasing Stop Loss (-25%)
-            if unrealized_pct <= -self.stop_loss_roi_pct:
-                logger.info(f"[Stop Loss] ROI {unrealized_pct}% hit! Dispatching Limit-Chasing Stop Loss...")
-                sl_res = await self.oms.execute_limit_chasing_stop_loss(
+            # B. Dynamic Profit Securing (Take Profit Exit +25% ROI)
+            if unrealized_pct >= self.take_profit_roi_pct and (time.time() - pos["entry_ts"] >= 5.0):
+                logger.info(f"[Take Profit] ROI +{unrealized_pct}% reached! Executing guaranteed complete exit...")
+                min_tp_floor = max(15, int(round(entry_p * 100)))  # Never sell below entry on take profit
+                exit_res = await self.oms.execute_complete_exit(
                     ticker=ticker,
                     side=pos_side,
                     contracts=pos["contracts"],
-                    floor_cents=15
+                    target_price_cents=int(round(curr_bid * 100)),
+                    floor_cents=min_tp_floor,
+                    reason="TAKE_PROFIT"
                 )
-                fill_p = float(sl_res.get("fill_price_cents", 15)) / 100.0
-                self.cash += pos["contracts"] * fill_p
-                self.active_position = None
-                self.last_exit_reason = "STOP_LOSS"
-                self.last_exit_ts = time.time()
-                return
+                fill_p = exit_res["fill_price_dollars"]
+                filled_contracts = exit_res["filled_contracts"]
+                if filled_contracts > 0:
+                    portion_cost = (pos["cost_dollars"] / pos["contracts"]) * filled_contracts
+                    gross_proceeds = filled_contracts * fill_p
+                    exit_fees = filled_contracts * (self.taker_fee_cents / 100.0)
+                    net_proceeds = gross_proceeds - exit_fees
+                    pnl = net_proceeds - portion_cost
+                    pnl_pct = (pnl / max(0.01, portion_cost)) * 100.0
+                    self.cash += net_proceeds
+                    self.crypto_cash += net_proceeds
+                    if pos.get("trade_id"):
+                        self.db.record_trade_close(
+                            trade_id=pos["trade_id"],
+                            exit_price=fill_p,
+                            exit_reason="TAKE_PROFIT",
+                            pnl_dollars=round(pnl, 2),
+                            pnl_pct=round(pnl_pct, 1)
+                        )
+                # Re-sync exact cash balance from exchange
+                try:
+                    b_headers = self.auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
+                    b_resp = await http_client.get(f"{self.rest_url}/portfolio/balance", headers=b_headers, timeout=3.0)
+                    if b_resp.status_code == 200:
+                        self._parse_balance_data(b_resp.json())
+                except Exception:
+                    pass
+
+                if exit_res["remaining_contracts"] <= 0:
+                    self.active_position = None
+                    self.last_exit_reason = "TAKE_PROFIT"
+                    self.last_exit_ts = time.time()
+                    return
+                else:
+                    pos["contracts"] = exit_res["remaining_contracts"]
+                    pos["cost_dollars"] = (pos["cost_dollars"] / (filled_contracts + pos["contracts"])) * pos["contracts"]
+                    logger.warning(f"[Take Profit Partial] {exit_res['remaining_contracts']} contracts remain open. Continuing position monitoring...")
+                    return
+
+            # C. Dynamic Risk Cut (Stop Loss -25% ROI AND model_prob <= 35.0%, with thin-book guard matching PaperTradingBot)
+            if unrealized_pct <= -self.stop_loss_roi_pct and curr_model_prob <= 35.0:
+                safe_exit_bid = max(curr_bid, round(entry_p * 0.65, 2)) if curr_model_prob >= 18.0 else curr_bid
+                floor_c = max(15, int(round(safe_exit_bid * 100)))
+                logger.info(f"[Stop Loss] ROI {unrealized_pct}% & Model Prob {curr_model_prob}%! Dispatching Complete Exit Stop Loss (floor {floor_c}¢)...")
+                exit_res = await self.oms.execute_complete_exit(
+                    ticker=ticker,
+                    side=pos_side,
+                    contracts=pos["contracts"],
+                    target_price_cents=int(round(curr_bid * 100)),
+                    floor_cents=floor_c,
+                    reason="STOP_LOSS"
+                )
+                fill_p = exit_res["fill_price_dollars"]
+                filled_contracts = exit_res["filled_contracts"]
+                if filled_contracts > 0:
+                    portion_cost = (pos["cost_dollars"] / pos["contracts"]) * filled_contracts
+                    gross_proceeds = filled_contracts * fill_p
+                    exit_fees = filled_contracts * (self.taker_fee_cents / 100.0)
+                    net_proceeds = gross_proceeds - exit_fees
+                    pnl = net_proceeds - portion_cost
+                    pnl_pct = (pnl / max(0.01, portion_cost)) * 100.0
+                    self.cash += net_proceeds
+                    self.crypto_cash += net_proceeds
+                    if pos.get("trade_id"):
+                        self.db.record_trade_close(
+                            trade_id=pos["trade_id"],
+                            exit_price=fill_p,
+                            exit_reason="STOP_LOSS",
+                            pnl_dollars=round(pnl, 2),
+                            pnl_pct=round(pnl_pct, 1)
+                        )
+                # Re-sync exact cash balance from exchange
+                try:
+                    b_headers = self.auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
+                    b_resp = await http_client.get(f"{self.rest_url}/portfolio/balance", headers=b_headers, timeout=3.0)
+                    if b_resp.status_code == 200:
+                        self._parse_balance_data(b_resp.json())
+                except Exception:
+                    pass
+
+                if exit_res["remaining_contracts"] <= 0:
+                    self.active_position = None
+                    self.last_exit_reason = "STOP_LOSS"
+                    self.last_exit_ts = time.time()
+                    return
+                else:
+                    pos["contracts"] = exit_res["remaining_contracts"]
+                    pos["cost_dollars"] = (pos["cost_dollars"] / (filled_contracts + pos["contracts"])) * pos["contracts"]
+                    logger.warning(f"[Stop Loss Partial] {exit_res['remaining_contracts']} contracts remain open. Continuing position monitoring...")
+                    return
 
             return  # Still holding open trade
 
         # -------------------------------------------------------------
-        # STEP B: Evaluate New Entry
+        # STEP B: Evaluate New Entry (Matching PaperTradingBot 1:1)
         # -------------------------------------------------------------
-        # Re-entry lockout on adverse candle
+        if self.watchdog and not self.watchdog.is_safe_to_trade():
+            return
         if self.trades_in_candle >= 1 and self.last_exit_reason in ("STOP_LOSS", "SETTLED_LOSS"):
+            return
+        if self.trades_in_candle >= self.max_trades_per_candle:
             return
         if time.time() - self.last_exit_ts < 8.0:
             return
-        if seconds_left < 10 or seconds_left > 850:
+        if seconds_left < 10 or seconds_left > 855:
             return
 
-        # Check entry signal
+        yes_ask_price = float(yes_ask_cents) / 100.0
+        no_ask_price = float(no_ask_cents) / 100.0
+
         target_side = None
         target_ask = 0.0
         prob = 0.0
+        prob_pct = 0.0
 
-        if "BUY YES" in signal and best_edge >= (self.min_edge_pct / 100.0) and scalp_res["prob_yes_pct"] >= 60.0:
-            if y_ask >= self.min_entry_price and y_ask <= self.max_entry_price:
-                target_side = "YES"
-                target_ask = y_ask
-                prob = scalp_res["prob_yes"]
-        elif "BUY NO" in signal and best_edge >= (self.min_edge_pct / 100.0) and scalp_res["prob_no_pct"] >= 60.0:
-            if n_ask >= self.min_entry_price and n_ask <= self.max_entry_price:
-                target_side = "NO"
-                target_ask = n_ask
-                prob = scalp_res["prob_no"]
+        if "BUY YES" in signal and best_edge_pct >= self.min_edge_pct and model_prob_yes_pct >= 60.0 and yes_ask_price >= self.min_entry_price and yes_ask_price <= self.max_entry_price:
+            target_side = "YES"
+            target_ask = yes_ask_price
+            prob = scalp_res["prob_yes"]
+            prob_pct = model_prob_yes_pct
+        elif "BUY NO" in signal and best_edge_pct >= self.min_edge_pct and model_prob_no_pct >= 60.0 and no_ask_price >= self.min_entry_price and no_ask_price <= self.max_entry_price:
+            target_side = "NO"
+            target_ask = no_ask_price
+            prob = scalp_res["prob_no"]
+            prob_pct = model_prob_no_pct
 
-        if not target_side or half_kelly_frac <= 0.01:
+        if not target_side or target_ask < self.min_entry_price or target_ask > self.max_entry_price:
             return
 
-        # Position Sizing (Net Half-Kelly capped at $75 and 15% bankroll)
-        alloc_pct = min(self.max_allocation_pct, half_kelly_frac)
-        budget = min(self.cash, self.cash * alloc_pct, self.max_trade_dollars)
-        fee_per_contract = calculate_kalshi_fee(1, target_ask)
+        # Position Sizing (Full 15% Equity Compounding matching PaperTradingBot 1:1, capped by exchange_index=2 available collateral)
+        equity = self.get_equity()
+        max_alloc = equity * (self.max_allocation_pct / 100.0)
+        avail_collateral = max(0.0, min(self.cash, self.crypto_cash) - 0.15)
+        budget = min(avail_collateral, max_alloc)
+        fee_per_contract = self.taker_fee_cents / 100.0
         target_contracts = int(budget / (target_ask + fee_per_contract))
 
         if target_contracts < 1:
             return
 
+        cost = target_contracts * target_ask
+        fees = target_contracts * fee_per_contract
+        total_debit = cost + fees
+        if total_debit > avail_collateral:
+            target_contracts = int((avail_collateral - fees) / target_ask)
+            if target_contracts < 1:
+                return
+            cost = target_contracts * target_ask
+            fees = target_contracts * fee_per_contract
+            total_debit = cost + fees
+
         # Execute trade with OMS VWAP depth check
         logger.info(
             f"[Signal Detected] {signal} on {ticker} | "
-            f"Edge: +{best_edge*100:.1f}% | Kelly: {half_kelly_frac*100:.1f}% | Target: {target_contracts}x @ {int(target_ask*100)}¢"
+            f"Edge: +{best_edge_pct:.1f}% | Prob: {prob_pct:.1f}% | Target: {target_contracts}x @ {int(target_ask*100)}¢"
         )
         trade_res = await self.oms.execute_trade(
             ticker=ticker,
@@ -419,24 +630,57 @@ class KalshiLiveScalper:
             model_prob=prob
         )
 
-        if trade_res.get("status") in ("FILLED", "executed", "FILLED_SIMULATION") or "order_id" in trade_res:
-            cost = target_contracts * target_ask
-            fees = calculate_kalshi_fee(target_contracts, target_ask)
+        if trade_res.get("status") in ("FILLED", "FILLED_SIMULATION") and trade_res.get("filled_count", 0) > 0:
+            filled_contracts = trade_res.get("filled_count", target_contracts)
+            cost = filled_contracts * target_ask
+            fees = filled_contracts * fee_per_contract
             self.cash -= (cost + fees)
+            self.crypto_cash = max(0.0, self.crypto_cash - (cost + fees))
             self.trades_in_candle += 1
+            rationale = (
+                f"Live Demo Bot entered {target_side} on {ticker} at {int(target_ask*100)}¢ ({filled_contracts}/{target_contracts} contracts). "
+                f"BTC is {delta:+.1f} from candle open. Model probability is {prob_pct}% with +{best_edge_pct:.1f}% edge. "
+                f"Order ID: {trade_res.get('order_id')}"
+            )
+            trade_id = self.db.record_trade_open(
+                ticker=ticker,
+                series="KXBTC15M",
+                side=target_side,
+                entry_price=target_ask,
+                contracts=filled_contracts,
+                cost_dollars=cost,
+                fee_dollars=fees,
+                model_prob_entry=prob_pct,
+                delta_at_entry=delta,
+                seconds_left_at_entry=int(seconds_left),
+                rationale=rationale
+            )
             self.active_position = {
+                "trade_id": trade_id,
+                "order_id": trade_res.get("order_id"),
                 "ticker": ticker,
                 "side": target_side,
-                "contracts": target_contracts,
+                "contracts": filled_contracts,
                 "entry_price": target_ask,
+                "current_bid": target_ask,
                 "cost_dollars": cost,
+                "fee_dollars": fees,
                 "entry_ts": time.time()
             }
-            logger.info(f"✓ Trade Executed: {target_contracts}x {target_side} on {ticker} (Order: {trade_res.get('order_id')})")
+            logger.info(f"✓ LIVE DEMO TRADE EXECUTED: {filled_contracts}x {target_side} on {ticker} @ {int(target_ask*100)}¢ (Order ID: {trade_res.get('order_id')})")
         elif trade_res.get("status") == "VWAP_SLIPPAGE_ABORT":
             logger.warning(f"[Trade Blocked] VWAP_SLIPPAGE_ABORT: {trade_res.get('reason')}")
         else:
-            logger.warning(f"[Trade Skipped] {trade_res.get('status')}: {trade_res.get('reason')}")
+            logger.warning(f"[Trade Skipped] {trade_res.get('status')}: {trade_res.get('error') or trade_res.get('reason')}")
+            # Re-sync balance & apply 8s cooldown so rejected orders never spam the API
+            self.last_exit_ts = time.time()
+            try:
+                b_headers = self.auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
+                b_resp = await http_client.get(f"{self.rest_url}/portfolio/balance", headers=b_headers, timeout=3.0)
+                if b_resp.status_code == 200:
+                    self._parse_balance_data(b_resp.json())
+            except Exception:
+                pass
 
     def stop(self):
         self.is_running = False

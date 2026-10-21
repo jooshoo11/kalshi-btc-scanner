@@ -83,6 +83,93 @@ class KalshiBitcoinScanner:
         }
         self.is_scanning = False
 
+    async def scan_kxbtc15m_fast(self, client: httpx.AsyncClient) -> Dict[str, Any]:
+        """Fast 1-second refresh of the active KXBTC15M 15-minute scalp market."""
+        spot = self.metrics.spot_price
+        now = time.time()
+        try:
+            resp = await client.get(
+                f"{KALSHI_API_BASE}/markets?series_ticker=KXBTC15M&status=open&limit=5",
+                timeout=3.0
+            )
+            if resp.status_code != 200:
+                return self.cache.get("kxbtc15m", {})
+            markets = resp.json().get("markets", [])
+            if not markets:
+                return self.cache.get("kxbtc15m", {})
+
+            now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            active = [m for m in markets if (m.get("close_time") or "") >= now_iso]
+            if active:
+                active.sort(key=lambda m: m.get("close_time", ""))
+                m = active[0]
+            else:
+                markets.sort(key=lambda m: m.get("close_time", ""), reverse=True)
+                m = markets[0]
+
+            ticker = m.get("ticker", "")
+            title = m.get("title", "")
+            y_ask = float(m.get("yes_ask_dollars") or 0.0)
+            y_bid = float(m.get("yes_bid_dollars") or 0.0)
+            n_ask = float(m.get("no_ask_dollars") or 0.0)
+            n_bid = float(m.get("no_bid_dollars") or 0.0)
+            close_time_iso = m.get("close_time", "")
+            close_ts = parse_iso_time(close_time_iso)
+            seconds_left = max(1.0, close_ts - now) if close_ts else 3600.0
+            countdown_str = format_time_remaining(seconds_left)
+
+            official_strike = float(m.get("floor_strike") or 0.0)
+            candle_open = official_strike if official_strike > 0.0 else self.metrics.current_15m_candle_open
+            self.metrics.current_15m_candle_open = candle_open
+            accumulated = None
+            if hasattr(self.metrics, "brti_accumulator"):
+                self.metrics.brti_accumulator.add_sample(spot, seconds_left, candle_id=close_time_iso)
+                accumulated = self.metrics.brti_accumulator.get_samples()
+
+            scalp_res = self.engine.evaluate_15m_scalp(
+                spot=spot,
+                open_price=candle_open,
+                seconds_left=seconds_left,
+                dollar_vol_15m=self.metrics.vol_15m_dollar,
+                accumulated_samples=accumulated
+            )
+            model_prob = scalp_res["prob_yes"]
+            trade_metrics = self.engine.calculate_trade_metrics(model_prob, y_ask, y_bid, n_ask, n_bid)
+
+            kxbtc15m_data = {
+                "ticker": ticker,
+                "title": title,
+                "close_time": close_time_iso,
+                "seconds_left": int(seconds_left),
+                "countdown_str": countdown_str,
+                "candle_open": candle_open,
+                "spot_price": spot,
+                "delta": scalp_res["delta"],
+                "delta_pct": scalp_res["delta_pct"],
+                "time_elapsed_pct": scalp_res["time_elapsed_pct"],
+                "z_score": scalp_res["z_score"],
+                "model_prob_yes_pct": scalp_res["prob_yes_pct"],
+                "model_prob_no_pct": scalp_res["prob_no_pct"],
+                "yes_bid_cents": int(round(y_bid * 100)),
+                "yes_ask_cents": int(round(y_ask * 100)),
+                "no_bid_cents": int(round(n_bid * 100)),
+                "no_ask_cents": int(round(n_ask * 100)),
+                "trade_signal": trade_metrics["signal"],
+                "side": trade_metrics["side"],
+                "best_edge_pct": trade_metrics["best_edge_pct"],
+                "best_ev_cents": trade_metrics["best_ev_cents"],
+                "best_roi_pct": trade_metrics["best_roi_pct"],
+                "half_kelly_pct": trade_metrics["half_kelly_pct"],
+                "full_kelly_pct": trade_metrics["full_kelly_pct"],
+                "price_cents": trade_metrics["price_cents"],
+                "url": f"https://kalshi.com/markets/{ticker}"
+            }
+            self.cache["kxbtc15m"] = kxbtc15m_data
+            self.cache["btc_spot"] = spot
+            return kxbtc15m_data
+        except Exception:
+            return self.cache.get("kxbtc15m", {})
+
     async def scan_all_btc_markets(self, client: httpx.AsyncClient) -> Dict[str, Any]:
         """Perform a full multi-series scan across all Kalshi Bitcoin markets."""
         t_start = time.time()
@@ -148,7 +235,10 @@ class KalshiBitcoinScanner:
             # 1. 15-Minute Scalp Market (KXBTC15M)
             # -----------------------------------------------------------------
             if series_ticker == "KXBTC15M":
-                candle_open = self.metrics.current_15m_candle_open
+                # Use Kalshi's official floor_strike (the exact BRTI target price to beat) when populated
+                official_strike = float(m.get("floor_strike") or 0.0)
+                candle_open = official_strike if official_strike > 0.0 else self.metrics.current_15m_candle_open
+                self.metrics.current_15m_candle_open = candle_open
                 accumulated = None
                 if hasattr(self.metrics, "brti_accumulator"):
                     self.metrics.brti_accumulator.add_sample(spot, seconds_left, candle_id=close_time_iso)

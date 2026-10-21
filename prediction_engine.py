@@ -346,7 +346,7 @@ class QuantPredictionEngine:
         yes_bid: float,
         no_ask: float,
         no_bid: float,
-        slippage_penalty_cents: float = 3.0
+        slippage_penalty_cents: float = 0.0
     ) -> Dict[str, Any]:
         """
         Calculate mathematical edge, net post-fee expected value (EV),

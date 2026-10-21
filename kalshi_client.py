@@ -254,11 +254,14 @@ class KalshiClient:
         }
         return await self._request("POST", "/portfolio/orders", json_data=payload)
 
-    async def cancel_order(self, order_id: str) -> bool:
-        """Cancel an active order via DELETE /portfolio/orders/{order_id}."""
+    async def cancel_order(self, order_id: str, ticker: Optional[str] = None) -> bool:
+        """Cancel an active order via DELETE /portfolio/events/orders/{order_id}."""
         if self.dry_run or not self.auth.is_configured or self.auth.key_id.startswith("test-") or "mock_" in order_id:
             return True
-        res = await self._request("DELETE", f"/portfolio/orders/{order_id}")
+        params = {"exchange_index": 2}
+        if ticker:
+            params["market_ticker"] = ticker
+        res = await self._request("DELETE", f"/portfolio/events/orders/{order_id}", params=params)
         return "error" not in res
 
     async def get_order(self, order_id: str) -> Dict[str, Any]:

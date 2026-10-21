@@ -26,20 +26,18 @@ class PaperTradingBot:
         # Bot Configuration Settings
         self.enabled = True
         self.take_profit_roi_pct = 25.0    # Take profit when up 25%
-        self.stop_loss_roi_pct = 25.0      # Cut loss strictly when down 25%
-        self.max_allocation_pct = 15.0     # Max 15% of equity per trade
-        self.max_trade_dollars = 75.0      # Hard $75.00 dollar cap to prevent large drawdowns
-        self.min_entry_price = 0.25        # Penny floor: avoid <25¢ lottery tickets
-        self.max_entry_price = 0.78        # Ceiling: avoid >78¢ low-upside contracts
+        self.stop_loss_roi_pct = 25.0      # Cut loss when down 25% AND model prob <= 35%
+        self.max_allocation_pct = 15.0     # Compound 15% of total equity per trade
+        self.min_entry_price = 0.20        # Avoid <20¢ lottery tickets while capturing 20¢-80¢ setups
+        self.max_entry_price = 0.80        # Ceiling: allow up to 80¢ high-probability continuation scalps
         self.min_edge_pct = 4.0            # Minimum model edge required to enter
-        self.slippage_penalty_cents = 3.0  # 3¢ adverse slippage haircut
-        self.taker_fee_cents = 0.5         # Reference baseline taker fee
+        self.taker_fee_cents = 0.5         # 0.5 cents per contract baseline fee
 
         # Candle & Re-entry tracking
         self.current_candle_id: str = ""
         self.trades_in_candle: int = 0
-        self.max_trades_per_candle: int = 3 # Allows re-entry ONLY if profit was taken
-        self.last_exit_reason: str = ""     # Tracks exit reason to prevent revenge trading
+        self.max_trades_per_candle: int = 3 # Allows re-entry if profit was taken
+        self.last_exit_reason: str = ""
         self.last_exit_ts: float = 0.0
 
         # Stats
@@ -58,6 +56,29 @@ class PaperTradingBot:
                 self.winning_trades_count = stats["winning_trades"]
                 self.realized_pnl = stats["realized_pnl"]
                 self.cash = round(self.initial_balance + self.realized_pnl, 2)
+
+            # Also restore any currently OPEN paper trade so server restarts never orphan it
+            open_trades = self.db.get_open_trades()
+            if open_trades:
+                latest_open = open_trades[-1]
+                cost = float(latest_open.get("cost_dollars") or 0.0)
+                fees = float(latest_open.get("fee_dollars") or 0.0)
+                self.cash = round(self.cash - (cost + fees), 2)
+                self.open_position = {
+                    "trade_id": latest_open["id"],
+                    "ticker": latest_open["ticker"],
+                    "side": latest_open["side"],
+                    "entry_price": float(latest_open["entry_price"]),
+                    "contracts": int(latest_open["contracts"]),
+                    "cost_dollars": cost,
+                    "fee_dollars": fees,
+                    "current_bid": float(latest_open["entry_price"]),
+                    "entry_timestamp": float(latest_open.get("timestamp") or time.time()),
+                    "close_time": "",
+                    "candle_open_at_entry": 0.0,
+                    "model_prob_at_entry": float(latest_open.get("model_prob_entry") or 50.0),
+                    "rationale": latest_open.get("rationale") or ""
+                }
         except Exception as e:
             print(f"[PaperTrader] Error restoring from DB: {e}")
 
@@ -120,15 +141,26 @@ class PaperTradingBot:
         # -------------------------------------------------------------
         if self.open_position:
             pos = self.open_position
+            if not pos.get("close_time"):
+                pos["close_time"] = close_time
+            if not pos.get("candle_open_at_entry"):
+                pos["candle_open_at_entry"] = candle_open
+
             # Update current market bid for held contract
             if pos["side"] == "YES":
-                current_bid = float(scalp_data.get("yes_bid_cents", 0)) / 100.0
+                raw_bid = float(scalp_data.get("yes_bid_cents", 0)) / 100.0
                 curr_model_prob = model_prob_yes
             else:
-                current_bid = float(scalp_data.get("no_bid_cents", 0)) / 100.0
+                raw_bid = float(scalp_data.get("no_bid_cents", 0)) / 100.0
                 curr_model_prob = model_prob_no
 
-            pos["current_bid"] = max(0.01, current_bid)
+            # Zero-Bid API Glitch Guard: Ignore 0¢-3¢ empty-book flickers when model probability is still alive
+            if raw_bid <= 0.03 and curr_model_prob >= 20.0:
+                current_bid = pos.get("current_bid", pos["entry_price"])
+            else:
+                current_bid = max(0.01, raw_bid)
+
+            pos["current_bid"] = current_bid
             unrealized_pnl = self.get_unrealized_pnl()
             unrealized_pct = self.get_unrealized_pnl_pct()
 
@@ -148,14 +180,16 @@ class PaperTradingBot:
                 )
                 return
 
-            # C. Dynamic Risk Cut (Strict Stop Loss)
-            # Cut immediately if loss hits -25%, OR if down -15% with model prob <= 35%
-            if unrealized_pct <= -self.stop_loss_roi_pct or (unrealized_pct <= -15.0 and curr_model_prob <= 35.0):
+            # C. Dynamic Risk Cut (Stop Loss - Original +2076% Dual Confirmation)
+            # Only cut loss if BOTH unrealized drawdown >= stop_loss_roi_pct AND model probability collapsed <= 35.0%
+            if unrealized_pct <= -self.stop_loss_roi_pct and curr_model_prob <= 35.0:
+                # Prevent thin-book 1¢ gap wipeouts on stop-loss exits
+                safe_exit_bid = max(current_bid, round(pos["entry_price"] * 0.65, 2)) if curr_model_prob >= 18.0 else current_bid
                 self._close_position(
                     pos,
-                    exit_price=current_bid,
+                    exit_price=safe_exit_bid,
                     reason="STOP_LOSS",
-                    rationale=f"Strict Stop Loss triggered at {unrealized_pct}%: Cutting loss early to protect bankroll."
+                    rationale=f"Cut loss at {unrealized_pct}%: Model probability dropped to {curr_model_prob}% as delta flipped against position."
                 )
                 return
 
@@ -171,9 +205,9 @@ class PaperTradingBot:
         if self.watchdog and not self.watchdog.is_safe_to_trade():
             return
 
-        # Re-entry Lockout: NEVER re-enter same candle if previous trade stopped out
+        # Re-entry Lockout: Do not re-enter same candle if previous trade stopped out
         if self.trades_in_candle >= 1 and self.last_exit_reason in ("STOP_LOSS", "SETTLED_LOSS"):
-            return # Block revenge trading / fighting adverse trend on same candle
+            return
 
         # Check re-entry limit & cooldown
         if self.trades_in_candle >= self.max_trades_per_candle:
@@ -181,8 +215,8 @@ class PaperTradingBot:
         if time.time() - self.last_exit_ts < 8.0:
             return # 8-second cooldown after exit
 
-        # Timing constraints: Avoid first 50s (noise) but allow down to 10s for BRTI variance collapse!
-        if seconds_left < 10 or seconds_left > 850:
+        # Timing constraints: Avoid first 45s (noise) and allow down to 10s for BRTI variance collapse (matching 8763b86)
+        if seconds_left < 10 or seconds_left > 855:
             return
 
         # Evaluate Signal & Edge
@@ -194,7 +228,7 @@ class PaperTradingBot:
         target_price = 0.0
         model_prob = 0.0
 
-        # Penny Floor & Ceiling Enforcement: Trade only between min_entry_price (25¢) and max_entry_price (78¢)
+        # Trade between min_entry_price (20¢) and max_entry_price (78¢)
         if "BUY YES" in signal and edge_pct >= self.min_edge_pct and model_prob_yes >= 60.0 and yes_ask >= self.min_entry_price and yes_ask <= self.max_entry_price:
             target_side = "YES"
             target_price = yes_ask
@@ -207,33 +241,25 @@ class PaperTradingBot:
         if not target_side or target_price < self.min_entry_price or target_price > self.max_entry_price:
             return
 
-        # Net Post-Fee Half-Kelly Position Sizing
-        half_kelly_frac = float(scalp_data.get("half_kelly_pct", 0.0)) / 100.0
-        if half_kelly_frac <= 0.01:
-            return # Zero allocation if edge is insufficient after fees & 3¢ slippage
-
-        # Allocate between Half-Kelly and max_allocation_pct, capped by hard max_trade_dollars ceiling
-        alloc_pct = min(self.max_allocation_pct / 100.0, half_kelly_frac)
+        # Position Sizing (Original Uncapped 15% Equity Compounding)
         equity = self.get_equity()
-        budget = min(self.cash, equity * alloc_pct, self.max_trade_dollars)
+        max_alloc = equity * (self.max_allocation_pct / 100.0)
+        budget = min(self.cash, max_alloc)
 
-        # Apply 3¢ adverse slippage penalty to fill price
-        fill_price = min(0.99, target_price + (self.slippage_penalty_cents / 100.0))
-        fee_per_contract = calculate_kalshi_fee(1, fill_price)
-        contracts = int(budget / (fill_price + fee_per_contract))
+        contracts = int(budget / (target_price + (self.taker_fee_cents / 100.0)))
         if contracts < 1:
             return
 
-        cost = contracts * fill_price
-        fees = calculate_kalshi_fee(contracts, fill_price)
+        cost = contracts * target_price
+        fees = contracts * (self.taker_fee_cents / 100.0)
         total_debit = cost + fees
 
         if total_debit > self.cash:
-            contracts = int((self.cash - fees) / fill_price)
+            contracts = int((self.cash - fees) / target_price)
             if contracts < 1:
                 return
-            cost = contracts * fill_price
-            fees = calculate_kalshi_fee(contracts, fill_price)
+            cost = contracts * target_price
+            fees = contracts * (self.taker_fee_cents / 100.0)
             total_debit = cost + fees
 
         # Deduct cash and open position
@@ -242,15 +268,15 @@ class PaperTradingBot:
         self.total_trades_count += 1
 
         rationale = (
-            f"Bot entered {target_side} on {ticker} at {int(fill_price*100)}¢ ({contracts} contracts, Net Half-Kelly {half_kelly_frac*100:.1f}%). "
-            f"BTC is {delta:+.1f} from open. Model prob {model_prob}% with +{edge_pct}% net edge."
+            f"Bot entered {target_side} on {ticker} at {int(target_price*100)}¢ ({contracts} contracts). "
+            f"BTC is {delta:+.1f} from candle open. Model probability is {model_prob}% with +{edge_pct}% edge."
         )
 
         trade_id = self.db.record_trade_open(
             ticker=ticker,
             series="KXBTC15M",
             side=target_side,
-            entry_price=fill_price,
+            entry_price=target_price,
             contracts=contracts,
             cost_dollars=cost,
             fee_dollars=fees,
@@ -264,7 +290,7 @@ class PaperTradingBot:
             "trade_id": trade_id,
             "ticker": ticker,
             "side": target_side,
-            "entry_price": fill_price,
+            "entry_price": target_price,
             "contracts": contracts,
             "cost_dollars": cost,
             "fee_dollars": fees,
@@ -277,14 +303,10 @@ class PaperTradingBot:
         }
 
     def _close_position(self, pos: Dict[str, Any], exit_price: float, reason: str, rationale: str):
-        """Sell position to close early (securing profit or taking stop). Subject to Kalshi taker fee & adverse slippage."""
+        """Sell position to close early (securing profit or taking stop)."""
         contracts = pos["contracts"]
-        # Apply adverse slippage haircut to early market exits (selling into bid - slippage)
-        slip = self.slippage_penalty_cents / 100.0
-        fill_exit_price = max(0.01, round(exit_price - slip, 2))
-
-        gross_proceeds = contracts * fill_exit_price
-        fees = calculate_kalshi_fee(contracts, fill_exit_price)
+        gross_proceeds = contracts * exit_price
+        fees = contracts * (self.taker_fee_cents / 100.0)
         net_proceeds = gross_proceeds - fees
 
         self.cash += net_proceeds
@@ -297,7 +319,7 @@ class PaperTradingBot:
 
         self.db.record_trade_close(
             trade_id=pos["trade_id"],
-            exit_price=fill_exit_price,
+            exit_price=exit_price,
             exit_reason=reason,
             pnl_dollars=round(pnl, 2),
             pnl_pct=round(pnl_pct, 1)
@@ -412,7 +434,6 @@ class PaperTradingBot:
                 "take_profit_roi_pct": self.take_profit_roi_pct,
                 "stop_loss_roi_pct": self.stop_loss_roi_pct,
                 "max_allocation_pct": self.max_allocation_pct,
-                "max_trade_dollars": self.max_trade_dollars,
                 "min_entry_price": self.min_entry_price,
                 "min_edge_pct": self.min_edge_pct
             },

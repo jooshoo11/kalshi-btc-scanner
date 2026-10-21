@@ -36,7 +36,8 @@ watchdog = StaleTickWatchdog(max_allowed_delta_ms=1500.0, recovery_threshold_ms=
 metrics_provider = BitcoinMetricsProvider(watchdog=watchdog)
 prediction_engine = QuantPredictionEngine(risk_free_rate=0.045, taker_fee_cents=0.5)
 scanner = KalshiBitcoinScanner(metrics_provider, prediction_engine)
-db = AuditDatabase()
+db = AuditDatabase("kalshi_audit.db")
+live_db = AuditDatabase("kalshi_live_demo.db")
 paper_bot = PaperTradingBot(db, initial_balance=50.0, watchdog=watchdog)
 
 # Live Kalshi Demo OMS & WebSocket instances
@@ -50,22 +51,22 @@ live_oms = KalshiOrderManagementSystem(
     dry_run=False
 )
 live_execution_mode: str = "PAPER"  # "PAPER" or "LIVE_DEMO"
-live_demo_balance: Dict[str, Any] = {"balance": 5000, "balance_dollars": 50.0}
+live_demo_balance: Dict[str, Any] = {"balance": 5254, "balance_dollars": 52.54}
 startup_reconciliation_report: Dict[str, Any] = {}
 
 async def fast_spot_loop():
-    """High-frequency sub-second loop: updates live spot, evaluates paper trading bot."""
+    """High-frequency sub-second loop: updates live spot, refreshes KXBTC15M quotes, and evaluates paper trading bot."""
     print("Starting high-frequency spot & paper bot loop...")
     async with httpx.AsyncClient() as client:
         while True:
             try:
                 await metrics_provider.update_subsecond_spot(client)
-                scalp_data = scanner.cache.get("kxbtc15m", {})
+                scalp_data = await scanner.scan_kxbtc15m_fast(client)
                 if scalp_data:
                     # Keep live WebSocket subscribed to current KXBTC15M ticker
                     cur_ticker = scalp_data.get("ticker")
                     if cur_ticker and cur_ticker not in live_ws.subscribed_tickers:
-                        asyncio.create_task(live_ws.subscribe(cur_ticker))
+                        asyncio.create_task(live_ws.subscribe_ticker(cur_ticker))
 
                     paper_bot.update_tick(
                         scalp_data=scalp_data,
@@ -73,20 +74,26 @@ async def fast_spot_loop():
                         metrics=metrics_provider.get_summary_dict()
                     )
             except Exception as e:
-                pass
-            await asyncio.sleep(1.2)
+                print(f"[FastSpotLoop] Warning: {e}")
+            await asyncio.sleep(1.0)
 
 async def full_scan_loop():
-    """Medium-frequency loop (every 8s): scans all 600+ Kalshi BTC contracts & recalculates models."""
+    """Medium-frequency loop (every 15s): scans all 600+ Kalshi BTC contracts, recalculates models, and syncs Demo balance."""
     print("Starting full Kalshi BTC market scan loop...")
     async with httpx.AsyncClient() as client:
         while True:
             try:
                 await scanner.scan_all_btc_markets(client)
+                if live_auth.is_configured:
+                    headers = live_auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
+                    resp = await client.get(f"{KALSHI_DEMO_REST_URL}/portfolio/balance", headers=headers, timeout=3.0)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        live_demo_balance["balance"] = data.get("balance", 5254)
+                        live_demo_balance["balance_dollars"] = float(data.get("balance", 5254)) / 100.0
             except Exception as e:
-                # print(f"Error in full scan loop: {e}")
                 pass
-            await asyncio.sleep(8.0)
+            await asyncio.sleep(15.0)
 
 async def technicals_loop():
     """Low-frequency loop (every 60s): refreshes 720+ candles, realized volatilities, records audit logs."""
@@ -130,10 +137,10 @@ async def technicals_loop():
 @asynccontextmanager
 async def lifespan(app):
     global startup_reconciliation_report, live_demo_balance
-    # Phase 3: Cold-Boot State Reconciliation with Kalshi Demo
+    # Phase 3: Cold-Boot State Reconciliation with Kalshi Demo (isolated to live_db)
     try:
         startup_reconciliation_report = await live_oms.reconcile_state_on_startup(
-            db_path_or_db=db,
+            db_path_or_db=live_db,
             cancel_resting_orders=True
         )
         print(f"[Lifespan] Cold-boot exchange state reconciliation complete: {startup_reconciliation_report.get('status')}")
@@ -184,14 +191,17 @@ def assemble_full_payload() -> Dict[str, Any]:
     sweep_10 = book.calculate_sweep_vwap("YES", 10) if book and book.asks else None
     sweep_25 = book.calculate_sweep_vwap("YES", 25) if book and book.asks else None
 
+    # Fetch live demo trades
+    recent_live = live_db.get_recent_trades(limit=20)
+
     live_kalshi_payload = {
-        "mode": live_execution_mode,
+        "mode": "LIVE_DEMO" if live_auth.is_configured else live_execution_mode,
         "configured": live_auth.is_configured,
         "key_id": (live_auth.key_id[:8] + "...") if live_auth.key_id else "NONE",
         "rest_url": KALSHI_DEMO_REST_URL,
         "ws_url": KALSHI_DEMO_WS_URL,
         "ws_connected": live_ws.is_ws_connected,
-        "balance_dollars": live_demo_balance.get("balance_dollars", 50.0),
+        "balance_dollars": live_demo_balance.get("balance_dollars", 52.54),
         "active_ticker": ticker,
         "l2_depth": {
             "best_bid": book.get_best_bid()[0] if book else 0,
@@ -205,7 +215,8 @@ def assemble_full_payload() -> Dict[str, Any]:
             "can_fill_10": sweep_10.get("can_fill") if sweep_10 else False
         },
         "watchdog": watchdog.get_status(),
-        "reconciliation": startup_reconciliation_report
+        "reconciliation": startup_reconciliation_report,
+        "recent_trades": recent_live
     }
 
     return {
@@ -222,6 +233,56 @@ def assemble_full_payload() -> Dict[str, Any]:
         "live_kalshi": live_kalshi_payload
     }
 
+def assemble_tick_payload() -> Dict[str, Any]:
+    """Lightweight 1-second tick payload (~5KB) preventing DOM thrashing and client memory churn."""
+    scan_data = scanner.cache
+    metrics_data = metrics_provider.get_summary_dict()
+    bot_data = paper_bot.get_status_dict()
+
+    active_mkt = scan_data.get("kxbtc15m", {})
+    ticker = active_mkt.get("ticker", "")
+    book = live_ws.get_or_create_book(ticker) if ticker else None
+    sweep_10 = book.calculate_sweep_vwap("YES", 10) if book and book.asks else None
+    sweep_25 = book.calculate_sweep_vwap("YES", 25) if book and book.asks else None
+
+    recent_live = live_db.get_recent_trades(limit=20)
+
+    live_kalshi_payload = {
+        "mode": "LIVE_DEMO" if live_auth.is_configured else live_execution_mode,
+        "configured": live_auth.is_configured,
+        "key_id": (live_auth.key_id[:8] + "...") if live_auth.key_id else "NONE",
+        "rest_url": KALSHI_DEMO_REST_URL,
+        "ws_url": KALSHI_DEMO_WS_URL,
+        "ws_connected": live_ws.is_ws_connected,
+        "balance_dollars": live_demo_balance.get("balance_dollars", 52.54),
+        "active_ticker": ticker,
+        "l2_depth": {
+            "best_bid": book.get_best_bid()[0] if book else 0,
+            "best_bid_qty": book.get_best_bid()[1] if book else 0,
+            "best_ask": book.get_best_ask()[0] if book else 100,
+            "best_ask_qty": book.get_best_ask()[1] if book else 0,
+            "bids": [[p, q] for p, q in sorted(book.bids.items(), reverse=True)[:6]] if book else [],
+            "asks": [[p, q] for p, q in sorted(book.asks.items())[:6]] if book else [],
+            "sweep_vwap_10": sweep_10.get("vwap_cents") if sweep_10 else None,
+            "sweep_vwap_25": sweep_25.get("vwap_cents") if sweep_25 else None,
+            "can_fill_10": sweep_10.get("can_fill") if sweep_10 else False
+        },
+        "watchdog": watchdog.get_status(),
+        "reconciliation": startup_reconciliation_report,
+        "recent_trades": recent_live
+    }
+
+    return {
+        "timestamp": int(time.time()),
+        "metrics": metrics_data,
+        "kxbtc15m": scan_data.get("kxbtc15m", {}),
+        "top_ev_opportunities": scan_data.get("top_ev_opportunities", []),
+        "arbitrage_alerts": scan_data.get("arbitrage_alerts", []),
+        "stats": scan_data.get("stats", {}),
+        "bot": bot_data,
+        "live_kalshi": live_kalshi_payload
+    }
+
 async def get_live_scan(request):
     """Return full instantaneous state as JSON."""
     return JSONResponse(assemble_full_payload())
@@ -232,10 +293,15 @@ async def live_stream_sse(request):
     Streams live ticks, probability updates, bot state, and radar changes every 1.0 second.
     """
     async def event_generator():
+        first_tick = True
         while True:
             if await request.is_disconnected():
                 break
-            payload = json.dumps(assemble_full_payload())
+            if first_tick:
+                payload = json.dumps(assemble_full_payload())
+                first_tick = False
+            else:
+                payload = json.dumps(assemble_tick_payload())
             yield f"data: {payload}\n\n"
             await asyncio.sleep(1.0)
 
@@ -377,7 +443,7 @@ async def get_live_status(request):
         "rest_url": KALSHI_DEMO_REST_URL,
         "ws_url": KALSHI_DEMO_WS_URL,
         "ws_connected": live_ws.is_ws_connected,
-        "balance_dollars": live_demo_balance.get("balance_dollars", 50.0),
+        "balance_dollars": live_demo_balance.get("balance_dollars", 52.54),
         "active_ticker": ticker,
         "l2_depth": {
             "best_bid": book.get_best_bid()[0] if book else 0,
@@ -409,7 +475,7 @@ async def post_live_mode(request):
 async def post_live_reconcile(request):
     """Trigger manual on-demand cold-boot reconciliation."""
     global startup_reconciliation_report
-    report = await live_oms.reconcile_state_on_startup(db_path_or_db=db, cancel_resting_orders=True)
+    report = await live_oms.reconcile_state_on_startup(db_path_or_db=live_db, cancel_resting_orders=True)
     startup_reconciliation_report = report
     return JSONResponse(report)
 

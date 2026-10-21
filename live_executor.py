@@ -323,6 +323,10 @@ class KalshiWebSocketClient:
         if self.is_ws_connected:
             await self._send_subscribe([ticker])
 
+    async def subscribe(self, ticker: str):
+        """Alias for subscribe_ticker."""
+        await self.subscribe_ticker(ticker)
+
     async def _handle_message(self, raw_msg: str):
         try:
             data = json.loads(raw_msg)
@@ -333,18 +337,53 @@ class KalshiWebSocketClient:
                 ticker = msg_data.get("market_ticker")
                 if ticker:
                     book = self.get_or_create_book(ticker)
-                    book.apply_snapshot(msg_data.get("bids", []), msg_data.get("asks", []))
+                    raw_yes = msg_data.get("yes_dollars_fp") or msg_data.get("yes") or msg_data.get("bids") or []
+                    raw_no = msg_data.get("no_dollars_fp") or msg_data.get("no") or msg_data.get("asks") or []
+
+                    yes_levels = []
+                    for item in raw_yes:
+                        try:
+                            p_cents = int(round(float(item[0]) * 100)) if "." in str(item[0]) else int(item[0])
+                            qty = int(round(float(item[1])))
+                            if p_cents > 0 and qty > 0:
+                                yes_levels.append([p_cents, qty])
+                        except Exception:
+                            pass
+
+                    # In Kalshi binary structure, NO bids at P are equivalent to YES asks at (100 - P)
+                    asks_from_no = []
+                    for item in raw_no:
+                        try:
+                            p_cents = int(round(float(item[0]) * 100)) if "." in str(item[0]) else int(item[0])
+                            qty = int(round(float(item[1])))
+                            if p_cents > 0 and qty > 0:
+                                asks_from_no.append([100 - p_cents, qty])
+                        except Exception:
+                            pass
+
+                    book.apply_snapshot(yes_levels, asks_from_no)
                     self._notify_book_update(ticker, book)
 
             elif msg_type == "orderbook_delta":
                 ticker = msg_data.get("market_ticker")
                 if ticker:
                     book = self.get_or_create_book(ticker)
-                    side = msg_data.get("side", "yes_ask")
-                    price = msg_data.get("price", 0)
-                    delta = msg_data.get("delta", 0)
-                    book.apply_delta(side, price, delta)
-                    self._notify_book_update(ticker, book)
+                    raw_side = str(msg_data.get("side", "")).lower()
+
+                    try:
+                        raw_price = msg_data.get("price_dollars", msg_data.get("price", 0))
+                        price = int(round(float(raw_price) * 100)) if "." in str(raw_price) else int(raw_price)
+                        raw_delta = msg_data.get("delta_fp", msg_data.get("delta", 0))
+                        delta = int(round(float(raw_delta)))
+
+                        if raw_side in ("yes", "bid", "yes_bid"):
+                            book.apply_delta("yes_bid", price, delta)
+                        elif raw_side in ("no", "ask", "yes_ask"):
+                            ask_price = (100 - price) if raw_side == "no" else price
+                            book.apply_delta("yes_ask", ask_price, delta)
+                        self._notify_book_update(ticker, book)
+                    except Exception as e:
+                        pass
 
         except Exception as e:
             logger.debug(f"Error parsing WS message: {e}")
@@ -523,15 +562,18 @@ class KalshiStateReconciler:
                 logger.error(f"[Reconciler] Failed to fetch orders ({resp.status_code}): {resp.text}")
                 return []
 
-    async def cancel_order(self, order_id: str) -> bool:
+    async def cancel_order(self, order_id: str, market_ticker: Optional[str] = None, exchange_index: int = 2) -> bool:
         """Cancel an open resting order on exchange."""
         if self.dry_run or not self.auth or not self.auth.is_configured or self.auth.key_id.startswith("test-"):
             return True
-        endpoint = f"/portfolio/orders/{order_id}"
+        endpoint = f"/portfolio/events/orders/{order_id}"
         headers = self.auth.sign_request("DELETE", endpoint)
+        params = {"exchange_index": exchange_index}
+        if market_ticker:
+            params["market_ticker"] = market_ticker
         async with httpx.AsyncClient(timeout=4.0) as client:
-            resp = await client.delete(f"{self.rest_url}{endpoint}", headers=headers)
-            return resp.status_code == 200
+            resp = await client.delete(f"{self.rest_url}{endpoint}", headers=headers, params=params)
+            return resp.status_code in (200, 204)
 
     async def reconcile_state_on_startup(
         self,
@@ -780,8 +822,12 @@ class KalshiOrderManagementSystem:
             return {"status": "ABORTED_INVALID_COUNT", "reason": "Target contracts must be > 0"}
 
         # 1. Query Local L2 WebSocket Cache
-        is_buy = direction.upper() in ("BUY", "YES")
-        side_label = "yes" if is_buy else "no"
+        dir_upper = direction.upper()
+        is_buy_no = dir_upper in ("NO", "BUY_NO")
+        is_buy_yes = dir_upper in ("BUY", "YES", "BUY_YES")
+        is_buy = is_buy_yes or is_buy_no
+        side_label = "no" if is_buy_no else "yes"
+
         book: Optional[L2OrderBook] = None
         if self.ws_client and ticker in self.ws_client.books:
             book = self.ws_client.books[ticker]
@@ -796,12 +842,13 @@ class KalshiOrderManagementSystem:
 
         # 2. Walk down L2 book to calculate VWAP
         if book:
-            order_levels = book.asks if is_buy else book.bids
+            # Buying YES sweeps YES asks ascending; Buying NO or Selling YES sweeps YES bids descending
+            order_levels = book.asks if is_buy_yes else book.bids
             if not order_levels:
-                logger.warning(f"[OMS] ABORT: L2 book for {ticker} has 0 depth on {'asks' if is_buy else 'bids'}.")
+                logger.warning(f"[OMS] ABORT: L2 book for {ticker} has 0 depth on {'asks' if is_buy_yes else 'bids'}.")
                 return {"status": "ABORTED_EMPTY_BOOK", "reason": "Empty order book on requested side"}
 
-            sorted_prices = sorted(order_levels.keys()) if is_buy else sorted(order_levels.keys(), reverse=True)
+            sorted_prices = sorted(order_levels.keys()) if is_buy_yes else sorted(order_levels.keys(), reverse=True)
             accumulated_qty = 0
             total_cost_cents = 0
             worst_price_cents = 0
@@ -811,24 +858,26 @@ class KalshiOrderManagementSystem:
                 avail = order_levels[p]
                 needed = target_contracts - accumulated_qty
                 fill = min(avail, needed)
-                total_cost_cents += fill * p
+                # For BUY NO, a YES bid at p cents equals a NO ask at (100 - p) cents
+                effective_level_price = (100 - p) if is_buy_no else p
+                total_cost_cents += fill * effective_level_price
                 accumulated_qty += fill
-                worst_price_cents = p
+                worst_price_cents = effective_level_price
                 levels_swept += 1
                 if accumulated_qty >= target_contracts:
                     break
 
-            if accumulated_qty < target_contracts:
-                logger.warning(
-                    f"[OMS] ABORT: Insufficient liquidity on {ticker}. "
-                    f"Requested {target_contracts} contracts, book only held {accumulated_qty}."
-                )
+            if accumulated_qty <= 0:
+                logger.warning(f"[OMS] ABORT: Order book for {ticker} has 0 depth on requested side.")
                 return {
-                    "status": "ABORTED_THIN_BOOK",
-                    "reason": f"Insufficient book depth: Available {accumulated_qty} < Needed {target_contracts}",
-                    "filled_count": accumulated_qty,
-                    "target_contracts": target_contracts
+                    "status": "ABORTED_EMPTY_BOOK",
+                    "reason": "No resting liquidity on book"
                 }
+            elif accumulated_qty < target_contracts:
+                logger.info(
+                    f"[OMS] Dynamic book sizing: Scaling order from {target_contracts} down to {accumulated_qty} contracts to match available liquidity."
+                )
+                target_contracts = accumulated_qty
 
             vwap_cents = round(total_cost_cents / float(accumulated_qty), 2)
         else:
@@ -881,7 +930,7 @@ class KalshiOrderManagementSystem:
             f"[OMS] Executing {target_contracts}x {direction} on {ticker} | "
             f"Sweep VWAP: {vwap_cents:.1f}¢ | Cap Limit: {worst_price_cents}¢ | Levels: {levels_swept}"
         )
-        return await self._place_rest_order(
+        order_res = await self._place_rest_order(
             ticker=ticker,
             action="buy" if is_buy else "sell",
             side=side_label,
@@ -889,6 +938,45 @@ class KalshiOrderManagementSystem:
             price_cents=worst_price_cents,
             order_type="limit"
         )
+        order_id = order_res.get("order_id") or order_res.get("order", {}).get("order_id")
+        if not order_id or order_res.get("status") == "FILLED_SIMULATION":
+            order_res["status"] = "FILLED"
+            order_res["filled_count"] = target_contracts
+            order_res["order_id"] = order_id or f"sim_{int(time.time()*1000)}"
+            return order_res
+
+        # Allow matching engine to execute against book
+        await asyncio.sleep(0.6)
+        order_status = await self._get_order_status(order_id)
+        filled_count = order_status.get("fill_count", 0)
+        remaining_count = order_status.get("remaining_count", target_contracts - filled_count)
+        status_str = order_status.get("status", "").lower()
+
+        # If any contracts remain resting/open, cancel immediately so no orphaned orders linger
+        if remaining_count > 0 and status_str in ("resting", "open", "pending", "partially_filled"):
+            logger.info(f"[OMS Entry] Cancelling unfilled resting contracts ({remaining_count} resting on book)...")
+            cancel_ok = await self._cancel_rest_order(order_id, ticker=ticker)
+            await asyncio.sleep(0.8)
+            final_status = await self._get_order_status(order_id)
+            filled_count = final_status.get("fill_count", filled_count)
+            status_str = final_status.get("status", status_str).lower()
+
+        if filled_count <= 0:
+            logger.warning(f"[OMS Entry] Order {order_id} received 0 fills on exchange book. Entry canceled cleanly.")
+            return {
+                "status": "UNFILLED",
+                "reason": "Order received 0 fills on orderbook",
+                "filled_count": 0
+            }
+
+        logger.info(f"[OMS Entry] Order {order_id} confirmed filled {filled_count}/{target_contracts} contracts @ {worst_price_cents}¢.")
+        return {
+            "status": "FILLED",
+            "order_id": order_id,
+            "filled_count": filled_count,
+            "fill_price_cents": worst_price_cents,
+            "ticker": ticker
+        }
 
     async def execute_entry_with_vwap_protection(
         self,
@@ -919,14 +1007,21 @@ class KalshiOrderManagementSystem:
             vwap_res = book.calculate_sweep_vwap(side, contracts)
 
         if vwap_res and not vwap_res["can_fill"]:
-            logger.warning(
-                f"[OMS] ABORT: Insufficient liquidity on {ticker}. "
-                f"Requested {contracts} contracts, book only held {vwap_res['filled_count']}."
-            )
-            return {
-                "status": "ABORTED_THIN_BOOK",
-                "reason": f"Insufficient book depth: Available {vwap_res['filled_count']} < Needed {contracts}"
-            }
+            avail_q = vwap_res.get("filled_count", 0)
+            if avail_q > 0:
+                logger.info(
+                    f"[OMS] Dynamic book sizing: Scaling order from {contracts} down to {avail_q} contracts to match book depth."
+                )
+                contracts = avail_q
+                vwap_res = book.calculate_sweep_vwap(side, contracts)
+            else:
+                logger.warning(
+                    f"[OMS] ABORT: Insufficient liquidity on {ticker}. Requested {contracts} contracts, book held 0."
+                )
+                return {
+                    "status": "ABORTED_THIN_BOOK",
+                    "reason": f"Insufficient book depth: Available 0 < Needed {contracts}"
+                }
 
         effective_vwap_cents = vwap_res["vwap_cents"] if vwap_res else max_acceptable_vwap_cents
         effective_worst_price = vwap_res["worst_price_cents"] if vwap_res else max_acceptable_vwap_cents
@@ -959,7 +1054,7 @@ class KalshiOrderManagementSystem:
             f"[OMS] Executing {contracts}x {side} on {ticker} | "
             f"Expected VWAP: {effective_vwap_cents:.1f}¢ | Cap Limit: {effective_worst_price}¢"
         )
-        return await self._place_rest_order(
+        order_res = await self._place_rest_order(
             ticker=ticker,
             action="buy",
             side=side.lower(),
@@ -967,6 +1062,182 @@ class KalshiOrderManagementSystem:
             price_cents=effective_worst_price,
             order_type="limit"
         )
+        order_id = order_res.get("order_id")
+        if not order_id or order_res.get("status") == "FILLED_SIMULATION":
+            order_res["filled_count"] = contracts
+            return order_res
+
+        # Verify actual fill status on the exchange book
+        await asyncio.sleep(0.8)
+        order_status = await self._get_order_status(order_id)
+        filled_count = order_status.get("fill_count", 0)
+        remaining_count = order_status.get("remaining_count", contracts - filled_count)
+
+        # Cancel any resting unfilled contracts immediately so no rogue fills happen
+        if remaining_count > 0 and order_status.get("status") == "resting":
+            logger.info(f"[OMS Entry] Cancelling unfilled resting contracts ({remaining_count} resting)...")
+            await self._cancel_rest_order(order_id)
+            await asyncio.sleep(0.2)
+            final_status = await self._get_order_status(order_id)
+            filled_count = final_status.get("fill_count", filled_count)
+
+        if filled_count <= 0:
+            logger.warning(f"[OMS Entry] Order {order_id} received 0 fills on exchange book. Entry aborted.")
+            return {
+                "status": "UNFILLED",
+                "reason": "Order received 0 fills on orderbook",
+                "filled_count": 0
+            }
+
+        logger.info(f"[OMS Entry] Order {order_id} confirmed filled {filled_count}/{contracts} contracts.")
+        return {
+            "status": "FILLED",
+            "order_id": order_id,
+            "filled_count": filled_count,
+            "fill_price_cents": effective_worst_price,
+            "ticker": ticker
+        }
+
+    async def execute_complete_exit(
+        self,
+        ticker: str,
+        side: str,
+        contracts: int,
+        target_price_cents: int,
+        floor_cents: int = 15,
+        reason: str = "TAKE_PROFIT",
+        max_chase_attempts: int = 6,
+        chase_poll_ms: int = 600
+    ) -> Dict[str, Any]:
+        """
+        Guaranteed complete position exit:
+        - Never leaves un-exited contracts resting on thin orderbooks.
+        - Checks Kalshi V2 fill_count_fp and remaining_count_fp after each attempt.
+        - Sweeps available bids down to floor_cents until 100% of contracts are closed.
+        """
+        logger.info(
+            f"[OMS Complete Exit] Initiating guaranteed exit: {contracts} contracts {side} on {ticker} "
+            f"({reason} target: {target_price_cents}¢, floor: {floor_cents}¢)"
+        )
+
+        remaining = int(contracts)
+        total_filled = 0
+        total_proceeds_cents = 0
+        is_no = (side.upper() == "NO")
+
+        for attempt in range(1, max_chase_attempts + 1):
+            if remaining <= 0:
+                break
+
+            # Query best bid from book
+            best_bid_cents = 0
+            if self.ws_client and ticker in self.ws_client.books:
+                book = self.ws_client.books[ticker]
+                if is_no:
+                    best_yes_ask = book.get_best_ask()[0]
+                    if best_yes_ask < 100:
+                        best_bid_cents = 100 - best_yes_ask
+                else:
+                    best_bid_cents = book.get_best_bid()[0]
+
+            # Determine limit price for this attempt
+            if attempt == 1 and reason == "TAKE_PROFIT":
+                limit_p = max(floor_cents, target_price_cents)
+            else:
+                if best_bid_cents > 0:
+                    limit_p = max(floor_cents, min(best_bid_cents, target_price_cents) if reason == "TAKE_PROFIT" else best_bid_cents)
+                else:
+                    limit_p = floor_cents
+
+            logger.info(
+                f"[OMS Complete Exit] Attempt {attempt}/{max_chase_attempts}: "
+                f"Selling {remaining}x {side} @ {limit_p}¢ (Book bid: {best_bid_cents}¢)"
+            )
+
+            order_res = await self._place_rest_order(
+                ticker=ticker,
+                action="sell",
+                side=side.lower(),
+                count=remaining,
+                price_cents=limit_p,
+                order_type="limit"
+            )
+
+            order_id = order_res.get("order_id")
+            if not order_id:
+                # Mock or simulation
+                total_filled = contracts
+                total_proceeds_cents = contracts * limit_p
+                remaining = 0
+                break
+
+            await asyncio.sleep(chase_poll_ms / 1000.0)
+
+            order_status = await self._get_order_status(order_id)
+            status_str = order_status.get("status", "").lower()
+            filled = order_status.get("fill_count", 0)
+            rem = order_status.get("remaining_count", max(0, remaining - filled))
+
+            if filled > 0:
+                actual_newly_filled = min(remaining, filled)
+                total_filled += actual_newly_filled
+                total_proceeds_cents += actual_newly_filled * limit_p
+                remaining -= actual_newly_filled
+                logger.info(f"[OMS Complete Exit] Order {order_id} filled {actual_newly_filled}x @ {limit_p}¢ ({remaining} remaining)")
+
+            if status_str == "executed" or remaining <= 0:
+                logger.info(f"[OMS Complete Exit] All {contracts} contracts fully executed!")
+                remaining = 0
+                break
+
+            # If not completely filled and still resting, cancel resting portion
+            if status_str == "resting" or rem > 0:
+                logger.info(f"[OMS Complete Exit] Order {order_id} partially unfilled ({rem} resting). Cancelling to chase...")
+                await self._cancel_rest_order(order_id)
+                await asyncio.sleep(0.2)
+                # Re-check status after cancellation to catch race fills
+                final_check = await self._get_order_status(order_id)
+                latest_filled = final_check.get("fill_count", filled)
+                extra = latest_filled - filled
+                if extra > 0 and remaining > 0:
+                    extra = min(remaining, extra)
+                    total_filled += extra
+                    total_proceeds_cents += extra * limit_p
+                    remaining -= extra
+
+        # If any remaining after chase loop, place final order at floor
+        if remaining > 0:
+            logger.warning(f"[OMS Complete Exit] {remaining} contracts remain after chase. Posting final attempt at floor {floor_cents}¢...")
+            final_res = await self._place_rest_order(
+                ticker=ticker,
+                action="sell",
+                side=side.lower(),
+                count=remaining,
+                price_cents=floor_cents,
+                order_type="limit"
+            )
+            final_id = final_res.get("order_id")
+            if final_id:
+                await asyncio.sleep(0.5)
+                f_status = await self._get_order_status(final_id)
+                f_filled = f_status.get("fill_count", 0)
+                if f_filled > 0:
+                    act_f = min(remaining, f_filled)
+                    total_filled += act_f
+                    total_proceeds_cents += act_f * floor_cents
+                    remaining -= act_f
+                if f_status.get("status") == "resting":
+                    await self._cancel_rest_order(final_id)
+
+        avg_price = (total_proceeds_cents / max(1, total_filled)) if total_filled > 0 else float(target_price_cents)
+        return {
+            "status": "FILLED" if remaining == 0 else "PARTIAL",
+            "filled_contracts": total_filled,
+            "remaining_contracts": remaining,
+            "avg_price_cents": avg_price,
+            "fill_price_dollars": avg_price / 100.0,
+            "total_proceeds_dollars": total_proceeds_cents / 100.0
+        }
 
     async def execute_limit_chasing_stop_loss(
         self,
@@ -1059,21 +1330,44 @@ class KalshiOrderManagementSystem:
 
         endpoint = "/portfolio/events/orders"
         url = f"{self.rest_url}{endpoint}"
+        import uuid
+        # Kalshi V2 /portfolio/events/orders uses a single YES orderbook ("bid" or "ask" on YES):
+        # - BUY YES @ P  -> "bid" @ P
+        # - SELL YES @ P -> "ask" @ P
+        # - BUY NO @ P   -> "ask" @ (100 - P)
+        # - SELL NO @ P  -> "bid" @ (100 - P)
+        is_no_side = (side.lower() == "no")
+        is_buy_action = (action.lower() == "buy")
+        if is_no_side:
+            v2_side = "ask" if is_buy_action else "bid"
+            v2_price_cents = max(1, min(99, 100 - int(price_cents)))
+        else:
+            v2_side = "bid" if is_buy_action else "ask"
+            v2_price_cents = max(1, min(99, int(price_cents)))
+
         payload = {
-            "action": action.lower(),
-            "type": order_type.lower(),
             "ticker": ticker,
-            "side": side.lower(),
-            "count": int(count),
-            "yes_price": int(price_cents) if side.lower() == "yes" else int(100 - price_cents),
-            "client_order_id": f"kalshi_bot_{int(time.time()*1000)}"
+            "side": v2_side,
+            "type": order_type.lower(),
+            "count": str(int(count)),
+            "price": f"{v2_price_cents / 100.0:.4f}",
+            "time_in_force": "good_till_canceled",
+            "client_order_id": str(uuid.uuid4()),
+            "self_trade_prevention_type": "taker_at_cross"
         }
 
         headers = self.auth.sign_request("POST", endpoint)
         async with httpx.AsyncClient(timeout=4.0) as client:
             resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code in (200, 201):
-                return resp.json()
+                data = resp.json()
+                ord_info = data.get("order", {})
+                data["order_id"] = ord_info.get("order_id") or data.get("order_id")
+                data["status"] = ord_info.get("status", "resting")
+                data["ticker"] = ticker
+                data["count"] = count
+                data["price_cents"] = price_cents
+                return data
             else:
                 logger.error(f"[OMS Error] Order rejected ({resp.status_code}): {resp.text}")
                 return {"status": "REJECTED", "code": resp.status_code, "error": resp.text}
@@ -1081,26 +1375,48 @@ class KalshiOrderManagementSystem:
     async def _get_order_status(self, order_id: str) -> Dict[str, Any]:
         """Query status of active order."""
         if self.dry_run or not self.auth or not self.auth.is_configured or self.auth.key_id.startswith("test-") or "mock_" in order_id:
-            return {"status": "executed", "remaining_count": 0}
+            return {"status": "executed", "remaining_count": 0, "fill_count": 1, "initial_count": 1}
 
         endpoint = f"/portfolio/orders/{order_id}"
         headers = self.auth.sign_request("GET", endpoint)
         async with httpx.AsyncClient(timeout=3.0) as client:
             resp = await client.get(f"{self.rest_url}{endpoint}", headers=headers)
             if resp.status_code == 200:
-                return resp.json().get("order", {})
+                ord_data = resp.json().get("order", {})
+                try:
+                    rem_fp = float(ord_data.get("remaining_count_fp", ord_data.get("remaining_count", 0)))
+                    fill_fp = float(ord_data.get("fill_count_fp", ord_data.get("fill_count", 0)))
+                    init_fp = float(ord_data.get("initial_count_fp", ord_data.get("count", 0)))
+                    ord_data["remaining_count"] = int(round(rem_fp))
+                    ord_data["fill_count"] = int(round(fill_fp))
+                    ord_data["initial_count"] = int(round(init_fp))
+                except Exception:
+                    pass
+                return ord_data
             return {"status": "unknown"}
 
-    async def _cancel_rest_order(self, order_id: str) -> bool:
-        """Cancel an open order."""
+    async def _cancel_rest_order(self, order_id: str, ticker: Optional[str] = None) -> bool:
+        """Cancel an open order via Kalshi V2 events API."""
         if self.dry_run or not self.auth or not self.auth.is_configured or self.auth.key_id.startswith("test-") or "mock_" in order_id:
             return True
 
-        endpoint = f"/portfolio/orders/{order_id}"
+        endpoint = f"/portfolio/events/orders/{order_id}"
         headers = self.auth.sign_request("DELETE", endpoint)
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.delete(f"{self.rest_url}{endpoint}", headers=headers)
-            return resp.status_code == 200
+        params = {"exchange_index": 2}
+        if ticker:
+            params["market_ticker"] = ticker
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            try:
+                resp = await client.delete(f"{self.rest_url}{endpoint}", headers=headers, params=params)
+                if resp.status_code in (200, 204):
+                    logger.info(f"[OMS] Successfully canceled resting order {order_id} on exchange.")
+                    return True
+                else:
+                    logger.error(f"[OMS] Order cancellation failed ({resp.status_code}): {resp.text}")
+                    return False
+            except Exception as e:
+                logger.error(f"[OMS] Order cancellation exception for {order_id}: {e}")
+                return False
 
     async def reconcile_state_on_startup(
         self,

@@ -114,24 +114,49 @@ class BitcoinMetricsProvider:
         self.latency_ms: float = 0.0
 
     async def update_subsecond_spot(self, client: httpx.AsyncClient):
-        """Update live spot price from Hyperliquid and Coinbase."""
+        """
+        Update live spot price from Coinbase BTC-USD and Kraken XBTUSD (the exact USD spot
+        constituents of CF Benchmarks BRTI used by Kalshi KXBTC15M settlement), while keeping
+        Hyperliquid perpetual futures separate so perp basis never distorts strike delta.
+        """
         t0 = time.time()
         try:
-            # 1. Hyperliquid mid
-            resp_hl = await client.post(HYPERLIQUID_INFO_URL, json={"type": "allMids"}, timeout=2.5)
-            if resp_hl.status_code == 200:
-                mids = resp_hl.json()
-                if "BTC" in mids:
-                    self.hyperliquid_spot = float(mids["BTC"])
-                    self.spot_price = self.hyperliquid_spot
-
-            # 2. Coinbase spot (for CFTC index reference)
+            # 1. Coinbase USD Spot (Primary CF Benchmarks BRTI constituent)
+            cb_ok = False
             resp_cb = await client.get(COINBASE_SPOT_URL, timeout=2.5)
             if resp_cb.status_code == 200:
                 data = resp_cb.json().get("data", {})
                 amt = data.get("amount")
                 if amt:
                     self.coinbase_spot = float(amt)
+                    cb_ok = True
+
+            # 2. Kraken USD Spot (Secondary CF Benchmarks BRTI constituent)
+            kr_ok = False
+            resp_kr = await client.get(KRAKEN_TICKER_URL, timeout=2.5)
+            if resp_kr.status_code == 200:
+                kr_res = resp_kr.json().get("result", {}).get("XXBTZUSD", {})
+                if "a" in kr_res and "b" in kr_res:
+                    ask = float(kr_res["a"][0])
+                    bid = float(kr_res["b"][0])
+                    self.kraken_spot = round((ask + bid) / 2.0, 2)
+                    self.bid_ask_spread = round(max(0.01, ask - bid), 2)
+                    kr_ok = True
+
+            # Set true USD Spot (BRTI proxy) from Coinbase & Kraken USD Spot
+            if cb_ok and kr_ok:
+                self.spot_price = round((self.coinbase_spot + self.kraken_spot) / 2.0, 2)
+            elif cb_ok:
+                self.spot_price = round(self.coinbase_spot, 2)
+            elif kr_ok:
+                self.spot_price = round(self.kraken_spot, 2)
+
+            # 3. Hyperliquid mid (tracked for perpetual basis telemetry only, never mixed into USD spot delta)
+            resp_hl = await client.post(HYPERLIQUID_INFO_URL, json={"type": "allMids"}, timeout=2.0)
+            if resp_hl.status_code == 200:
+                mids = resp_hl.json()
+                if "BTC" in mids:
+                    self.hyperliquid_spot = float(mids["BTC"])
 
             # Update 15m candle high/low
             if self.spot_price > self.current_15m_candle_high:
@@ -144,7 +169,6 @@ class BitcoinMetricsProvider:
             if self.watchdog:
                 self.watchdog.record_tick(feed_timestamp=self.last_update_ts, reported_latency_ms=self.latency_ms)
         except Exception as e:
-            # print(f"Error updating subsecond spot: {e}")
             pass
 
     async def update_candles_and_technicals(self, client: httpx.AsyncClient):
