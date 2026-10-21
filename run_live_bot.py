@@ -96,7 +96,7 @@ class KalshiLiveScalper:
         self.min_entry_price = 0.20
         self.max_entry_price = 0.80
         self.max_allocation_pct = 20.0  # 20% of total equity per trade (matching user directive)
-        self.min_seconds_left_for_entry = 90  # Avoid late-candle expiration traps (<90s)
+        self.min_seconds_left_for_entry = 60  # Avoid late-candle expiration traps (<60s)
         self.max_trades_per_candle = 3
         self.taker_fee_cents = 0.5
 

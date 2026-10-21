@@ -28,7 +28,7 @@ class PaperTradingBot:
         self.take_profit_roi_pct = 25.0    # Take profit when up 25%
         self.stop_loss_roi_pct = 25.0      # Cut loss when down 25% AND model prob <= 35%
         self.max_allocation_pct = 20.0     # Compound 20% of total equity per trade
-        self.min_seconds_left_for_entry = 90  # Avoid late-candle expiration traps (<90s)
+        self.min_seconds_left_for_entry = 60  # Avoid late-candle expiration traps (<60s)
         self.min_entry_price = 0.20        # Avoid <20¢ lottery tickets while capturing 20¢-80¢ setups
         self.max_entry_price = 0.80        # Ceiling: allow up to 80¢ high-probability continuation scalps
         self.min_edge_pct = 4.0            # Minimum model edge required to enter
