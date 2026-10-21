@@ -11,3 +11,10 @@ venv/
 .env
 *.pem
 
+# Multi-asset modular exclusions
+coins/*/logs/
+coins/*/updates/
+coins/*/backtests/*.csv
+coins/*/backtests/*.parquet
+
+
