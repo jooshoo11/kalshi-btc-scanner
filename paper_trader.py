@@ -212,8 +212,8 @@ class PaperTradingBot:
         # Check re-entry limit & cooldown
         if self.trades_in_candle >= self.max_trades_per_candle:
             return
-        if time.time() - self.last_exit_ts < 8.0:
-            return # 8-second cooldown after exit
+        if time.time() - self.last_exit_ts < 4.0:
+            return # 4-second cooldown after exit (matching run_live_bot.py)
 
         # Timing constraints: Avoid first 45s (noise) and allow down to 10s for BRTI variance collapse (matching 8763b86)
         if seconds_left < 10 or seconds_left > 855:

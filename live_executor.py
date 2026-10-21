@@ -925,17 +925,31 @@ class KalshiOrderManagementSystem:
                     "max_acceptable_cents": max_acceptable_cents
                 }
 
-        # 4. Dispatch Marketable Limit Order capped at worst sweep price
+        # 4. Dispatch Marketable Limit Order with Bounded Taker Spread Crossing (Phase 1 Speedup)
+        # Allows crossing the spread by up to +2¢ as long as mathematical edge strictly remains >= min_edge_pct
+        effective_cap_cents = worst_price_cents
+        if model_prob is not None:
+            max_tolerable_cap = worst_price_cents
+            for test_cap in range(worst_price_cents, min(78, worst_price_cents + 3)):
+                test_dollars = test_cap / 100.0
+                test_fee = calculate_kalshi_fee(1, test_dollars)
+                test_edge = (model_prob - (test_dollars + test_fee)) * 100.0
+                if test_edge >= min_edge_pct:
+                    max_tolerable_cap = test_cap
+                else:
+                    break
+            effective_cap_cents = max_tolerable_cap
+
         logger.info(
             f"[OMS] Executing {target_contracts}x {direction} on {ticker} | "
-            f"Sweep VWAP: {vwap_cents:.1f}¢ | Cap Limit: {worst_price_cents}¢ | Levels: {levels_swept}"
+            f"Sweep VWAP: {vwap_cents:.1f}¢ | Cap Limit: {effective_cap_cents}¢ (Worst Level: {worst_price_cents}¢) | Levels: {levels_swept}"
         )
         order_res = await self._place_rest_order(
             ticker=ticker,
             action="buy" if is_buy else "sell",
             side=side_label,
             count=target_contracts,
-            price_cents=worst_price_cents,
+            price_cents=effective_cap_cents,
             order_type="limit"
         )
         order_id = order_res.get("order_id") or order_res.get("order", {}).get("order_id")
@@ -945,8 +959,8 @@ class KalshiOrderManagementSystem:
             order_res["order_id"] = order_id or f"sim_{int(time.time()*1000)}"
             return order_res
 
-        # Allow matching engine to execute against book
-        await asyncio.sleep(0.6)
+        # Allow matching engine to execute against book (0.8s for exchange matching)
+        await asyncio.sleep(0.8)
         order_status = await self._get_order_status(order_id)
         filled_count = order_status.get("fill_count", 0)
         remaining_count = order_status.get("remaining_count", target_contracts - filled_count)

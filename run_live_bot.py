@@ -180,8 +180,15 @@ class KalshiLiveScalper:
         candle rolls over to preserve Demo API rate limits.
         """
         now = time.time()
+        # Fast rollover check: bypass cache during final 15s of candle so new candle is picked up immediately at second 0
+        is_rollover = False
+        if hasattr(self, "_cached_mkt") and self._cached_mkt:
+            c_ts = parse_iso_time(self._cached_mkt.get("close_time", ""))
+            if c_ts and (c_ts - now <= 15.0):
+                is_rollover = True
+
         # Only refresh market metadata every 10 seconds or when ticker is unassigned
-        if hasattr(self, "_cached_mkt") and (now - getattr(self, "_last_mkt_resolve_ts", 0.0) < 10.0):
+        if not is_rollover and hasattr(self, "_cached_mkt") and (now - getattr(self, "_last_mkt_resolve_ts", 0.0) < 10.0):
             return self._cached_mkt
 
         endpoint = "/markets"
@@ -568,7 +575,7 @@ class KalshiLiveScalper:
             return
         if self.trades_in_candle >= self.max_trades_per_candle:
             return
-        if time.time() - self.last_exit_ts < 8.0:
+        if time.time() - self.last_exit_ts < 4.0:
             return
         if seconds_left < 10 or seconds_left > 855:
             return
