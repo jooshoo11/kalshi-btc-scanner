@@ -264,12 +264,14 @@ async def multi_coin_production_loop():
                         cur_bid = y_bid if pos["side"] == "YES" else n_bid
                         if cur_bid <= 0.01:
                             cur_bid = pos.get("current_bid", pos["entry_price"])
+                        curr_prob = prob_yes_pct if pos["side"] == "YES" else prob_no_pct
                         closed_trade = multicoin_engine.update_position(
                             coin=coin,
                             current_bid=cur_bid,
                             seconds_left=seconds_left,
                             settle_spot=spot,
-                            strike=open_p
+                            strike=open_p,
+                            model_prob=curr_prob
                         )
                         if closed_trade:
                             icon = "🎯" if closed_trade["pnl"] >= 0 else "🛑"
@@ -330,9 +332,15 @@ async def multi_coin_production_loop():
                         roi_unrealized = ((cur_bid - pos["entry_price"]) / max(0.01, pos["entry_price"])) * 100.0
                         action_status = f"IN_POSITION_{pos['side']}"
                         action_reason = f"Holding {pos['contracts']}x {pos['side']} @ {int(pos['entry_price']*100)}¢ (Now: {int(cur_bid*100)}¢ | ROI: {roi_unrealized:+.1f}%)"
-                    elif seconds_left < 60:
+                    elif seconds_left < 90:
                         action_status = "HOLD_EXPIRE"
-                        action_reason = f"Expiration gate active ({int(seconds_left)}s < 60s cutoff)"
+                        action_reason = f"Expiration gate active ({int(seconds_left)}s < 90s cutoff)"
+                    elif seconds_left > 720:
+                        action_status = "HOLD_EARLY"
+                        action_reason = f"Early candle noise filter ({int(seconds_left)}s > 720s)"
+                    elif multicoin_engine.candle_stopped_out.get(coin) == close_time:
+                        action_status = "HOLD_STOPPED_OUT"
+                        action_reason = "Candle lockout: stopped out in this 15m candle"
                     elif prob_yes_pct >= 60.0 and edge_y >= 4.0 and 0.20 <= y_ask <= 0.80:
                         action_status = "BUY_YES"
                         action_reason = f"Conviction {prob_yes_pct:.1f}% & Edge +{edge_y:.1f}% meets criteria"

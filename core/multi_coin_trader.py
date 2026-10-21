@@ -199,12 +199,15 @@ class MultiCoinPaperEngine:
         self.max_trade_alloc_pct = 20.0     # 20% of coin's sub-equity per trade
         self.take_profit_roi_pct = 25.0     # Lock in +25% ROI
         self.stop_loss_roi_pct = 25.0       # Exit at -25% ROI
-        self.min_seconds_left = 60          # 60s expiration safety cutoff
+        self.stop_loss_max_prob_pct = 38.0  # Dual confirmation: only cut loss if model prob <= 38.0%
+        self.min_seconds_left = 90          # 90s expiration safety cutoff (avoid pin risk)
+        self.max_seconds_left = 720         # 720s (first 3 minutes noise filter: avoid entering with >12m left)
         self.min_edge_pct = 4.0             # 4.0% min model edge
         self.min_prob_pct = 60.0            # 60.0% min model conviction
 
         self.last_candle_ids: Dict[str, str] = {c: "" for c in self.coin_weights}
         self.trades_in_candle: Dict[str, int] = {c: 0 for c in self.coin_weights}
+        self.candle_stopped_out: Dict[str, str] = {c: "" for c in self.coin_weights}
         self.last_exit_ts: Dict[str, float] = {c: 0.0 for c in self.coin_weights}
 
     def _restore_from_db(self):
@@ -274,8 +277,12 @@ class MultiCoinPaperEngine:
         if coin in self.active_positions:
             return None
 
-        # Expiration safety gate (<60s)
-        if seconds_left < self.min_seconds_left or seconds_left > 855:
+        # Timing constraints: Avoid first 3 minutes of noise (>720s) and final 90s expiration trap (<90s)
+        if seconds_left < self.min_seconds_left or seconds_left > self.max_seconds_left:
+            return None
+
+        # Re-entry Lockout: Do not re-enter if coin stopped out in current candle
+        if self.candle_stopped_out.get(coin) == candle_id:
             return None
 
         # Candle trade limit
@@ -363,6 +370,7 @@ class MultiCoinPaperEngine:
             "fee_dollars": total_fee,
             "entry_timestamp": time.time(),
             "current_bid": target_price,
+            "candle_id": candle_id,
             "rationale": rationale
         }
         self.active_positions[coin] = pos_dict
@@ -376,12 +384,13 @@ class MultiCoinPaperEngine:
         seconds_left: float,
         settle_spot: float,
         strike: float,
-        current_time: Optional[float] = None
-    ):
-        """Update open position: checks +25% Take Profit, -25% Stop Loss, or Expiration."""
+        current_time: Optional[float] = None,
+        model_prob: Optional[float] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Update open position: checks +25% Take Profit, Dual-Confirmation Stop Loss, or Expiration."""
         pos = self.active_positions.get(coin)
         if not pos:
-            return
+            return None
 
         now = current_time or time.time()
         entry_p = pos["entry_price"]
@@ -402,11 +411,15 @@ class MultiCoinPaperEngine:
             pnl = gross - exit_fee - (pos["cost_dollars"] + pos["fee_dollars"])
             return self._close_position(coin, exit_price=current_bid, reason="TAKE_PROFIT", pnl=pnl, payout=gross - exit_fee, current_time=now)
 
-        # C. Stop Loss Exit (-25% ROI)
-        if roi_pct <= -self.stop_loss_roi_pct:
+        # C. Dynamic Dual-Confirmation Stop Loss (-25% ROI AND Model Probability <= 38%)
+        # Only stop out if BOTH price drawdown is severe AND quant model thesis collapsed
+        if roi_pct <= -self.stop_loss_roi_pct and (model_prob is None or model_prob <= self.stop_loss_max_prob_pct):
             exit_fee = calculate_kalshi_taker_fee(pos["contracts"], current_bid)
             gross = pos["contracts"] * current_bid
             pnl = gross - exit_fee - (pos["cost_dollars"] + pos["fee_dollars"])
+            candle_id = pos.get("candle_id", "")
+            if candle_id:
+                self.candle_stopped_out[coin] = candle_id
             return self._close_position(coin, exit_price=current_bid, reason="STOP_LOSS", pnl=pnl, payout=gross - exit_fee, current_time=now)
 
         return None
