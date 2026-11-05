@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.log
+*.pid
+*.db
+*.csv
+.DS_Store
+.env
+*.pem
+
+# Multi-asset modular exclusions
+coins/*/logs/
+coins/*/updates/
+coins/*/backtests/*.csv
+coins/*/backtests/*.parquet
+
+# Runtime engine/portfolio state (regenerated on boot)
+multi_coin_state.json
+portfolio_state.json
+settings_snapshot_baseline.json
+
+
