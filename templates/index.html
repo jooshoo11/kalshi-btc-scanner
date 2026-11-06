@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kalshi Multi-Coin Trading Dashboard</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0b0e11; color: #e4e7eb; padding: 24px; }
+        h1 { font-size: 24px; margin-bottom: 8px; letter-spacing: -0.5px; }
+        h2 { font-size: 18px; margin: 24px 0 12px; color: #9fb3c8; border-bottom: 1px solid #1f2937; padding-bottom: 6px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin: 16px 0; }
+        .card { background: #14181c; border: 1px solid #232a32; border-radius: 10px; padding: 16px; }
+        .card h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: #8a97a5; margin-bottom: 10px; }
+        .stat-row { display: flex; justify-content: space-between; margin: 6px 0; font-size: 14px; }
+        .stat-label { color: #8a97a5; }
+        .stat-value { font-family: 'SF Mono', Monaco, monospace; font-weight: 600; }
+        .stat-value.up { color: #34d399; }
+        .stat-value.down { color: #f87171; }
+        .stat-value.neutral { color: #9fb3c8; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+        .badge.ok { background: #064e3b; color: #34d399; border: 1px solid #047857; }
+        .badge.warn { background: #713f12; color: #fbbf24; border: 1px solid #a16207; }
+        .badge.halt { background: #450a0a; color: #f87171; border: 1px solid #7f1d1d; }
+        .badge.dry { background: #1e3a8a; color: #93c5fd; border: 1px solid #2563eb; }
+        .badge.live { background: #450a0a; color: #fca5a5; border: 1px solid #7f1d1d; }
+        table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+        th { text-align: left; color: #8a97a5; padding: 6px 8px; font-size: 11px; text-transform: uppercase; }
+        td { padding: 6px 8px; border-bottom: 1px solid #1f2937; }
+        tr:hover { background: #1a1f26; }
+        .mono { font-family: 'SF Mono', Monaco, monospace; }
+        .small { font-size: 11px; color: #8a97a5; }
+        #status-indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+        #status-indicator.live { background: #34d399; box-shadow: 0 0 8px #34d399; }
+        #status-indicator.stale { background: #f87171; box-shadow: 0 0 8px #f87171; }
+    </style>
+</head>
+<body>
+    <h1>
+        <span id="status-indicator" class="stale"></span>
+        Kalshi Multi-Coin Trading Dashboard
+    </h1>
+    <div class="small" id="last-update">Last update: --</div>
+
+    <h2>Portfolio</h2>
+    <div class="grid">
+        <div class="card">
+            <h3>Total Equity</h3>
+            <div class="stat-row"><span class="stat-label">Multicoin</span><span class="stat-value neutral" id="mc-equity">$0.00</span></div>
+            <div class="stat-row"><span class="stat-label">Total PnL</span><span class="stat-value neutral" id="mc-pnl">$0.00 (0.00%)</span></div>
+            <div class="stat-row"><span class="stat-label">Cash</span><span class="stat-value neutral" id="mc-cash">$0.00</span></div>
+            <div class="stat-row"><span class="stat-label">Trades</span><span class="stat-value neutral" id="mc-trades">0</span></div>
+            <div class="stat-row"><span class="stat-label">Win Rate</span><span class="stat-value neutral" id="mc-winrate">0.0%</span></div>
+        </div>
+        <div class="card">
+            <h3>Legacy Paper Bot</h3>
+            <div class="stat-row"><span class="stat-label">Equity</span><span class="stat-value neutral" id="legacy-equity">$0.00</span></div>
+            <div class="stat-row"><span class="stat-label">PnL</span><span class="stat-value neutral" id="legacy-pnl">$0.00</span></div>
+            <div class="stat-row"><span class="stat-label">Trades</span><span class="stat-value neutral" id="legacy-trades">0</span></div>
+            <div class="stat-row"><span class="stat-label">Win Rate</span><span class="stat-value neutral" id="legacy-winrate">0.0%</span></div>
+            <div class="stat-row"><span class="stat-label">Enabled</span><span class="stat-value neutral" id="legacy-enabled">false</span></div>
+        </div>
+        <div class="card">
+            <h3>Live OMS Safety</h3>
+            <div class="stat-row"><span class="stat-label">Mode</span><span class="stat-value neutral" id="oms-mode">PAPER</span></div>
+            <div class="stat-row"><span class="stat-label">Dry Run</span><span class="stat-value neutral" id="oms-dryrun">true</span></div>
+            <div class="stat-row"><span class="stat-label">Orphans</span><span class="stat-value neutral" id="oms-orphans">0</span></div>
+            <div class="stat-row"><span class="stat-label">Balance</span><span class="stat-value neutral" id="oms-balance">$0.00</span></div>
+        </div>
+        <div class="card">
+            <h3>Watchdog</h3>
+            <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value neutral" id="wd-status">--</span></div>
+            <div class="stat-row"><span class="stat-label">Delta</span><span class="stat-value neutral" id="wd-delta">--ms</span></div>
+            <div class="stat-row"><span class="stat-label">Halt Reason</span><span class="stat-value neutral" id="wd-reason">--</span></div>
+        </div>
+    </div>
+
+    <h2>Coin Matrix</h2>
+    <div class="grid" id="coin-grid">
+        <!-- populated by JS -->
+    </div>
+
+    <h2>Active Positions</h2>
+    <table id="positions-table">
+        <thead><tr><th>Coin</th><th>Ticker</th><th>Side</th><th>Entry</th><th>Current</th><th>Contracts</th><th>ROI</th><th>Reason</th></tr></thead>
+        <tbody id="positions-body"></tbody>
+    </table>
+
+    <h2>Recent Trades</h2>
+    <table id="trades-table">
+        <thead><tr><th>Time</th><th>Coin</th><th>Ticker</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Reason</th></tr></thead>
+        <tbody id="trades-body"></tbody>
+    </table>
+
+    <h2>Brain Logs</h2>
+    <div id="brain-logs" style="font-family: 'SF Mono', Monaco, monospace; font-size: 12px; background: #0f1216; padding: 12px; border-radius: 6px; height: 200px; overflow-y: auto; border: 1px solid #232a32;"></div>
+
+    <script>
+        const API_BASE = '';
+        let eventSource = null;
+
+        function fmtMoney(n) {
+            if (n == null) return '--';
+            return (n >= 0 ? '+' : '-') + '$' + Math.abs(n).toFixed(2);
+        }
+        function fmtPct(n) {
+            if (n == null) return '--';
+            return (n >= 0 ? '+' : '-') + Math.abs(n).toFixed(2) + '%';
+        }
+        function badgeFor(status) {
+            const s = (status || '').toLowerCase();
+            if (s.includes('ok') || s.includes('healthy') || s.includes('up')) return '<span class="badge ok">' + (status||'--') + '</span>';
+            if (s.includes('warn') || s.includes('dry')) return '<span class="badge warn">' + (status||'--') + '</span>';
+            if (s.includes('halt') || s.includes('live')) return '<span class="badge halt">' + (status||'--') + '</span>';
+            return '<span class="badge neutral">' + (status||'--') + '</span>';
+        }
+
+        async function fetchJson(path) {
+            try {
+                const r = await fetch(path);
+                return await r.json();
+            } catch (e) {
+                console.error(path, e);
+                return null;
+            }
+        }
+
+        function renderPortfolio(data) {
+            if (!data) return;
+            const mc = data.primary_engine?.status || {};
+            const legacy = data.legacy_engine?.status || {};
+            const oms = data.live_oms_safety || {};
+
+            document.getElementById('mc-equity').textContent = (mc.total_equity != null ? '$' + mc.total_equity.toFixed(2) : '--');
+            document.getElementById('mc-pnl').textContent = fmtMoney(mc.total_pnl) + ' (' + fmtPct(mc.total_return_pct) + ')';
+            document.getElementById('mc-cash').textContent = (mc.total_cash != null ? '$' + mc.total_cash.toFixed(2) : '--');
+            document.getElementById('mc-trades').textContent = mc.total_trades ?? 0;
+            document.getElementById('mc-winrate').textContent = (mc.overall_win_rate_pct != null ? mc.overall_win_rate_pct.toFixed(1) + '%' : '--');
+
+            document.getElementById('legacy-equity').textContent = (legacy.total_equity != null ? '$' + legacy.total_equity.toFixed(2) : '--');
+            document.getElementById('legacy-pnl').textContent = fmtMoney(legacy.total_pnl);
+            document.getElementById('legacy-trades').textContent = legacy.total_trades ?? 0;
+            document.getElementById('legacy-winrate').textContent = (legacy.win_rate_pct != null ? legacy.win_rate_pct.toFixed(1) + '%' : '--');
+            document.getElementById('legacy-enabled').textContent = legacy.enabled ?? false;
+
+            document.getElementById('oms-mode').textContent = oms.mode || 'PAPER';
+            document.getElementById('oms-dryrun').textContent = oms.dry_run ?? true;
+            document.getElementById('oms-orphans').textContent = (oms.untracked_resting_orders || []).length;
+            document.getElementById('oms-balance').textContent = (oms.balance_dollars != null ? '$' + oms.balance_dollars.toFixed(2) : '--');
+
+            const wd = oms.watchdog || {};
+            document.getElementById('wd-status').textContent = wd.status || '--';
+            document.getElementById('wd-delta').textContent = (wd.last_delta_ms != null ? wd.last_delta_ms.toFixed(1) : '--') + 'ms';
+            document.getElementById('wd-reason').textContent = wd.halt_reason || '--';
+            const el = document.getElementById('status-indicator');
+            el.className = wd.status === 'HEALTHY' ? 'live' : 'stale';
+        }
+
+        function renderCoinMatrix(data) {
+            const matrix = data.multicoin_matrix || {};
+            const grid = document.getElementById('coin-grid');
+            grid.innerHTML = '';
+            for (const [coin, m] of Object.entries(matrix)) {
+                const card = document.createElement('div');
+                card.className = 'card';
+                const pos = m.active_position || null;
+                const roi = pos ? (((m.yes_bid || m.no_bid || 0) - pos.entry_price) / Math.max(0.01, pos.entry_price) * 100).toFixed(1) : '0.0';
+                card.innerHTML = `
+                    <h3>${coin}</h3>
+                    <div class="stat-row"><span class="stat-label">Spot</span><span class="stat-value">${(m.spot||0).toFixed(2)}</span></div>
+                    <div class="stat-row"><span class="stat-label">Delta</span><span class="stat-value ${m.delta>=0?'up':'down'}">${m.delta>=0?'+':''}${m.delta.toFixed(2)}</span></div>
+                    <div class="stat-row"><span class="stat-label">Prob YES</span><span class="stat-value">${(m.prob_yes_pct||0).toFixed(1)}%</span></div>
+                    <div class="stat-row"><span class="stat-label">Edge YES</span><span class="stat-value ${(m.edge_y||0)>=0?'up':'down'}">${(m.edge_y||0)>=0?'+':''}${m.edge_y.toFixed(1)}%</span></div>
+                    <div class="stat-row"><span class="stat-label">Seconds Left</span><span class="stat-value">${m.seconds_left??0}s</span></div>
+                    <div class="stat-row"><span class="stat-label">Action</span><span class="stat-value small">${m.action||'--'}</span></div>
+                    <div class="stat-row"><span class="stat-label">Position</span><span class="stat-value">${pos? pos.side+' '+pos.contracts+'x @'+Math.round(pos.entry_price*100)+'\u00a2':'none'}</span></div>
+                    <div class="stat-row"><span class="stat-label">ROI</span><span class="stat-value ${parseFloat(roi)>=0?'up':'down'}">${roi}%</span></div>
+                `;
+                grid.appendChild(card);
+            }
+        }
+
+        function renderPositions(data) {
+            const body = document.getElementById('positions-body');
+            body.innerHTML = '';
+            const mc = data.multicoin || {};
+            const positions = mc.active_positions || {};
+            for (const [coin, p] of Object.entries(positions)) {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `<td>${coin}</td><td>${p.ticker||'--'}</td><td>${p.side||'--'}</td>
+                    <td class="mono">${(p.entry_price||0).toFixed(4)}</td>
+                    <td class="mono">${(p.current_bid||p.entry_price||0).toFixed(4)}</td>
+                    <td>${p.contracts??0}</td>
+                    <td class="mono">${(((p.current_bid||p.entry_price||0)-(p.entry_price||0))/Math.max(0.01,(p.entry_price||0))*100).toFixed(1)}%</td>
+                    <td class="small">${(p.reason||'').slice(0,40)}</td>`;
+                body.appendChild(tr);
+            }
+        }
+
+        function renderTrades(data) {
+            const body = document.getElementById('trades-body');
+            body.innerHTML = '';
+            const mc = data.multicoin || {};
+            const trades = mc.recent_trades || [];
+            for (const t of trades.slice(0, 10)) {
+                const tr = document.createElement('tr');
+                const ts = t.timestamp ? new Date(t.timestamp * 1000).toLocaleTimeString() : '--';
+                const pnl = t.pnl_dollars != null ? fmtMoney(t.pnl_dollars) : '--';
+                tr.innerHTML = `<td>${ts}</td><td>${t.coin||'--'}</td><td>${t.ticker||'--'}</td>
+                    <td>${t.side||'--'}</td>
+                    <td class="mono">${(t.entry_price||0).toFixed(4)}</td>
+                    <td class="mono">${(t.exit_price||0).toFixed(4)}</td>
+                    <td class="${(t.pnl_dollars||0)>=0?'up':'down'}">${pnl}</td>
+                    <td class="small">${(t.exit_reason||'OPEN').slice(0,30)}</td>`;
+                body.appendChild(tr);
+            }
+        }
+
+        function renderBrainLogs(data) {
+            const el = document.getElementById('brain-logs');
+            const logs = data.multicoin_brain_logs || [];
+            el.innerHTML = logs.map(l => `<div>${l.time} ${l.text}</div>`).join('');
+            el.scrollTop = el.scrollHeight;
+        }
+
+        async function tick() {
+            const data = await fetchJson('/api/stream');
+            if (!data) return;
+            document.getElementById('last-update').textContent = 'Last update: ' + new Date(data.timestamp * 1000).toLocaleTimeString();
+            renderPortfolio(data);
+            renderCoinMatrix(data);
+            renderPositions(data);
+            renderTrades(data);
+            renderBrainLogs(data);
+        }
+
+        setInterval(tick, 1000);
+        tick();
+    </script>
+</body>
+</html>

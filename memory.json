@@ -1,0 +1,231 @@
+{
+  "team_state": {
+    "active_workflow": null,
+    "workflow_context": "BTC volatility arbitrage 15min",
+    "started_at": "2026-11-06T14:31:13.904476",
+    "workflow_log": [
+      {
+        "step": 1,
+        "role": "analyst",
+        "task": "Firecrawl deep research on market microstructure & academic papers",
+        "timestamp": "2026-11-06T14:31:13.905043"
+      },
+      {
+        "step": 2,
+        "role": "rival",
+        "task": "Adversarial stress test: how would this fail in different regimes?",
+        "timestamp": "2026-11-06T14:31:13.905499"
+      },
+      {
+        "step": 3,
+        "role": "data",
+        "task": "Validate data feeds, settlement indices, latency profiles",
+        "timestamp": "2026-11-06T14:31:13.905731"
+      },
+      {
+        "step": 4,
+        "role": "analyst",
+        "task": "Backtest with historical CF Benchmarks data",
+        "timestamp": "2026-11-06T14:31:13.906184"
+      },
+      {
+        "step": 5,
+        "role": "risk",
+        "task": "Kelly sizing, drawdown limits, correlation analysis",
+        "timestamp": "2026-11-06T14:31:13.906376"
+      },
+      {
+        "step": 6,
+        "role": "coder",
+        "task": "Implement in predictors/[asset]/ with tests",
+        "timestamp": "2026-11-06T14:31:13.906573"
+      },
+      {
+        "step": 7,
+        "role": "qa",
+        "task": "Regression + concurrency tests",
+        "timestamp": "2026-11-06T14:31:13.907059"
+      }
+    ],
+    "completed_at": "2026-11-06T14:31:13.907331"
+  },
+  "role_assignments": {},
+  "checklists": {},
+  "baseline_audit": {
+    "started_at": "2026-11-06T14:31:00Z",
+    "repo_root": "/home/jooshoo/kalshi-btc-scanner-clean",
+    "head_commit": "bbdf83d",
+    "dirty_files": 30,
+    "method": "orchestrator + 5 parallel subagent workstreams (no Antigravity)",
+    "workstreams": {
+      "registry": {
+        "status": "complete (orchestrator)",
+        "findings": [
+          "39 python files, 10256 LOC total",
+          "AGENT.md and AGENTS.md are byte-identical duplicates (158 lines)",
+          "empty dirs: global_risk/, .streamlit/ (not tracked)",
+          "coins/*/backtests, logs, updates all exist but hold 0 files each",
+          "only 1 commit; 30 uncommitted changes"
+        ]
+      },
+      "baseline_vs_worktree": {
+        "status": "complete (orchestrator)",
+        "head_commit": "bbdf83d",
+        "findings": [
+          "HEAD commit bbdf83d is NOT importable: app.py imports btc_metrics, kalshi_btc_scanner, core.bot_database — none of the three exist at HEAD",
+          "Verified by git archive HEAD to /tmp and running `import app` -> ModuleNotFoundError: No module named 'btc_metrics'",
+          "25 files are untracked: all 4 predictors + tests, core/bot_database.py, btc_metrics.py, kalshi_btc_scanner.py, pytest.ini, templates/index.html, .env.example, all coins/*/__init__.py",
+          "Modified vs HEAD: app.py (+56), run_live_bot.py (+37), 4 coin configs, core/kalshi_client.py, requirements.txt",
+          "Conclusion: the only committed baseline is a broken snapshot; the working tree is the first importable state"
+        ]
+      },
+      "core_infrastructure": {
+        "status": "complete",
+        "scope": "core/{kalshi_client,live_executor,scanner_core,rti_accumulator,prediction_engine,portfolio_manager,portfolio_state,bot_database,base_predictor}.py",
+        "verdicts": {
+          "kalshi_client.py": "FAIL",
+          "live_executor.py": "PARTIAL",
+          "scanner_core.py": "FAIL",
+          "rti_accumulator.py": "PARTIAL",
+          "prediction_engine.py": "PARTIAL",
+          "portfolio_manager.py": "FAIL",
+          "portfolio_state.py": "PARTIAL",
+          "bot_database.py": "PARTIAL",
+          "base_predictor.py": "PARTIAL"
+        },
+        "sev1": [
+          "live_executor.py:1450-1456 rejected exit order booked as full fill (no order_id -> treats as FILLED)",
+          "live_executor.py:2050-2055 module-level reconcile defaults dry_run=False, cancel_resting_orders=True, no env gate",
+          "kalshi_client.py:165,485 dry_run defaults False with no KALSHI_LIVE_TRADING gate anywhere in file",
+          "live_executor.py:1606-1618 FILLED_SIMULATION rewritten to FILLED at :1154-1159 with synthesized order_id",
+          "live_executor.py:787 reads position (not position_fp) -> can mass-close live positions as SETTLED_UNKNOWN",
+          "live_executor.py:980-1152 no execution lock / no PortfolioManager; concurrent signals sweep same book",
+          "live_executor.py:2093-2099 broker passes max_price_cents into edge_threshold -> 68% required edge, every live entry aborts"
+        ],
+        "sev2": [
+          "taker crossing allows +3c (live_executor.py:1131), spec says +1c..+2c",
+          "exit paths drop cancel bool, never set blocked_by_orphans (:1478,:1513,:1579); unknown status never cancelled (:1195,:1691)",
+          "stale L2 books tradable: last_update_ts written (:167,:186) never read",
+          "portfolio_manager: cash never debited at entry (:127), payout added (:159) -> equity systematically inflated",
+          "scanner_core:208 fair_prob = mid_prob + 0.04 fabricates edge; :108-114 gates on title substrings; :8 hardcodes prod",
+          "fee model inconsistent: flat 0.5c in paper_trader + scanner_core; zero exit fee in live_executor:1385-1524; per-contract ceil overstates",
+          "RtiAccumulator is tick-weighted not 1-second-weighted (:45-49); cross-candle contamination when candle_id omitted (:39)",
+          "base_predictor accumulator never fed by any predictor -> CF Benchmarks branch unreachable"
+        ],
+        "sev3": [
+          "rti_accumulator.py:51 List[Any] with Any unimported (:16) - latent NameError pre-3.14",
+          "portfolio_state: unguarded RMW, fixed .tmp name, no fsync, corrupt state fails OPEN disabling daily-loss gate",
+          "bot_database: no WAL/busy_timeout, record_trade_close lacks AND status='OPEN' guard",
+          "kalshi_client.py:601-606 orderbook NO->YES inversion missing (live_executor does it at :384-395)",
+          "unclamped Kelly returns ~48% (prediction_engine.py:476,493)"
+        ],
+        "duplication": [
+          "252 lines (33%) of kalshi_client.py near-verbatim duplicate of live_executor (~0.92-0.95 similarity)",
+          "3 entry engines and 3 exit engines across kalshi_client + live_executor",
+          "fee function duplicated: prediction_engine.py:31-40 == multi_coin_trader.py:20-24",
+          "_NoopTracer duplicated verbatim 13 lines",
+          "DB layer duplicated: bot_database.py:39-171 vs multi_coin_trader.py:33-133",
+          "~1550 of 4818 audited lines have no production consumer; ~700 more lines of live_executor never invoked"
+        ]
+      },
+      "coin_workspaces": {
+        "status": "complete",
+        "verdicts": {
+          "BTC": "PASS with defects",
+          "ETH": "PASS with defects",
+          "SOL": "PASS with defects (disabled)",
+          "XRP": "PASS with defects (disabled)"
+        },
+        "key_findings": [
+          "All 4 configs valid strict JSON with correct series/index",
+          "Feed order correct: BTC/ETH/SOL Hyperliquid->Kraken->Coinbase; XRP Coinbase->Kraken",
+          "ETH and SOL predictors are byte-for-byte clones (structural similarity 1.0000)",
+          "evaluate_15m_scalp duplicated 4x and duplicates base_predictor.py:47-98",
+          "core/base_predictor.py:71 passes model_prob_yes= -> TypeError; base impl is dead code",
+          "spot_source sticky via getattr(...) or source: first source wins forever",
+          "spot_feeds in config stored but never read; pairs hardcoded in each predictor",
+          "vol_15m_dollar hardcoded 4x, never read from config",
+          "XRP update_technicals never fetches candle -> frozen delta",
+          "NO production code imports coins.*; all predictors are dead code",
+          "pytest.ini testpaths=core/tests hides 21 coin tests from default runs"
+        ]
+      },
+      "config_risk": {
+        "status": "running",
+        "scope": "global_risk.json, coins/*/config.json, runtime enforcement"
+      },
+      "entrypoints": {
+        "status": "complete",
+        "scope": "run_live_bot.py, paper_trader.py, app.py, kalshi_btc_scanner.py, btc_metrics.py",
+        "key_findings": [
+          "F1 CRITICAL: no live execution path exists. live_oms is never used to place/amend/sell; KALSHI_LIVE_TRADING=1 arms reconciliation+cancel only",
+          "F2 CRITICAL: floor_strike (the true settlement reference) is never read; model uses Hyperliquid perp candle open",
+          "F3 HIGH: only KXBTC15M is ever WS-subscribed (app.py:124) -> ETH always fails L2 validation, can never trade",
+          "F4 HIGH: run_live_bot.py loads global_risk + coin configs then only prints them; app.py rebuilds from hardcoded values",
+          "F5 HIGH: /api/stream is SSE but template calls .json() -> page never renders and opens a new hung stream every second",
+          "F6 HIGH: cached market can be used up to 10s after close_time; seconds_left from epoch grid not close_time",
+          "F7 MEDIUM: model is zero-drift Gaussian, not the documented drift-diffusion-jump engine",
+          "F8 MEDIUM: expiry positions booked SETTLED_ESTIMATED but reconciler only runs on kalshi_live_demo.db, never multi_coin_paper.db",
+          "F9 MEDIUM: pos current_bid never refreshed -> dashboard ROI always 0%",
+          "F11 MEDIUM: reconciliation is a no-op in default (dry_run) config, yet prints 'in sync'",
+          "Startup spawns 8 tasks; ~224 HTTP req/min + ~78 MB/min of /events JSON for a dashboard-only field",
+          "Three Kalshi environments polled simultaneously: scanner_core=prod, kalshi_btc_scanner=demo hardcoded, app.py=env"
+        ],
+        "verified_by_orchestrator": [
+          "no place_order/execute_trade call sites outside core/kalshi_client.py definitions and LiveKalshiBroker",
+          "grep floor_strike -> only a parameter name in prediction_engine.py:95,102; never read from market dict",
+          "grep subscribe_ticker -> only app.py:124 (BTC fast loop)",
+          "app.py:825 media_type=text/event-stream; templates/index.html:121 .json(), :227 /api/stream, :237 setInterval 1000",
+          "current_bid written only at entry (multi_coin_trader.py:793) and restore (:429,:477), never on tick"
+        ]
+      },
+      "tests": {
+        "status": "complete",
+        "scope": "core/tests + coins/*/tests execution and coverage gaps",
+        "executed": {
+          "core/tests": "19 passed",
+          "coins/btc/tests": "7 passed",
+          "coins/eth/tests": "5 passed",
+          "coins/sol/tests": "5 passed",
+          "coins/xrp/tests": "4 passed",
+          "bare_pytest": "19 collected - silently skips all 21 coin tests",
+          "total": "40/40 green"
+        },
+        "critical_findings": [
+          "test_brti_accumulator.py and test_live_oms.py contain ZERO test functions (script harnesses); never collected",
+          "test_brti_accumulator.py FAILS when run manually (variance ratio 0.268 vs assert <0.20) - stale vs linear variance model",
+          "test_portfolio_concurrency.py proves nothing: no await between lock acquire and release, so gather is sequential; deleting the lock leaves both tests green",
+          "NO end-to-end integration test: app.py, multi_coin_trader.py, portfolio_state.py, scanner_core.py, kalshi_btc_scanner.py, paper_trader.py, run_live_bot.py are never imported by any test",
+          "test_kalshi_client_rest asserts hardcoded stub constants; _request() never executed by any test",
+          "coin test_initialization_from_config is constant-equals-constant; vol_15m_dollar is hardcoded, config is not read",
+          "test_btc_metrics liq/OI test asserts default values on an unpopulated object (tautological)",
+          "4 of 19 core tests target kalshi_client.py, a module its own docstring calls deprecated; live_executor.py has zero collected coverage",
+          "tests are cwd-dependent (relative config paths); from /tmp -> 7 errors",
+          "kalshi_scanner.pth on sys.path shadows this repo when scripts run by path (fee test returned 0.09 instead of 0.18)"
+        ],
+        "warnings": [
+          "asyncio_default_fixture_loop_scope unset (pytest-asyncio deprecation)",
+          "CallSpec2 renamed -> hard break at pytest 10; requirements has no upper bound",
+          "no filterwarnings in pytest.ini"
+        ]
+      },
+      "repo_hygiene": {
+        "status": "complete (orchestrator)",
+        "findings": [
+          "All 3 SQLite DBs exist and are EMPTY (0 trades, 0 snapshots, 0 metrics)",
+          "3 separate SQLite writers: bot_database.py, multi_coin_trader.py, app.py:1069",
+          "Schema drift: multi_coin_paper.db trades has 'coin' column; AuditDatabase schema does not",
+          "Framework is Starlette, not FastAPI as AGENTS.md states (app.py:8-12)",
+          "requirements.txt lists unused deps: scipy, jinja2, websockets, requests",
+          "No .env present; no secrets tracked; .gitignore covers .env/*.pem/*.db"
+        ]
+      }
+    },
+    "live_verification": [
+      "Kalshi prod + demo market endpoints both publicly readable",
+      "KXBTC15M floor_strike IS the settlement reference (60s BRTI avg at candle open)",
+      "app.py uses Hyperliquid 15m candle open instead -> delta error 78.5 USD observed",
+      "Both BTC/ETH 15m markets had 1 open market each at audit time"
+    ]
+  }
+}

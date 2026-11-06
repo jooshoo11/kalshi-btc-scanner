@@ -18,8 +18,25 @@ Usage:
 """
 import argparse
 import asyncio
+import json
 import os
 import signal
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parent
+
+
+def load_json(path: Path, default=None):
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print(f"[run_live_bot] WARNING: config not found at {path}, using defaults")
+        return default or {}
+    except json.JSONDecodeError as e:
+        print(f"[run_live_bot] ERROR: invalid JSON in {path}: {e}")
+        return default or {}
 
 
 def main():
@@ -28,11 +45,29 @@ def main():
     args = parser.parse_args()
 
     from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+    load_dotenv(os.path.join(REPO_ROOT, ".env"))
+
+    # Load global risk config
+    global_risk = load_json(REPO_ROOT / "global_risk.json")
+    active_assets = global_risk.get("active_assets", ["BTC", "ETH"])
+
+    # Load per-coin configs and build enabled asset list
+    coin_configs = {}
+    for asset in active_assets:
+        cfg_path = REPO_ROOT / "coins" / asset.lower() / "config.json"
+        cfg = load_json(cfg_path)
+        if cfg.get("enabled", False):
+            coin_configs[asset] = cfg
+        else:
+            print(f"[run_live_bot] {asset} is disabled in config, skipping")
 
     live_armed = os.environ.get("KALSHI_LIVE_TRADING", "0").strip().lower() in ("1", "true", "yes")
     print(f"[run_live_bot] KALSHI_LIVE_TRADING={'1' if live_armed else 'unset'} -> "
           f"{'LIVE OMS ARMED' if live_armed else 'PAPER mode (dry_run — no real orders will be sent)'}")
+    print(f"[run_live_bot] Active assets: {list(coin_configs.keys())}")
+    print(f"[run_live_bot] Global risk: max_portfolio_allocation={global_risk.get('max_portfolio_allocation_pct')}%, "
+          f"max_single_asset={global_risk.get('max_single_asset_allocation_pct')}%, "
+          f"max_concurrent={global_risk.get('max_concurrent_positions')}")
 
     if args.serve:
         import uvicorn

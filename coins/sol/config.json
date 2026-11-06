@@ -3,8 +3,9 @@
   "symbol": "SOL/USD",
   "kalshi_series": "KXSOL15M",
   "cf_index": "SOLUSD_RTI",
-  "enabled": false,  # DISABLED per creator request — pinned weight $0, immune to rebalance
+  "enabled": false,
   "max_allocation_pct": 20.0,
+  "vol_15m_dollar": 2.0,
   "min_seconds_left_for_entry": 60,
   "min_edge_pct": 4.0,
   "min_model_prob": 60.0,

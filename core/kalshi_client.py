@@ -2,6 +2,17 @@
 """
 kalshi_client.py — Asynchronous Kalshi V2 Client & WebSocket OMS for Demo Execution.
 
+DEPRECATED: This module is a legacy duplicate of core/live_executor.py.
+New code should import from core.live_executor instead:
+  - KalshiAuth          -> core.live_executor.KalshiAuth
+  - L2OrderBook         -> core.live_executor.L2OrderBook
+  - StaleTickWatchdog   -> core.live_executor.StaleTickWatchdog
+  - KalshiClient        -> core.live_executor.KalshiOrderManagementSystem
+  - AsyncOrderManager   -> core.live_executor.KalshiWebSocketClient
+
+This module is retained only for backward compatibility with existing tests.
+It will be removed in a future release.
+
 Features:
 - Configured specifically for Kalshi Demo Environment:
   - REST API: https://demo-api.kalshi.co/trade-api/v2

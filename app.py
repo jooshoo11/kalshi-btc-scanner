@@ -259,11 +259,42 @@ async def multi_coin_production_loop():
     and dynamically rebalances performance-based capital weights ($100 initial baseline).
     """
     print("Starting Multi-Coin Production Paper Trading Loop (BTC, ETH, SOL, XRP)...")
+    # Load per-coin configs for series and vol_15m defaults
+    import json as _json
+    from pathlib import Path as _Path
+    _repo_root = _Path(__file__).resolve().parent
+    # Per-asset 15m dollar volatility fallback (USD move per 15m, 1 sigma).
+    # Must NOT be derived from allocation percentages — that collapses BTC's vol
+    # from ~95 to ~10 and silently makes every model probability 0% or 100%.
+    _default_vol_15m = {"BTC": 95.0, "ETH": 6.5, "SOL": 2.0, "XRP": 0.05}
+    _coin_configs_loaded = {}
+    for _asset in ("BTC", "ETH", "SOL", "XRP"):
+        _cfg_path = _repo_root / "coins" / _asset.lower() / "config.json"
+        try:
+            with open(_cfg_path, "r") as _f:
+                _cfg = _json.load(_f)
+            _coin_configs_loaded[_asset] = {
+                "series": _cfg.get("kalshi_series", f"KX{_asset}15M"),
+                "vol_15m": float(_cfg.get("vol_15m_dollar", _default_vol_15m.get(_asset, 1.0))),
+                "enabled": _cfg.get("enabled", False),
+            }
+        except FileNotFoundError:
+            _coin_configs_loaded[_asset] = {
+                "series": f"KX{_asset}15M",
+                "vol_15m": _default_vol_15m.get(_asset, 1.0),
+                "enabled": False,
+            }
+
     coin_configs = {
-        "BTC": {"series": "KXBTC15M", "vol_15m": 95.0},
-        "ETH": {"series": "KXETH15M", "vol_15m": 6.5},
-        # SOL and XRP disabled per user request
+        k: v for k, v in _coin_configs_loaded.items() if v["enabled"]
     }
+    if not coin_configs:
+        # Fallback to BTC/ETH if nothing is enabled
+        coin_configs = {
+            "BTC": {"series": "KXBTC15M", "vol_15m": 95.0, "enabled": True},
+            "ETH": {"series": "KXETH15M", "vol_15m": 6.5, "enabled": True},
+        }
+        print("[MultiCoinProd] No coins enabled in config — falling back to BTC/ETH")
 
     candle_opens: Dict[str, float] = {}
     last_candle_fetch = 0.0
@@ -295,6 +326,8 @@ async def multi_coin_production_loop():
                         val = mids.get(coin)
                         if val is not None:
                             spot_prices[coin] = float(val)
+                else:
+                    print(f"[MultiCoinProd] Hyperliquid allMids returned {hl_resp.status_code}")
 
                 # 2. Refresh candle opens every 20s
                 if now - last_candle_fetch > 20.0 or not candle_opens:
@@ -313,23 +346,30 @@ async def multi_coin_production_loop():
                                 candles = c_resp.json()
                                 if candles:
                                     candle_opens[coin] = float(candles[-1].get("o", spot_prices.get(coin, 0.0)))
-                        except Exception:
-                            pass
+                            else:
+                                print(f"[MultiCoinProd] Candle fetch for {coin} returned {c_resp.status_code}")
+                        except Exception as e:
+                            print(f"[MultiCoinProd] Candle fetch error for {coin}: {e}")
                     last_candle_fetch = now
 
                 # 3. Refresh active production markets every 10s
                 if now - last_mkt_fetch > 10.0 or not cached_markets:
                     for coin, cfg in coin_configs.items():
                         try:
-                            m_resp = await client.get(f"{KALSHI_PROD_REST_URL}/markets?series_ticker={cfg['series']}&status=open")
+                            m_resp = await client.get(f"{KALSHI_REST_URL}/markets?series_ticker={cfg['series']}&status=open")
                             if m_resp.status_code == 200:
                                 mkts = m_resp.json().get("markets", [])
                                 if mkts:
                                     now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                                     active = [m for m in mkts if (m.get("close_time") or "") >= now_iso]
                                     cached_markets[coin] = active[0] if active else mkts[0]
-                        except Exception:
-                            pass
+                                    print(f"[MultiCoinProd] Found market for {coin}: {cached_markets[coin].get('ticker', '?')}")
+                                else:
+                                    print(f"[MultiCoinProd] No markets for {coin} series {cfg['series']}")
+                            else:
+                                print(f"[MultiCoinProd] Market fetch for {coin} returned {m_resp.status_code}")
+                        except Exception as e:
+                            print(f"[MultiCoinProd] Market fetch error for {coin}: {e}")
                     last_mkt_fetch = now
 
                 # 4. Evaluate each coin
