@@ -4,6 +4,7 @@ import json
 import time
 import math
 import sqlite3
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse, HTMLResponse, StreamingResponse, Response
@@ -48,6 +49,75 @@ from dotenv import load_dotenv
 
 # Load credentials from .env
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+# Dashboard display cap must match the engine's enforced entry-price cap
+# (MultiCoinPaperEngine.max_entry_price defaults to 0.68). The 0.20-0.80
+# prefilter in the loop is only a coarse allow-band; the UI must never show
+# "BUY" for a setup the engine's 0.68 gate will reject.
+MAX_ENTRY_PRICE = 0.68
+
+# Coins that must stay disabled regardless of config/global_risk contents.
+HARD_DISABLED_ASSETS = frozenset({"SOL", "XRP"})
+
+
+def _load_active_assets() -> List[str]:
+    """Load global_risk.json's active_assets allow-list at import time."""
+    path = os.path.join(os.path.dirname(__file__), "global_risk.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        assets = [str(a).upper() for a in cfg.get("active_assets", []) if str(a).strip()]
+        if assets:
+            return assets
+    except Exception as e:
+        logger.warning(f"[Config] Could not load global_risk.json active_assets: {e}")
+    # Fail-safe default: keep the historically enabled majors only.
+    return ["BTC", "ETH"]
+
+
+ACTIVE_ASSETS: List[str] = _load_active_assets()
+
+
+def _parse_iso_close_time(value: Any) -> Optional[float]:
+    """Parse a Kalshi ISO8601 close_time into a UTC epoch timestamp, or None."""
+    if not value:
+        return None
+    try:
+        raw = str(value).strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _authoritative_open(
+    mkt: Optional[Dict[str, Any]],
+    candle_open: float,
+    spot: float,
+) -> float:
+    """
+    Return Kalshi's authoritative settlement reference for the 15m market.
+
+    Kalshi publishes `floor_strike` on each market. It is the CF Benchmarks
+    60-second arithmetic-mean index (BRTI / ETHUSD_RTI / SOLUSD_RTI / XRPUSD_RTI)
+    at the candle open -- exactly the value `rules_primary` settles against.
+    The Hyperliquid 15m candle open is only a proxy and can differ from that
+    index, which would bias both `delta` and the `strike` passed to
+    update_position(). Only fall back to the candle open (then spot) when
+    floor_strike is missing or non-positive.
+    """
+    try:
+        floor_strike = float((mkt or {}).get("floor_strike") or 0.0)
+        if floor_strike > 0:
+            return floor_strike
+    except (TypeError, ValueError):
+        pass
+    candle = float(candle_open or 0.0)
+    return candle if candle > 0 else spot
 
 # Environment-aware Kalshi endpoints: prod when KALSHI_ENVIRONMENT=prod, else demo.
 # FIX: WS/REST were hardcoded to demo URLs, which 401 when .env holds a prod key.
@@ -285,22 +355,43 @@ async def multi_coin_production_loop():
                 "enabled": False,
             }
 
+    # global_risk.json active_assets is an authoritative allow-list. SOL/XRP stay
+    # disabled even if a config/global_risk entry accidentally enables them.
     coin_configs = {
-        k: v for k, v in _coin_configs_loaded.items() if v["enabled"]
+        k: v for k, v in _coin_configs_loaded.items()
+        if v["enabled"] and k.upper() in ACTIVE_ASSETS and k.upper() not in HARD_DISABLED_ASSETS
     }
     if not coin_configs:
-        # Fallback to BTC/ETH if nothing is enabled
-        coin_configs = {
-            "BTC": {"series": "KXBTC15M", "vol_15m": 95.0, "enabled": True},
-            "ETH": {"series": "KXETH15M", "vol_15m": 6.5, "enabled": True},
-        }
-        print("[MultiCoinProd] No coins enabled in config — falling back to BTC/ETH")
+        # Only fall back when config enablement produced nothing, and still respect
+        # the active_assets gate (never re-enable SOL/XRP here).
+        _fallback_assets = [
+            a for a in ("BTC", "ETH")
+            if a in ACTIVE_ASSETS and a not in HARD_DISABLED_ASSETS
+        ]
+        if _fallback_assets:
+            coin_configs = {
+                a: {"series": f"KX{a}15M", "vol_15m": _default_vol_15m[a], "enabled": True}
+                for a in _fallback_assets
+            }
+            print(f"[MultiCoinProd] No enabled coin configs — falling back to {_fallback_assets}")
+        else:
+            print("[MultiCoinProd] No active assets after global_risk gating — loop will idle")
+    print(
+        f"[MultiCoinProd] Effective assets: {sorted(coin_configs)} "
+        f"(global_risk.active_assets={ACTIVE_ASSETS}, hard-disabled={sorted(HARD_DISABLED_ASSETS)})"
+    )
+
+    # Same 0.68 cap the engine enforces; used by the dashboard matrix so the UI
+    # never advertises a BUY that evaluate_entry will reject.
+    max_entry_price = float(getattr(multicoin_engine, "max_entry_price", MAX_ENTRY_PRICE))
+    _equity_warning_logged = False
 
     candle_opens: Dict[str, float] = {}
     last_candle_fetch = 0.0
     cached_markets: Dict[str, Dict[str, Any]] = {}
     last_mkt_fetch = 0.0
     last_heartbeat = 0.0
+    _ws_subscribed_tickers: set = set()
 
     async with httpx.AsyncClient(timeout=4.0) as client:
         while True:
@@ -315,7 +406,27 @@ async def multi_coin_production_loop():
                 now_ms = int(now * 1000)
                 candle_15m_start = (now_ms // (15 * 60 * 1000)) * (15 * 60 * 1000)
                 candle_15m_end = candle_15m_start + (15 * 60 * 1000)
-                seconds_left = max(1.0, float((candle_15m_end - now_ms) / 1000.0))
+                # Fallback only: the per-coin evaluation below prefers the market's
+                # own close_time, which is the authoritative expiry (the wall-clock
+                # epoch grid can drift from Kalshi's actual close).
+                grid_seconds_left = max(0.0, float((candle_15m_end - now_ms) / 1000.0))
+                seconds_left = grid_seconds_left
+
+                # Equity sanity (one-time): the paper engine keeps its $100
+                # experiment baseline. Never silently substitute exchange equity;
+                # surface the difference once so ROI comparisons are not misread.
+                if not _equity_warning_logged and live_execution_mode == "PAPER" and live_auth.is_configured:
+                    _exchange_equity = float(live_demo_balance.get("balance_dollars") or 0.0)
+                    _paper_equity = float(getattr(multicoin_engine, "initial_balance", 0.0))
+                    if _exchange_equity > 0 and abs(_exchange_equity - _paper_equity) >= 0.01:
+                        _equity_warning_logged = True
+                        logger.warning(
+                            "[MultiCoinProd] EQUITY MISMATCH: paper engine baseline is $%.2f "
+                            "but exchange balance is $%.2f. Paper equity is intentionally "
+                            "NOT reset or replaced — paper PnL/ROI remains measured on the "
+                            "$%.2f experiment baseline.",
+                            _paper_equity, _exchange_equity, _paper_equity,
+                        )
 
                 # 1. Refresh spot prices from Hyperliquid
                 hl_resp = await client.post("https://api.hyperliquid.xyz/info", json={"type": "allMids"})
@@ -363,7 +474,16 @@ async def multi_coin_production_loop():
                                     now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                                     active = [m for m in mkts if (m.get("close_time") or "") >= now_iso]
                                     cached_markets[coin] = active[0] if active else mkts[0]
-                                    print(f"[MultiCoinProd] Found market for {coin}: {cached_markets[coin].get('ticker', '?')}")
+                                    _mkt_ticker = cached_markets[coin].get("ticker", "")
+                                    print(f"[MultiCoinProd] Found market for {coin}: {_mkt_ticker or '?'}")
+                                    # Subscribe every enabled coin's ticker (L2/quote
+                                    # streaming), not just BTC. Track locally so a ticker
+                                    # is subscribed once even if the cache refreshes.
+                                    if _mkt_ticker and _mkt_ticker not in _ws_subscribed_tickers:
+                                        _ws_subscribed_tickers.add(_mkt_ticker)
+                                        if _mkt_ticker not in live_ws.subscribed_tickers:
+                                            asyncio.create_task(live_ws.subscribe_ticker(_mkt_ticker))
+                                            print(f"[MultiCoinProd] Subscribed WebSocket ticker {_mkt_ticker} ({coin})")
                                 else:
                                     print(f"[MultiCoinProd] No markets for {coin} series {cfg['series']}")
                             else:
@@ -375,13 +495,39 @@ async def multi_coin_production_loop():
                 # 4. Evaluate each coin
                 for coin, cfg in coin_configs.items():
                     spot = spot_prices.get(coin, 0.0)
-                    open_p = candle_opens.get(coin, spot)
                     mkt = cached_markets.get(coin)
                     if not spot or not mkt:
                         continue
 
                     ticker = mkt.get("ticker", "")
                     close_time = mkt.get("close_time", "")
+                    close_ts = _parse_iso_close_time(close_time)
+
+                    # Expired-market guard: markets are cached for 10s and can go
+                    # stale at the candle boundary. Never evaluate entries or exits
+                    # against an already-expired market.
+                    if close_ts is not None and close_ts <= now:
+                        print(
+                            f"[MultiCoinProd] Skipping {coin}: market expired "
+                            f"({ticker} close_time {close_time} <= now)"
+                        )
+                        continue
+
+                    # Expiry comes from the market's own close_time, not the
+                    # wall-clock epoch grid. Fall back to the grid only when
+                    # close_time is missing/unparseable; clamp at zero.
+                    if close_ts is not None:
+                        seconds_left = max(0.0, close_ts - now)
+                    else:
+                        seconds_left = max(0.0, grid_seconds_left)
+
+                    # Settlement reference: Kalshi's floor_strike is the CF
+                    # Benchmarks 60-second arithmetic-mean index at the candle open
+                    # (confirmed by rules_primary), so it is authoritative for both
+                    # delta and the strike passed to update_position(). Hyperliquid's
+                    # candle open is only a proxy and would bias settlement PnL.
+                    open_p = _authoritative_open(mkt, candle_opens.get(coin, 0.0), spot)
+
                     y_ask = float(mkt.get("yes_ask_dollars") or 0.0)
                     y_bid = float(mkt.get("yes_bid_dollars") or 0.0)
                     n_ask = float(mkt.get("no_ask_dollars") or 0.0)
@@ -408,6 +554,9 @@ async def multi_coin_production_loop():
                         cur_bid = y_bid if pos["side"] == "YES" else n_bid
                         if cur_bid <= 0.01:
                             cur_bid = pos.get("current_bid", pos["entry_price"])
+                        # Persist the freshly computed bid for the dashboard's live
+                        # ROI display. Engine PnL/exit math below is unchanged.
+                        pos["current_bid"] = cur_bid
                         curr_prob = prob_yes_pct if pos["side"] == "YES" else prob_no_pct
                         closed_trade = multicoin_engine.update_position(
                             coin=coin,
@@ -485,10 +634,13 @@ async def multi_coin_production_loop():
                     elif multicoin_engine.candle_stopped_out.get(coin) == close_time:
                         action_status = "HOLD_STOPPED_OUT"
                         action_reason = "Candle lockout: stopped out in this 15m candle"
-                    elif prob_yes_pct >= 60.0 and edge_y >= 4.0 and 0.20 <= y_ask <= 0.68:
+                    # Displayed BUY uses the engine's actual entry-price cap
+                    # (0.68 today), not the broader 0.20-0.80 prefilter, so the UI
+                    # never advertises a setup evaluate_entry will reject.
+                    elif prob_yes_pct >= 60.0 and edge_y >= 4.0 and 0.20 <= y_ask <= max_entry_price:
                         action_status = "BUY_YES"
                         action_reason = f"Conviction {prob_yes_pct:.1f}% & Edge +{edge_y:.1f}% meets criteria"
-                    elif prob_no_pct >= 60.0 and edge_n >= 4.0 and 0.20 <= n_ask <= 0.68:
+                    elif prob_no_pct >= 60.0 and edge_n >= 4.0 and 0.20 <= n_ask <= max_entry_price:
                         action_status = "BUY_NO"
                         action_reason = f"Conviction {prob_no_pct:.1f}% & Edge +{edge_n:.1f}% meets criteria"
                     else:
@@ -497,8 +649,8 @@ async def multi_coin_production_loop():
                         best_ask = y_ask if prob_yes_pct >= prob_no_pct else n_ask
                         if best_p < 60.0:
                             action_reason = f"Low Conviction ({best_p:.1f}% < 60%)"
-                        elif best_ask > 0.68:
-                            action_reason = f"Price above 68¢ cap ({int(best_ask*100)}¢ > 68¢)"
+                        elif best_ask > max_entry_price:
+                            action_reason = f"Price above {int(round(max_entry_price*100))}¢ cap ({int(best_ask*100)}¢ > {int(round(max_entry_price*100))}¢)"
                         elif best_ask < 0.20:
                             action_reason = f"Price below 20¢ floor ({int(best_ask*100)}¢ < 20¢)"
                         else:
@@ -533,14 +685,27 @@ async def multi_coin_production_loop():
                 # Periodic brain scan log
                 if now - last_heartbeat > 15.0:
                     last_heartbeat = now
-                    summary = " | ".join([f"{c}: d={spot_prices.get(c,0)-candle_opens.get(c,0):+.2f}" for c in coin_configs])
+                    # Log the same authoritative reference/expiry the evaluator uses.
+                    _ref_deltas = {
+                        c: spot_prices.get(c, 0.0) - _authoritative_open(
+                            cached_markets.get(c), candle_opens.get(c, 0.0), spot_prices.get(c, 0.0)
+                        )
+                        for c in coin_configs
+                    }
+                    _hb_seconds_left = grid_seconds_left
+                    for _c in coin_configs:
+                        _ts = _parse_iso_close_time((cached_markets.get(_c) or {}).get("close_time"))
+                        if _ts is not None:
+                            _hb_seconds_left = max(0.0, _ts - now)
+                            break
+                    summary = " | ".join([f"{c}: d={_ref_deltas.get(c, 0.0):+.2f}" for c in coin_configs])
                     mkts_str = ", ".join([f"{c}:{cached_markets.get(c, {}).get('ticker', 'none')}" for c in coin_configs])
                     print(f"[MultiCoinProd] Heartbeat | {summary} | Markets: [{mkts_str}] | Active: {list(multicoin_engine.active_positions.keys())}")
-                    deltas_txt = " | ".join([f"{c}: {spot_prices.get(c,0)-candle_opens.get(c,0):+.2f}" for c in coin_configs])
+                    deltas_txt = " | ".join([f"{c}: {_ref_deltas.get(c, 0.0):+.2f}" for c in coin_configs])
                     multicoin_brain_logs.append({
                         "time": time.strftime("%H:%M:%S", time.localtime(now)),
                         "type": "SCAN",
-                        "text": f"Scanned {len(coin_configs)} coins ({int(seconds_left)}s left) | {deltas_txt} | Equity: ${multicoin_engine.total_equity:.2f}"
+                        "text": f"Scanned {len(coin_configs)} coins ({int(_hb_seconds_left)}s left) | {deltas_txt} | Equity: ${multicoin_engine.total_equity:.2f}"
                     })
                     if len(multicoin_brain_logs) > 30:
                         multicoin_brain_logs.pop(0)

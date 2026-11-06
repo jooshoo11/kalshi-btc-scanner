@@ -83,6 +83,11 @@ class PortfolioManager:
         Prevents simultaneous signals from BTC and SOL from double-spending available margin.
         """
         async with self._lock:
+            # Yield so concurrent coroutines genuinely contend for the lock
+            # (without this, asyncio.gather serializes trivially and the lock
+            # is never actually tested under simultaneous signals).
+            await asyncio.sleep(0)
+
             alloc_pct = max_allocation_pct or self.max_single_trade_pct
 
             # 1. Concurrency limit check

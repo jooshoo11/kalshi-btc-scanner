@@ -12,66 +12,81 @@
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin: 16px 0; }
         .card { background: #14181c; border: 1px solid #232a32; border-radius: 10px; padding: 16px; }
         .card h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: #8a97a5; margin-bottom: 10px; }
-        .stat-row { display: flex; justify-content: space-between; margin: 6px 0; font-size: 14px; }
+        .stat-row { display: flex; justify-content: space-between; gap: 8px; margin: 6px 0; font-size: 14px; }
         .stat-label { color: #8a97a5; }
-        .stat-value { font-family: 'SF Mono', Monaco, monospace; font-weight: 600; }
+        .stat-value { font-family: 'SF Mono', Monaco, monospace; font-weight: 600; text-align: right; }
         .stat-value.up { color: #34d399; }
         .stat-value.down { color: #f87171; }
         .stat-value.neutral { color: #9fb3c8; }
+        .stat-value.dim { color: #6b7785; font-weight: 400; }
         .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
         .badge.ok { background: #064e3b; color: #34d399; border: 1px solid #047857; }
         .badge.warn { background: #713f12; color: #fbbf24; border: 1px solid #a16207; }
         .badge.halt { background: #450a0a; color: #f87171; border: 1px solid #7f1d1d; }
         .badge.dry { background: #1e3a8a; color: #93c5fd; border: 1px solid #2563eb; }
         .badge.live { background: #450a0a; color: #fca5a5; border: 1px solid #7f1d1d; }
+        .badge.neutral { background: #1f2937; color: #9fb3c8; border: 1px solid #374151; }
         table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
         th { text-align: left; color: #8a97a5; padding: 6px 8px; font-size: 11px; text-transform: uppercase; }
-        td { padding: 6px 8px; border-bottom: 1px solid #1f2937; }
+        td { padding: 6px 8px; border-bottom: 1px solid #1f2937; vertical-align: top; }
         tr:hover { background: #1a1f26; }
         .mono { font-family: 'SF Mono', Monaco, monospace; }
         .small { font-size: 11px; color: #8a97a5; }
-        #status-indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+        .empty { color: #6b7785; font-style: italic; }
+        #status-indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
         #status-indicator.live { background: #34d399; box-shadow: 0 0 8px #34d399; }
-        #status-indicator.stale { background: #f87171; box-shadow: 0 0 8px #f87171; }
+        #status-indicator.connecting { background: #fbbf24; box-shadow: 0 0 8px #fbbf24; }
+        #status-indicator.stale { background: #fbbf24; box-shadow: 0 0 8px #fbbf24; }
+        #status-indicator.down { background: #f87171; box-shadow: 0 0 8px #f87171; }
+        #conn-state { font-size: 12px; font-weight: 700; letter-spacing: 1px; vertical-align: middle; }
+        #conn-state.live { color: #34d399; }
+        #conn-state.connecting, #conn-state.stale { color: #fbbf24; }
+        #conn-state.down { color: #f87171; }
+        #banner { display: none; margin: 12px 0 0; padding: 10px 14px; border-radius: 8px; background: #450a0a; border: 1px solid #7f1d1d; color: #fca5a5; font-size: 13px; }
+        #banner.show { display: block; }
     </style>
 </head>
 <body>
     <h1>
-        <span id="status-indicator" class="stale"></span>
+        <span id="status-indicator" class="connecting"></span>
         Kalshi Multi-Coin Trading Dashboard
+        <span id="conn-state" class="connecting">CONNECTING</span>
     </h1>
     <div class="small" id="last-update">Last update: --</div>
+    <div id="banner">Disconnected from the live stream. Values below are stale and will resume automatically when the connection is restored.</div>
 
     <h2>Portfolio</h2>
     <div class="grid">
         <div class="card">
-            <h3>Total Equity</h3>
-            <div class="stat-row"><span class="stat-label">Multicoin</span><span class="stat-value neutral" id="mc-equity">$0.00</span></div>
-            <div class="stat-row"><span class="stat-label">Total PnL</span><span class="stat-value neutral" id="mc-pnl">$0.00 (0.00%)</span></div>
-            <div class="stat-row"><span class="stat-label">Cash</span><span class="stat-value neutral" id="mc-cash">$0.00</span></div>
-            <div class="stat-row"><span class="stat-label">Trades</span><span class="stat-value neutral" id="mc-trades">0</span></div>
-            <div class="stat-row"><span class="stat-label">Win Rate</span><span class="stat-value neutral" id="mc-winrate">0.0%</span></div>
+            <h3>Multi-Coin Engine</h3>
+            <div class="stat-row"><span class="stat-label">Equity</span><span class="stat-value neutral" id="mc-equity">--</span></div>
+            <div class="stat-row"><span class="stat-label">Total PnL</span><span class="stat-value neutral" id="mc-pnl">--</span></div>
+            <div class="stat-row"><span class="stat-label">Cash</span><span class="stat-value neutral" id="mc-cash">--</span></div>
+            <div class="stat-row"><span class="stat-label">Trades</span><span class="stat-value neutral" id="mc-trades">--</span></div>
+            <div class="stat-row"><span class="stat-label">Win Rate</span><span class="stat-value neutral" id="mc-winrate">--</span></div>
         </div>
         <div class="card">
             <h3>Legacy Paper Bot</h3>
-            <div class="stat-row"><span class="stat-label">Equity</span><span class="stat-value neutral" id="legacy-equity">$0.00</span></div>
-            <div class="stat-row"><span class="stat-label">PnL</span><span class="stat-value neutral" id="legacy-pnl">$0.00</span></div>
-            <div class="stat-row"><span class="stat-label">Trades</span><span class="stat-value neutral" id="legacy-trades">0</span></div>
-            <div class="stat-row"><span class="stat-label">Win Rate</span><span class="stat-value neutral" id="legacy-winrate">0.0%</span></div>
-            <div class="stat-row"><span class="stat-label">Enabled</span><span class="stat-value neutral" id="legacy-enabled">false</span></div>
+            <div class="stat-row"><span class="stat-label">Equity</span><span class="stat-value neutral" id="legacy-equity">--</span></div>
+            <div class="stat-row"><span class="stat-label">PnL</span><span class="stat-value neutral" id="legacy-pnl">--</span></div>
+            <div class="stat-row"><span class="stat-label">Trades</span><span class="stat-value neutral" id="legacy-trades">--</span></div>
+            <div class="stat-row"><span class="stat-label">Win Rate</span><span class="stat-value neutral" id="legacy-winrate">--</span></div>
+            <div class="stat-row"><span class="stat-label">Enabled</span><span class="stat-value neutral" id="legacy-enabled">--</span></div>
         </div>
         <div class="card">
             <h3>Live OMS Safety</h3>
-            <div class="stat-row"><span class="stat-label">Mode</span><span class="stat-value neutral" id="oms-mode">PAPER</span></div>
-            <div class="stat-row"><span class="stat-label">Dry Run</span><span class="stat-value neutral" id="oms-dryrun">true</span></div>
-            <div class="stat-row"><span class="stat-label">Orphans</span><span class="stat-value neutral" id="oms-orphans">0</span></div>
-            <div class="stat-row"><span class="stat-label">Balance</span><span class="stat-value neutral" id="oms-balance">$0.00</span></div>
+            <div class="stat-row"><span class="stat-label">Mode</span><span class="stat-value neutral" id="oms-mode">--</span></div>
+            <div class="stat-row"><span class="stat-label">Dry Run</span><span class="stat-value neutral" id="oms-dryrun">--</span></div>
+            <div class="stat-row"><span class="stat-label">Orphans</span><span class="stat-value neutral" id="oms-orphans">--</span></div>
+            <div class="stat-row"><span class="stat-label">Balance</span><span class="stat-value neutral" id="oms-balance">--</span></div>
+            <div class="stat-row"><span class="stat-label">WS Feed</span><span class="stat-value neutral" id="oms-ws">--</span></div>
         </div>
         <div class="card">
             <h3>Watchdog</h3>
             <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value neutral" id="wd-status">--</span></div>
-            <div class="stat-row"><span class="stat-label">Delta</span><span class="stat-value neutral" id="wd-delta">--ms</span></div>
+            <div class="stat-row"><span class="stat-label">Delta</span><span class="stat-value neutral" id="wd-delta">--</span></div>
             <div class="stat-row"><span class="stat-label">Halt Reason</span><span class="stat-value neutral" id="wd-reason">--</span></div>
+            <div class="stat-row"><span class="stat-label">Since Tick</span><span class="stat-value neutral" id="wd-since">--</span></div>
         </div>
     </div>
 
@@ -82,13 +97,13 @@
 
     <h2>Active Positions</h2>
     <table id="positions-table">
-        <thead><tr><th>Coin</th><th>Ticker</th><th>Side</th><th>Entry</th><th>Current</th><th>Contracts</th><th>ROI</th><th>Reason</th></tr></thead>
+        <thead><tr><th>Coin</th><th>Ticker</th><th>Side</th><th>Entry</th><th>Current</th><th>Contracts</th><th>ROI</th><th>Rationale</th></tr></thead>
         <tbody id="positions-body"></tbody>
     </table>
 
     <h2>Recent Trades</h2>
     <table id="trades-table">
-        <thead><tr><th>Time</th><th>Coin</th><th>Ticker</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Reason</th></tr></thead>
+        <thead><tr><th>Time</th><th>Coin</th><th>Ticker</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Exit Reason</th></tr></thead>
         <tbody id="trades-body"></tbody>
     </table>
 
@@ -97,145 +112,368 @@
 
     <script>
         const API_BASE = '';
-        let eventSource = null;
+        const STALE_AFTER_MS = 6000;
+        let lastFrameAt = 0;
+        let staleTimer = null;
 
+        /* ---------- generic helpers ---------- */
+        function num(v) {
+            if (v === null || v === undefined || v === '') return null;
+            const n = typeof v === 'number' ? v : parseFloat(v);
+            return Number.isFinite(n) ? n : null;
+        }
+        function esc(v) {
+            return String(v === null || v === undefined ? '' : v).replace(/[&<>"']/g, function (c) {
+                return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+            });
+        }
+        function setText(id, value) {
+            const el = document.getElementById(id);
+            if (el) el.textContent = value;
+        }
         function fmtMoney(n) {
-            if (n == null) return '--';
-            return (n >= 0 ? '+' : '-') + '$' + Math.abs(n).toFixed(2);
+            const v = num(n);
+            if (v === null) return '--';
+            return (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2);
+        }
+        function fmtDollars(n) {
+            const v = num(n);
+            return v === null ? '--' : '$' + v.toFixed(2);
         }
         function fmtPct(n) {
-            if (n == null) return '--';
-            return (n >= 0 ? '+' : '-') + Math.abs(n).toFixed(2) + '%';
+            const v = num(n);
+            if (v === null) return '--';
+            return (v >= 0 ? '+' : '-') + Math.abs(v).toFixed(2) + '%';
+        }
+        function fmtCents(v) {
+            const n = num(v);
+            return n === null ? '--' : (n * 100).toFixed(1) + '\u00a2';
+        }
+        function pnlClass(n) {
+            const v = num(n);
+            if (v === null) return 'neutral';
+            return v >= 0 ? 'up' : 'down';
         }
         function badgeFor(status) {
-            const s = (status || '').toLowerCase();
-            if (s.includes('ok') || s.includes('healthy') || s.includes('up')) return '<span class="badge ok">' + (status||'--') + '</span>';
-            if (s.includes('warn') || s.includes('dry')) return '<span class="badge warn">' + (status||'--') + '</span>';
-            if (s.includes('halt') || s.includes('live')) return '<span class="badge halt">' + (status||'--') + '</span>';
-            return '<span class="badge neutral">' + (status||'--') + '</span>';
+            const raw = (status === null || status === undefined) ? '' : String(status);
+            const s = raw.toLowerCase();
+            if (s.indexOf('halt') !== -1 || s.indexOf('live') !== -1) return '<span class="badge halt">' + esc(raw || '--') + '</span>';
+            if (s.indexOf('ok') !== -1 || s.indexOf('healthy') !== -1) return '<span class="badge ok">' + esc(raw) + '</span>';
+            if (s.indexOf('warn') !== -1 || s.indexOf('dry') !== -1 || s.indexOf('stale') !== -1) return '<span class="badge warn">' + esc(raw) + '</span>';
+            return '<span class="badge neutral">' + esc(raw || '--') + '</span>';
         }
 
-        async function fetchJson(path) {
-            try {
-                const r = await fetch(path);
-                return await r.json();
-            } catch (e) {
-                console.error(path, e);
-                return null;
-            }
+        /* ---------- connection state ---------- */
+        function setConn(stateName, text) {
+            const dot = document.getElementById('status-indicator');
+            const label = document.getElementById('conn-state');
+            const banner = document.getElementById('banner');
+            if (dot) dot.className = stateName;
+            if (label) { label.className = stateName; label.textContent = text; }
+            if (banner) banner.className = (stateName === 'down' ? 'show' : '');
+        }
+        function markLive() {
+            setConn('live', 'LIVE');
+            if (staleTimer) { clearTimeout(staleTimer); staleTimer = null; }
+            staleTimer = setTimeout(function () { setConn('stale', 'STALE'); }, STALE_AFTER_MS);
+        }
+        function markDown() {
+            if (staleTimer) { clearTimeout(staleTimer); staleTimer = null; }
+            setConn('down', 'DISCONNECTED');
+        }
+
+        /* ---------- renderers ---------- */
+        // Accepts both shapes: the SSE/full payload nests under `data.portfolio`,
+        // while GET /api/portfolio returns that same object flat at the top level.
+        function portfolioOf(data) {
+            if (data && data.portfolio && typeof data.portfolio === 'object') return data.portfolio;
+            if (data && (data.primary_engine || data.legacy_engine || data.combined)) return data;
+            return null;
+        }
+
+        function omsSafetyOf(data) {
+            if (data && data.live_oms_safety) return data.live_oms_safety;
+            const pf = portfolioOf(data);
+            if (pf && pf.live_oms_safety) return pf.live_oms_safety;
+            return null;
         }
 
         function renderPortfolio(data) {
-            if (!data) return;
-            const mc = data.primary_engine?.status || {};
-            const legacy = data.legacy_engine?.status || {};
-            const oms = data.live_oms_safety || {};
+            const pf = portfolioOf(data);
+            // The 1-second tick payload has no portfolio block: keep the last good values.
+            if (!pf) return;
+            const primary = pf.primary_engine || {};
+            const legacyBlock = pf.legacy_engine || {};
+            const mc = primary.status || {};
+            const legacy = legacyBlock.status || {};
 
-            document.getElementById('mc-equity').textContent = (mc.total_equity != null ? '$' + mc.total_equity.toFixed(2) : '--');
-            document.getElementById('mc-pnl').textContent = fmtMoney(mc.total_pnl) + ' (' + fmtPct(mc.total_return_pct) + ')';
-            document.getElementById('mc-cash').textContent = (mc.total_cash != null ? '$' + mc.total_cash.toFixed(2) : '--');
-            document.getElementById('mc-trades').textContent = mc.total_trades ?? 0;
-            document.getElementById('mc-winrate').textContent = (mc.overall_win_rate_pct != null ? mc.overall_win_rate_pct.toFixed(1) + '%' : '--');
+            setText('mc-equity', fmtDollars(mc.total_equity));
+            const mcPnl = document.getElementById('mc-pnl');
+            mcPnl.textContent = fmtMoney(mc.total_pnl) + ' (' + fmtPct(mc.total_return_pct) + ')';
+            mcPnl.className = 'stat-value ' + pnlClass(mc.total_pnl);
+            setText('mc-cash', fmtDollars(mc.total_cash));
+            setText('mc-trades', num(mc.total_trades) === null ? '--' : String(mc.total_trades));
+            const mcWin = num(mc.overall_win_rate_pct);
+            setText('mc-winrate', mcWin === null ? '--' : mcWin.toFixed(1) + '%');
 
-            document.getElementById('legacy-equity').textContent = (legacy.total_equity != null ? '$' + legacy.total_equity.toFixed(2) : '--');
-            document.getElementById('legacy-pnl').textContent = fmtMoney(legacy.total_pnl);
-            document.getElementById('legacy-trades').textContent = legacy.total_trades ?? 0;
-            document.getElementById('legacy-winrate').textContent = (legacy.win_rate_pct != null ? legacy.win_rate_pct.toFixed(1) + '%' : '--');
-            document.getElementById('legacy-enabled').textContent = legacy.enabled ?? false;
+            setText('legacy-equity', fmtDollars(legacy.total_equity));
+            const lPnl = document.getElementById('legacy-pnl');
+            lPnl.textContent = fmtMoney(legacy.total_pnl);
+            lPnl.className = 'stat-value ' + pnlClass(legacy.total_pnl);
+            setText('legacy-trades', num(legacy.total_trades) === null ? '--' : String(legacy.total_trades));
+            const lWin = num(legacy.win_rate_pct);
+            setText('legacy-winrate', lWin === null ? '--' : lWin.toFixed(1) + '%');
+            setText('legacy-enabled', legacy.enabled === true ? 'true' : (legacy.enabled === false ? 'false' : '--'));
+        }
 
-            document.getElementById('oms-mode').textContent = oms.mode || 'PAPER';
-            document.getElementById('oms-dryrun').textContent = oms.dry_run ?? true;
-            document.getElementById('oms-orphans').textContent = (oms.untracked_resting_orders || []).length;
-            document.getElementById('oms-balance').textContent = (oms.balance_dollars != null ? '$' + oms.balance_dollars.toFixed(2) : '--');
+        // Mode/balance/watchdog live under `live_kalshi` (NOT under live_oms_safety).
+        function renderLive(data) {
+            const lk = (data && data.live_kalshi) || {};
+            const oms = omsSafetyOf(data);
 
-            const wd = oms.watchdog || {};
-            document.getElementById('wd-status').textContent = wd.status || '--';
-            document.getElementById('wd-delta').textContent = (wd.last_delta_ms != null ? wd.last_delta_ms.toFixed(1) : '--') + 'ms';
-            document.getElementById('wd-reason').textContent = wd.halt_reason || '--';
-            const el = document.getElementById('status-indicator');
-            el.className = wd.status === 'HEALTHY' ? 'live' : 'stale';
+            const dry = oms && typeof oms.dry_run === 'boolean' ? oms.dry_run : null;
+            let mode = lk.mode;
+            if (!mode && dry !== null) mode = dry ? 'DRY_RUN' : 'LIVE';
+            const modeEl = document.getElementById('oms-mode');
+            if (mode) modeEl.innerHTML = badgeFor(mode); else modeEl.textContent = '--';
+
+            if (dry !== null) setText('oms-dryrun', dry ? 'true' : 'false');
+
+            if (oms) {
+                const orphans = Array.isArray(oms.untracked_resting_orders) ? oms.untracked_resting_orders.length : null;
+                setText('oms-orphans', orphans === null ? '--' : String(orphans));
+                const orphEl = document.getElementById('oms-orphans');
+                orphEl.className = 'stat-value ' + (orphans ? 'down' : 'neutral');
+                if (oms.blocked_by_orphans === true) orphEl.textContent = (orphans === null ? '?' : orphans + 1) + ' (BLOCKED)';
+            }
+
+            setText('oms-balance', fmtDollars(lk.balance_dollars));
+
+            const wsEl = document.getElementById('oms-ws');
+            if (typeof lk.ws_connected === 'boolean') {
+                wsEl.innerHTML = lk.ws_connected ? '<span class="badge ok">UP</span>' : '<span class="badge halt">DOWN</span>';
+            } else {
+                wsEl.textContent = '--';
+            }
+
+            const wd = lk.watchdog || {};
+            document.getElementById('wd-status').innerHTML = badgeFor(wd.status);
+            const delta = num(wd.last_delta_ms);
+            setText('wd-delta', delta === null ? '--' : delta.toFixed(1) + 'ms');
+            setText('wd-reason', wd.halt_reason || '--');
+            const since = num(wd.time_since_last_tick_ms);
+            setText('wd-since', since === null ? '--' : since.toFixed(0) + 'ms');
+        }
+
+        function matrixOf(data) {
+            return (data && data.multicoin_matrix && typeof data.multicoin_matrix === 'object') ? data.multicoin_matrix : null;
+        }
+
+        function quoteFor(coin, pos, matrix) {
+            const m = (matrix && matrix[coin]) || {};
+            const side = String((pos && pos.side) || '').toUpperCase();
+            const entry = num(pos && pos.entry_price);
+            const cached = num(pos && pos.current_bid);
+            const fresh = side === 'YES' ? num(m.yes_bid) : (side === 'NO' ? num(m.no_bid) : null);
+
+            // Cold boot initialises current_bid = entry_price, so an equal value is not a real quote.
+            let usableCached = (cached !== null && (entry === null || Math.abs(cached - entry) > 1e-12)) ? cached : null;
+            const price = fresh !== null ? fresh : (usableCached !== null ? usableCached : entry);
+            let roi = null;
+            if (entry !== null && entry > 0 && fresh !== null) roi = (fresh - entry) / entry * 100.0;
+            else if (entry !== null && entry > 0 && usableCached !== null) roi = (usableCached - entry) / entry * 100.0;
+            return { entry: entry, current: price, roi: roi, isFresh: fresh !== null, isCached: fresh === null && usableCached !== null };
         }
 
         function renderCoinMatrix(data) {
-            const matrix = data.multicoin_matrix || {};
+            const matrix = matrixOf(data);
+            // Tick payload always carries the matrix; if it is missing, leave the cards untouched.
+            if (!matrix) return;
             const grid = document.getElementById('coin-grid');
+            const coins = Object.keys(matrix);
             grid.innerHTML = '';
-            for (const [coin, m] of Object.entries(matrix)) {
+            if (!coins.length) {
+                grid.innerHTML = '<div class="card empty">No coin telemetry yet.</div>';
+                return;
+            }
+            for (const coin of coins) {
+                const m = matrix[coin] || {};
+                const pos = m.active_position || null;
+                const q = pos ? quoteFor(coin, pos, matrix) : null;
+                const delta = num(m.delta);
+                const spot = num(m.spot);
+                const prob = num(m.prob_yes_pct);
+                const edge = num(m.edge_y);
+                const secs = num(m.seconds_left);
+                const roiText = q && q.roi !== null ? q.roi.toFixed(1) + '%' : '--';
+                const roiClass = q && q.roi !== null ? (q.roi >= 0 ? 'up' : 'down') : 'neutral';
+                const posText = pos ? esc(pos.side) + ' ' + esc(pos.contracts) + 'x @' + fmtCents(pos.entry_price) : 'none';
+                const row = 'stat-row';
                 const card = document.createElement('div');
                 card.className = 'card';
-                const pos = m.active_position || null;
-                const roi = pos ? (((m.yes_bid || m.no_bid || 0) - pos.entry_price) / Math.max(0.01, pos.entry_price) * 100).toFixed(1) : '0.0';
-                card.innerHTML = `
-                    <h3>${coin}</h3>
-                    <div class="stat-row"><span class="stat-label">Spot</span><span class="stat-value">${(m.spot||0).toFixed(2)}</span></div>
-                    <div class="stat-row"><span class="stat-label">Delta</span><span class="stat-value ${m.delta>=0?'up':'down'}">${m.delta>=0?'+':''}${m.delta.toFixed(2)}</span></div>
-                    <div class="stat-row"><span class="stat-label">Prob YES</span><span class="stat-value">${(m.prob_yes_pct||0).toFixed(1)}%</span></div>
-                    <div class="stat-row"><span class="stat-label">Edge YES</span><span class="stat-value ${(m.edge_y||0)>=0?'up':'down'}">${(m.edge_y||0)>=0?'+':''}${m.edge_y.toFixed(1)}%</span></div>
-                    <div class="stat-row"><span class="stat-label">Seconds Left</span><span class="stat-value">${m.seconds_left??0}s</span></div>
-                    <div class="stat-row"><span class="stat-label">Action</span><span class="stat-value small">${m.action||'--'}</span></div>
-                    <div class="stat-row"><span class="stat-label">Position</span><span class="stat-value">${pos? pos.side+' '+pos.contracts+'x @'+Math.round(pos.entry_price*100)+'\u00a2':'none'}</span></div>
-                    <div class="stat-row"><span class="stat-label">ROI</span><span class="stat-value ${parseFloat(roi)>=0?'up':'down'}">${roi}%</span></div>
-                `;
+                card.innerHTML =
+                    '<h3>' + esc(coin) + '</h3>' +
+                    '<div class="' + row + '"><span class="stat-label">Spot</span><span class="stat-value">' + (spot === null ? '--' : spot.toFixed(2)) + '</span></div>' +
+                    '<div class="' + row + '"><span class="stat-label">Delta</span><span class="stat-value ' + (delta === null ? 'neutral' : (delta >= 0 ? 'up' : 'down')) + '">' + (delta === null ? '--' : (delta >= 0 ? '+' : '') + delta.toFixed(2)) + '</span></div>' +
+                    '<div class="' + row + '"><span class="stat-label">Prob YES</span><span class="stat-value">' + (prob === null ? '--' : prob.toFixed(1) + '%') + '</span></div>' +
+                    '<div class="' + row + '"><span class="stat-label">Edge YES</span><span class="stat-value ' + (edge === null ? 'neutral' : (edge >= 0 ? 'up' : 'down')) + '">' + (edge === null ? '--' : (edge >= 0 ? '+' : '') + edge.toFixed(1) + '%') + '</span></div>' +
+                    '<div class="' + row + '"><span class="stat-label">Seconds Left</span><span class="stat-value">' + (secs === null ? '--' : secs.toFixed(0) + 's') + '</span></div>' +
+                    '<div class="' + row + '"><span class="stat-label">Action</span><span class="stat-value small">' + esc(m.action || '--') + '</span></div>' +
+                    '<div class="' + row + '"><span class="stat-label">Position</span><span class="stat-value">' + posText + '</span></div>' +
+                    '<div class="' + row + '"><span class="stat-label">ROI</span><span class="stat-value ' + roiClass + '">' + roiText + '</span></div>' +
+                    '<div class="small">' + esc(m.action_reason || '') + '</div>';
                 grid.appendChild(card);
             }
         }
 
+        function positionsOf(data) {
+            const mc = (data && data.multicoin) || {};
+            if (mc.active_positions && typeof mc.active_positions === 'object') return mc.active_positions;
+            const pf = portfolioOf(data);
+            const st = (pf && pf.primary_engine && pf.primary_engine.status) || {};
+            return st.active_positions || {};
+        }
+
         function renderPositions(data) {
             const body = document.getElementById('positions-body');
+            const positions = positionsOf(data);
+            const matrix = matrixOf(data);
             body.innerHTML = '';
-            const mc = data.multicoin || {};
-            const positions = mc.active_positions || {};
-            for (const [coin, p] of Object.entries(positions)) {
+            const entries = Object.entries(positions || {});
+            if (!entries.length) {
+                body.innerHTML = '<tr><td colspan="8" class="empty">No open positions.</td></tr>';
+                return;
+            }
+            for (const [coin, p] of entries) {
+                const pos = p || {};
+                const q = quoteFor(coin, pos, matrix);
+                const roiText = q.roi === null ? '--' : q.roi.toFixed(1) + '%';
+                const roiClass = q.roi === null ? 'neutral' : (q.roi >= 0 ? 'up' : 'down');
+                const currentText = q.current === null ? '--' : fmtCents(q.current);
+                const currentClass = (q.isFresh || q.isCached) ? 'mono' : 'mono dim';
+                const currentTitle = (q.isFresh || q.isCached) ? '' : ' title="No live quote; showing entry price"';
                 const tr = document.createElement('tr');
-                tr.innerHTML = `<td>${coin}</td><td>${p.ticker||'--'}</td><td>${p.side||'--'}</td>
-                    <td class="mono">${(p.entry_price||0).toFixed(4)}</td>
-                    <td class="mono">${(p.current_bid||p.entry_price||0).toFixed(4)}</td>
-                    <td>${p.contracts??0}</td>
-                    <td class="mono">${(((p.current_bid||p.entry_price||0)-(p.entry_price||0))/Math.max(0.01,(p.entry_price||0))*100).toFixed(1)}%</td>
-                    <td class="small">${(p.reason||'').slice(0,40)}</td>`;
+                tr.innerHTML =
+                    '<td>' + esc(coin) + '</td>' +
+                    '<td class="small">' + esc(pos.ticker || '--') + '</td>' +
+                    '<td>' + esc(pos.side || '--') + '</td>' +
+                    '<td class="mono">' + fmtCents(pos.entry_price) + '</td>' +
+                    '<td class="' + currentClass + '"' + currentTitle + '>' + currentText + '</td>' +
+                    '<td>' + esc(pos.contracts === undefined || pos.contracts === null ? '--' : pos.contracts) + '</td>' +
+                    '<td class="mono ' + roiClass + '">' + roiText + '</td>' +
+                    '<td class="small">' + esc(String(pos.rationale || '').slice(0, 80)) + '</td>';
                 body.appendChild(tr);
             }
+        }
+
+        function tradesOf(data) {
+            const mc = (data && data.multicoin) || {};
+            if (Array.isArray(mc.recent_trades)) return mc.recent_trades;
+            const pf = portfolioOf(data);
+            if (pf && Array.isArray(pf.recent_trades)) return pf.recent_trades;
+            return Array.isArray(data && data.recent_trades) ? data.recent_trades : [];
         }
 
         function renderTrades(data) {
             const body = document.getElementById('trades-body');
+            const trades = tradesOf(data);
             body.innerHTML = '';
-            const mc = data.multicoin || {};
-            const trades = mc.recent_trades || [];
+            if (!trades.length) {
+                body.innerHTML = '<tr><td colspan="8" class="empty">No trades recorded yet.</td></tr>';
+                return;
+            }
             for (const t of trades.slice(0, 10)) {
+                const trade = t || {};
+                const tsVal = num(trade.timestamp);
+                const ts = tsVal === null ? '--' : new Date(tsVal * 1000).toLocaleTimeString();
+                const pnl = num(trade.pnl_dollars);
                 const tr = document.createElement('tr');
-                const ts = t.timestamp ? new Date(t.timestamp * 1000).toLocaleTimeString() : '--';
-                const pnl = t.pnl_dollars != null ? fmtMoney(t.pnl_dollars) : '--';
-                tr.innerHTML = `<td>${ts}</td><td>${t.coin||'--'}</td><td>${t.ticker||'--'}</td>
-                    <td>${t.side||'--'}</td>
-                    <td class="mono">${(t.entry_price||0).toFixed(4)}</td>
-                    <td class="mono">${(t.exit_price||0).toFixed(4)}</td>
-                    <td class="${(t.pnl_dollars||0)>=0?'up':'down'}">${pnl}</td>
-                    <td class="small">${(t.exit_reason||'OPEN').slice(0,30)}</td>`;
+                tr.innerHTML =
+                    '<td class="small">' + esc(ts) + '</td>' +
+                    '<td>' + esc(trade.coin || '--') + '</td>' +
+                    '<td class="small">' + esc(trade.ticker || '--') + '</td>' +
+                    '<td>' + esc(trade.side || '--') + '</td>' +
+                    '<td class="mono">' + fmtCents(trade.entry_price) + '</td>' +
+                    '<td class="mono">' + fmtCents(trade.exit_price) + '</td>' +
+                    '<td class="mono ' + pnlClass(pnl) + '">' + (pnl === null ? '--' : fmtMoney(pnl)) + '</td>' +
+                    '<td class="small">' + esc(String(trade.exit_reason || trade.status || 'OPEN').slice(0, 40)) + '</td>';
                 body.appendChild(tr);
             }
         }
 
+        let lastLogKey = '';
         function renderBrainLogs(data) {
+            const logs = (data && Array.isArray(data.multicoin_brain_logs)) ? data.multicoin_brain_logs : null;
+            if (!logs) return;
             const el = document.getElementById('brain-logs');
-            const logs = data.multicoin_brain_logs || [];
-            el.innerHTML = logs.map(l => `<div>${l.time} ${l.text}</div>`).join('');
+            const key = String(logs.length) + '|' + (logs.length ? String(logs[logs.length - 1].time) + String(logs[logs.length - 1].text) : '');
+            if (key === lastLogKey) return;
+            lastLogKey = key;
+            el.innerHTML = logs.map(function (l) {
+                return '<div><span class="small">' + esc(l.time || '') + '</span> ' + esc(l.text || '') + '</div>';
+            }).join('');
             el.scrollTop = el.scrollHeight;
         }
 
-        async function tick() {
-            const data = await fetchJson('/api/stream');
-            if (!data) return;
-            document.getElementById('last-update').textContent = 'Last update: ' + new Date(data.timestamp * 1000).toLocaleTimeString();
+        function renderAll(data) {
+            if (!data || typeof data !== 'object') return;
             renderPortfolio(data);
+            renderLive(data);
             renderCoinMatrix(data);
             renderPositions(data);
             renderTrades(data);
             renderBrainLogs(data);
+
+            const ts = num(data.timestamp);
+            const when = ts === null ? new Date() : new Date(ts * 1000);
+            setText('last-update', 'Last update: ' + when.toLocaleTimeString());
+            lastFrameAt = Date.now();
         }
 
-        setInterval(tick, 1000);
-        tick();
+        /* ---------- data sources ---------- */
+        // One initial snapshot so the page paints before the first SSE frame arrives.
+        async function prime() {
+            try {
+                const r = await fetch(API_BASE + '/api/portfolio', { headers: { 'Accept': 'application/json' } });
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                const data = await r.json();
+                renderAll(data);
+            } catch (e) {
+                // Non-fatal: the SSE stream below supplies the same data.
+                console.warn('/api/portfolio unavailable:', e);
+            }
+        }
+
+        // Exactly one EventSource for the whole page lifetime; the browser reconnects natively.
+        function connectStream() {
+            const source = new EventSource(API_BASE + '/api/stream');
+            source.onopen = function () {
+                markLive();
+            };
+            source.onmessage = function (ev) {
+                if (!ev || typeof ev.data !== 'string') return;
+                const raw = ev.data.trim();
+                if (!raw) return;
+                if (raw.charAt(0) !== '{') return; // ignore non-JSON keepalives
+                let payload = null;
+                try {
+                    payload = JSON.parse(raw);
+                } catch (e) {
+                    console.warn('Ignoring malformed SSE frame');
+                    return;
+                }
+                renderAll(payload);
+                markLive();
+            };
+            source.onerror = function () {
+                // EventSource retries on its own; only the UI state is updated here.
+                markDown();
+            };
+            window.addEventListener('beforeunload', function () { source.close(); });
+        }
+
+        prime();
+        connectStream();
     </script>
 </body>
 </html>
