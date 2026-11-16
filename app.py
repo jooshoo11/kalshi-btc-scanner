@@ -176,6 +176,8 @@ multicoin_engine = MultiCoinPaperEngine(
 multicoin_engine.max_entry_price = 0.52
 multicoin_engine.max_seconds_left = 500
 multicoin_engine.min_contracts_per_trade = 15
+multicoin_engine.max_contracts_per_trade = 120
+multicoin_engine.stop_loss_hard_roi_pct = 35.0
 multicoin_engine.maker_take_profit = True
 multicoin_engine.enable_dynamic_compounding = True
 

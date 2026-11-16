@@ -347,14 +347,14 @@ class MultiCoinPaperEngine:
         self.max_trade_alloc_pct = 20.0     # 20% of coin's sub-equity per trade
         self.max_trade_collateral_dollars = 25.0  # Max collateral per trade ($25 baseline)
         self.enable_dynamic_compounding = False  # If True, scales collateral cap safely with equity (12%, max $50)
-        self.max_contracts_per_trade = 60   # Liquidity protection cap to prevent orderbook slippage
+        self.max_contracts_per_trade = 60   # Liquidity protection cap (overridden in app.py to 120 for compounding)
         self.max_entry_price = 0.65         # Default max entry price (overridden by coin config e.g. 0.52)
         self.max_spike_entry_price = 0.58   # Early spike breakout ceiling: avoid buying >58¢ on overextended wicks
         self.early_spike_delta_threshold = 70.0  # Spot delta threshold defining an overextended early move
         self.take_profit_roi_pct = 25.0     # Lock in +25% ROI
         self.stop_loss_roi_pct = 25.0       # Exit at -25% ROI if model confirms decay
         self.stop_loss_max_prob_pct = 38.0  # Dual confirmation: cut loss if model prob <= 38.0%
-        self.stop_loss_hard_roi_pct = 50.0  # Hard catastrophe stop: cut unconditionally if <= -50% ROI
+        self.stop_loss_hard_roi_pct = 35.0  # Hard catastrophe stop: cut unconditionally if <= -35% ROI
         self.min_seconds_left = 240         # 240s expiration safety cutoff (avoid high-gamma late candle trap)
         self.max_seconds_left = 500         # 500s (enter only after candle direction is established; skip 0-5m noise)
         self.max_hold_seconds = 600.0       # 600s (10 min) hold window for 15m contracts; let winning trades reach expiry
@@ -1031,18 +1031,19 @@ class MultiCoinPaperEngine:
 
         # C. Dynamic Dual-Confirmation Stop Loss
         # Only stop out if BOTH the price has decayed (-25% ROI) AND model/spot confirms the thesis has failed.
-        # Microstructure protection: within the first 30s of entry, do not stop out unless spot actually crosses strike adversely.
+        # Microstructure protection: within the first 15s of entry, do not stop out on -25% bid noise unless spot
+        # crosses strike adversely OR hard catastrophe stop (-35% ROI) is hit.
         hold_secs = now - pos.get("entry_timestamp", now)
         is_spot_adverse = (settle_spot < strike) if pos["side"] == "YES" else (settle_spot > strike)
+        is_hard_stop = (roi_pct <= -self.stop_loss_hard_roi_pct)  # Unconditional -35% catastrophe circuit breaker
 
-        if hold_secs < 30 and not is_spot_adverse:
+        if hold_secs < 15 and not is_spot_adverse:
             pass  # Entry spread grace period: spot is favorable, do not liquidate on resting bid noise
         else:
             is_dual_confirmed = (
                 roi_pct <= -self.stop_loss_roi_pct and 
                 (model_prob is None or model_prob <= self.stop_loss_max_prob_pct or is_spot_adverse)
             )
-            is_hard_stop = (roi_pct <= -self.stop_loss_hard_roi_pct)  # Unconditional -50% catastrophe circuit breaker
             if is_dual_confirmed or is_hard_stop:
                 exit_fee = calculate_kalshi_taker_fee(pos["contracts"], current_bid)
                 gross = pos["contracts"] * current_bid
