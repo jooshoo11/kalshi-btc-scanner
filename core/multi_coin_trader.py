@@ -84,6 +84,16 @@ class MultiCoinAuditDatabase:
             if "order_id" not in cols:
                 cursor.execute("ALTER TABLE trades ADD COLUMN order_id TEXT")
                 print("[MultiCoinDB] Migrated trades table: added order_id column")
+            for col_name, col_type in (
+                ("slippage_bps", "REAL"),
+                ("entry_vwap", "REAL"),
+                ("exit_vwap", "REAL"),
+                ("book_depth_at_entry", "INTEGER"),
+                ("model_prob_at_stop", "REAL"),
+            ):
+                if col_name not in cols:
+                    cursor.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                    print(f"[MultiCoinDB] Migrated trades table: added {col_name} column")
 
             # High-throughput B-tree indexes
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_trades_ticker ON trades(ticker)")
@@ -125,8 +135,9 @@ class MultiCoinAuditDatabase:
                 INSERT INTO trades (
                     timestamp, coin, ticker, series, side, entry_price, contracts,
                     cost_dollars, fee_dollars, status, model_prob_entry,
-                    delta_at_entry, seconds_left_at_entry, rationale, order_group_id, order_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?)
+                    delta_at_entry, seconds_left_at_entry, rationale, order_group_id, order_id,
+                    slippage_bps, entry_vwap, book_depth_at_entry
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 kwargs.get("timestamp", time.time()),
                 kwargs.get("coin", "BTC"),
@@ -142,7 +153,10 @@ class MultiCoinAuditDatabase:
                 kwargs.get("seconds_left_at_entry", 0),
                 kwargs.get("rationale", ""),
                 actual_group_id,
-                actual_order_id
+                actual_order_id,
+                kwargs.get("slippage_bps"),
+                kwargs.get("entry_vwap"),
+                kwargs.get("book_depth_at_entry"),
             ))
             conn.commit()
             return cursor.lastrowid
@@ -157,6 +171,8 @@ class MultiCoinAuditDatabase:
                     exit_reason = ?,
                     pnl_dollars = ?,
                     pnl_pct = ?,
+                    exit_vwap = ?,
+                    model_prob_at_stop = ?,
                     status = 'CLOSED'
                 WHERE id = ?
             """, (
@@ -165,6 +181,8 @@ class MultiCoinAuditDatabase:
                 kwargs.get("exit_reason", "UNKNOWN"),
                 kwargs.get("pnl_dollars", 0.0),
                 kwargs.get("pnl_pct", 0.0),
+                kwargs.get("exit_vwap"),
+                kwargs.get("model_prob_at_stop"),
                 trade_id
             ))
             conn.commit()
@@ -223,6 +241,38 @@ class MultiCoinAuditDatabase:
                 "total_pnl": round(pnl, 2),
                 "volume": round(volume, 2)
             }
+
+    def get_coin_expectancy_stats(self, coin: str, window: int = 30) -> Dict[str, Any]:
+        """Compute rolling R-multiple expectancy over the last `window` closed trades."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT pnl_dollars, cost_dollars, fee_dollars
+                FROM trades
+                WHERE coin = ? AND status = 'CLOSED'
+                  AND exit_reason NOT IN ('SETTLED_UNKNOWN', 'SETTLED_ESTIMATED_WIN', 'SETTLED_ESTIMATED_LOSS')
+                ORDER BY id DESC
+                LIMIT ?
+            """, (coin, window))
+            rows = cursor.fetchall()
+
+        if not rows:
+            return {"count": 0, "win_rate": 0.0, "expectancy_r": 0.0}
+
+        r_multiples = []
+        wins = 0
+        for pnl, cost, fee in rows:
+            risk = max(1.0, float(cost or 0.0) + float(fee or 0.0))
+            r_val = float(pnl or 0.0) / risk
+            r_multiples.append(r_val)
+            if (pnl or 0.0) > 0:
+                wins += 1
+
+        return {
+            "count": len(r_multiples),
+            "win_rate": wins / len(r_multiples),
+            "expectancy_r": sum(r_multiples) / len(r_multiples),
+        }
 
     def get_hot_trades(
         self,
@@ -361,6 +411,13 @@ class MultiCoinPaperEngine:
         self.min_edge_pct = 4.0             # 4.0% min model edge
         self.min_prob_pct = 60.0            # 60.0% min model conviction
 
+        # Hybrid Trailing Peak Drawdown Guard (P1): -6% soft throttle (0.5x), -10% 15m pause
+        self.intraday_peak_equity = max(float(self.total_equity), float(initial_balance))
+        self.trailing_throttle_active = False
+        self.trailing_pause_until = 0.0
+        self.enable_trailing_peak_guard = True
+        self._last_l2_telemetry: Dict[str, Any] = {}
+
         self.last_candle_ids: Dict[str, str] = {c: "" for c in self.coin_weights}
         self.trades_in_candle: Dict[str, int] = {c: 0 for c in self.coin_weights}
         self.candle_stopped_out: Dict[str, str] = {c: "" for c in self.coin_weights}
@@ -483,10 +540,37 @@ class MultiCoinPaperEngine:
             return f"PORTFOLIO-WIDE {reason}"
         return None
 
+    def _check_trailing_peak_guard(self) -> Optional[str]:
+        """Hybrid Trailing Peak Drawdown Guard:
+        -10% from intraday_peak_equity triggers a 15-minute (900s) cooling pause and resets peak on resume.
+        -6% from intraday_peak_equity activates 0.5x soft throttle (handled in evaluate_entry).
+        """
+        if not getattr(self, "enable_trailing_peak_guard", True):
+            return None
+        now = time.time()
+        pause_until = getattr(self, "trailing_pause_until", 0.0)
+        if pause_until > 0.0:
+            if now < pause_until:
+                rem = int(pause_until - now)
+                return f"Trailing peak -10% cooling pause active ({rem}s remaining)"
+            # Cooling period elapsed: reset peak to current equity to allow fresh recovery
+            self.trailing_pause_until = 0.0
+            self.intraday_peak_equity = max(self.total_equity, 1.0)
+            self.trailing_throttle_active = False
+
+        peak = max(getattr(self, "intraday_peak_equity", self.initial_balance), 1.0)
+        dd_pct = ((self.total_equity - peak) / peak) * 100.0
+        if dd_pct <= -10.0:
+            self.trailing_pause_until = now + 900.0
+            self.trailing_throttle_active = True
+            return f"Trailing peak drawdown {dd_pct:.2f}% <= -10.0% (15m cooling pause triggered)"
+        return None
+
     def _pre_trade_risk_checks(self) -> Optional[str]:
         """Run all pre-trade risk gates. Returns reason string if any fails, else None."""
         for check in [self._check_kill_switch, self._check_daily_loss_limit,
                       self._check_portfolio_daily_loss,
+                      self._check_trailing_peak_guard,
                       self._check_exposure_limit, self._check_consecutive_failures,
                       self._check_api_error_rate]:
             reason = check()
@@ -653,14 +737,14 @@ class MultiCoinPaperEngine:
         for coin in self.coin_weights:
             if coin in disabled:
                 continue
-            stats = self.db.get_coin_stats(coin)
-            trades = stats["total_trades"]
-            win_rate = stats["win_rate_pct"]
-            pnl = stats["total_pnl"]
+            exp_stats = self.db.get_coin_expectancy_stats(coin, window=30)
+            trades = exp_stats["count"]
+            win_rate = exp_stats["win_rate"]
+            avg_r = exp_stats["expectancy_r"]
 
-            # Prior base score: 1.0 + (win_rate - 50)/50 + pnl_factor
-            if trades >= 3:
-                score = max(0.2, (win_rate / 100.0) + (pnl / max(10.0, self.initial_balance)))
+            # Rolling 30-trade R-multiple expectancy + win-rate score
+            if trades >= 5:
+                score = max(0.2, 1.0 + avg_r + (win_rate - 0.5))
             else:
                 score = {"BTC": 1.2, "ETH": 1.0, "SOL": 0.9, "XRP": 0.7}.get(coin, 1.0)
             raw_scores[coin] = score
@@ -800,10 +884,18 @@ class MultiCoinPaperEngine:
             )
             return False
 
+        total_book_depth = int(sum(order_levels.values()))
+        slippage_bps = round(((vwap_dollars - target_price) / max(0.01, target_price)) * 10000.0, 2)
+        self._last_l2_telemetry = {
+            "slippage_bps": slippage_bps,
+            "entry_vwap": round(vwap_dollars, 4),
+            "book_depth_at_entry": total_book_depth,
+        }
+
         # Log VWAP info for debugging
         logger.info(
             f"[L2 Validation] {ticker} {side} {contracts}x @ VWAP {vwap_cents:.1f}¢ "
-            f"(REST: {target_price*100:.0f}¢, worst: {worst_price_cents}¢) | "
+            f"(REST: {target_price*100:.0f}¢, worst: {worst_price_cents}¢, depth: {total_book_depth}) | "
             f"Model prob {model_prob:.1f}% | Net edge {actual_edge_pct:.1f}%"
         )
         return True
@@ -909,6 +1001,9 @@ class MultiCoinPaperEngine:
         trade_budget = sub_equity * (self.max_trade_alloc_pct / 100.0)
         trade_budget = min(trade_budget, self.total_cash)
 
+        if getattr(self, "trailing_throttle_active", False):
+            trade_budget *= 0.5
+
         # Enforce max collateral cap ($25 baseline, scaling dynamically with equity if enabled)
         max_collateral = getattr(self, "max_trade_collateral_dollars", 25.0)
         if getattr(self, "enable_dynamic_compounding", False):
@@ -938,8 +1033,11 @@ class MultiCoinPaperEngine:
 
         # ==================== L2 ORDER BOOK VALIDATION ====================
         # Validate against live L2 book for slippage/VWAP edge protection
+        self._last_l2_telemetry = {}
         if not self._validate_l2_entry(ticker, target_side, target_price, contracts, model_prob, edge_pct):
             return None
+
+        l2_tel = getattr(self, "_last_l2_telemetry", {}) or {}
 
         # Debit cash (only after ALL gates pass, incl. L2 VWAP sweep)
         self.total_cash -= (cost + total_fee)
@@ -969,7 +1067,10 @@ class MultiCoinPaperEngine:
             delta_at_entry=delta,
             seconds_left_at_entry=int(seconds_left),
             rationale=rationale,
-            order_group_id=self.order_group_id
+            order_group_id=self.order_group_id,
+            slippage_bps=l2_tel.get("slippage_bps"),
+            entry_vwap=l2_tel.get("entry_vwap"),
+            book_depth_at_entry=l2_tel.get("book_depth_at_entry"),
         )
 
         pos_dict = {
@@ -1052,7 +1153,7 @@ class MultiCoinPaperEngine:
                 if candle_id:
                     self.candle_stopped_out[coin] = candle_id
                 logger.info(f"[MultiCoin] STOP_LOSS {coin} triggered: ROI {roi_pct:+.1f}%, model_prob={model_prob}, adverse={is_spot_adverse} | PnL ${pnl:+.2f}")
-                return self._close_position(coin, exit_price=current_bid, reason="STOP_LOSS", pnl=pnl, payout=gross - exit_fee, current_time=now)
+                return self._close_position(coin, exit_price=current_bid, reason="STOP_LOSS", pnl=pnl, payout=gross - exit_fee, current_time=now, exit_vwap=current_bid, model_prob_at_stop=model_prob)
 
         # D. Time-based exit: If held past max_hold_seconds, exit if decaying or adverse.
         # If the position is strongly in the money and model prob is healthy (>= 55%), let it ride to expiration!
@@ -1064,11 +1165,11 @@ class MultiCoinPaperEngine:
                 gross = pos["contracts"] * current_bid
                 pnl = gross - exit_fee - (pos["cost_dollars"] + pos["fee_dollars"])
                 logger.info(f"[MultiCoin] TIME_EXIT {coin} after {hold_secs:.0f}s (max_hold {self.max_hold_seconds:.0f}s) | ROI {roi_pct:+.1f}% | PnL ${pnl:+.2f}")
-                return self._close_position(coin, exit_price=current_bid, reason="TIME_EXIT", pnl=pnl, payout=gross - exit_fee, current_time=now)
+                return self._close_position(coin, exit_price=current_bid, reason="TIME_EXIT", pnl=pnl, payout=gross - exit_fee, current_time=now, exit_vwap=current_bid, model_prob_at_stop=model_prob)
 
         return None
 
-    def _close_position(self, coin: str, exit_price: float, reason: str, pnl: float, payout: float, current_time: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    def _close_position(self, coin: str, exit_price: float, reason: str, pnl: float, payout: float, current_time: Optional[float] = None, exit_vwap: Optional[float] = None, model_prob_at_stop: Optional[float] = None) -> Optional[Dict[str, Any]]:
         pos = self.active_positions.pop(coin, None)
         if not pos:
             return None
@@ -1083,7 +1184,9 @@ class MultiCoinPaperEngine:
             exit_timestamp=now,
             exit_reason=reason,
             pnl_dollars=round(pnl, 2),
-            pnl_pct=round(roi, 1)
+            pnl_pct=round(roi, 1),
+            exit_vwap=exit_vwap if exit_vwap is not None else exit_price,
+            model_prob_at_stop=model_prob_at_stop,
         )
 
         self.last_exit_ts[coin] = now
@@ -1108,6 +1211,18 @@ class MultiCoinPaperEngine:
         self.total_equity = round(self.total_cash + open_val, 2)
         for coin, weight in self.coin_weights.items():
             self.coin_equities[coin] = round(self.total_equity * weight, 2)
+
+        if getattr(self, "enable_trailing_peak_guard", True):
+            peak = getattr(self, "intraday_peak_equity", self.initial_balance)
+            if self.total_equity > peak:
+                self.intraday_peak_equity = self.total_equity
+                peak = self.total_equity
+            if peak > 0:
+                dd_pct = ((self.total_equity - peak) / peak) * 100.0
+                if dd_pct <= -6.0:
+                    self.trailing_throttle_active = True
+                elif dd_pct >= -3.0:
+                    self.trailing_throttle_active = False
 
     def get_status_dict(self) -> Dict[str, Any]:
         """Telemetry dictionary for dashboard API."""

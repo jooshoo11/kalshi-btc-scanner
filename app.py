@@ -33,6 +33,7 @@ from core.dependencies import (
     MultiCoinEngineDep
 )
 from core.ws_manager import WebSocketConnectionManager
+from core.hl_ws_feed import HyperliquidWSFeed
 from schemas import (
     RiskDashboardResponse,
     MultiCoinPriceResponse,
@@ -180,6 +181,9 @@ multicoin_engine.max_contracts_per_trade = 120
 multicoin_engine.stop_loss_hard_roi_pct = 35.0
 multicoin_engine.maker_take_profit = True
 multicoin_engine.enable_dynamic_compounding = True
+multicoin_engine.max_hold_seconds = 120.0
+
+hl_ws = HyperliquidWSFeed(coins=["BTC", "ETH"])
 
 portfolio_manager = PortfolioManager(
     auth=live_auth,
@@ -508,19 +512,29 @@ async def multi_coin_production_loop():
                             _paper_equity, _exchange_equity, _paper_equity,
                         )
 
-                # 1. Refresh spot prices from Hyperliquid
-                hl_resp = await client.post("https://api.hyperliquid.xyz/info", json={"type": "allMids"})
+                # 1. Refresh spot prices from persistent Hyperliquid WebSocket (REST fallback only if stale)
                 spot_prices = {}
-                if hl_resp.status_code == 200:
-                    mids = hl_resp.json()
-                    for coin in coin_configs:
-                        val = mids.get(coin)
-                        if val is not None:
-                            val_f = float(val)
-                            spot_prices[coin] = val_f
-                            _spot_tick_history.setdefault(coin, _deque(maxlen=45)).append((now, val_f))
-                else:
-                    print(f"[MultiCoinProd] Hyperliquid allMids returned {hl_resp.status_code}")
+                stale_coins = []
+                for coin in coin_configs:
+                    ws_spot = hl_ws.get_spot(coin)
+                    if ws_spot is not None and hl_ws.is_fresh(coin, max_age=5.0):
+                        spot_prices[coin] = ws_spot
+                        _spot_tick_history.setdefault(coin, _deque(maxlen=45)).append((now, ws_spot))
+                    else:
+                        stale_coins.append(coin)
+
+                if stale_coins:
+                    hl_resp = await client.post("https://api.hyperliquid.xyz/info", json={"type": "allMids"})
+                    if hl_resp.status_code == 200:
+                        mids = hl_resp.json()
+                        for coin in stale_coins:
+                            val = mids.get(coin)
+                            if val is not None:
+                                val_f = float(val)
+                                spot_prices[coin] = val_f
+                                _spot_tick_history.setdefault(coin, _deque(maxlen=45)).append((now, val_f))
+                    else:
+                        print(f"[MultiCoinProd] Hyperliquid allMids fallback returned {hl_resp.status_code}")
 
                 # 2. Refresh candle opens every 20s
                 if now - last_candle_fetch > 20.0 or not candle_opens:
@@ -634,11 +648,13 @@ async def multi_coin_production_loop():
                             realized_15m = realized_1s * 30.0
                             eff_vol = max(base_vol * 0.6, min(base_vol * 2.2, 0.5 * base_vol + 0.5 * realized_15m))
 
-                    # Model probability
+                    # Model probability (with bounded 5-level OFI drift bias from Hyperliquid WS)
                     delta = spot - open_p
                     sigma = eff_vol * math.sqrt(seconds_left / 900.0)
                     z = delta / max(0.0001, sigma)
-                    prob_yes = normal_cdf(z)
+                    ofi_z = hl_ws.get_ofi_z(coin) if hl_ws.is_fresh(coin, max_age=5.0) else 0.0
+                    ofi_bias = max(-0.35, min(0.35, 0.12 * ofi_z))
+                    prob_yes = normal_cdf(z + ofi_bias)
                     prob_no = 1.0 - prob_yes
                     prob_yes_pct = prob_yes * 100.0
                     prob_no_pct = prob_no * 100.0
@@ -713,6 +729,9 @@ async def multi_coin_production_loop():
                                 elif velocity_20s < -adverse_vel_thresh:
                                     action_status = "HOLD_ADVERSE_MOMENTUM"
                                     action_reason = f"Adverse spot momentum: {coin} dropping {velocity_20s:+.1f} in 20s (exhaustion pullback)"
+                                elif ofi_z <= -2.5:
+                                    action_status = "HOLD_ADVERSE_OFI"
+                                    action_reason = f"Extreme counter-OFI on {coin}: Z_OFI={ofi_z:+.2f} <= -2.50"
                                 else:
                                     signal = "BUY YES"
                                     edge_pct = edge_y
@@ -728,6 +747,9 @@ async def multi_coin_production_loop():
                                 elif velocity_20s > adverse_vel_thresh:
                                     action_status = "HOLD_ADVERSE_MOMENTUM"
                                     action_reason = f"Adverse spot momentum: {coin} rallying {velocity_20s:+.1f} in 20s (exhaustion squeeze)"
+                                elif ofi_z >= 2.5:
+                                    action_status = "HOLD_ADVERSE_OFI"
+                                    action_reason = f"Extreme counter-OFI on {coin}: Z_OFI={ofi_z:+.2f} >= +2.50"
                                 else:
                                     signal = "BUY NO"
                                     edge_pct = edge_n
@@ -983,6 +1005,7 @@ async def lifespan(app):
         return
 
     task_ws = asyncio.create_task(live_ws.connect_and_listen())
+    task_hl_ws = asyncio.create_task(hl_ws.connect_and_listen())
     task1 = asyncio.create_task(fast_spot_loop())
     task2 = asyncio.create_task(full_scan_loop())
     task3 = asyncio.create_task(technicals_loop())
@@ -994,6 +1017,10 @@ async def lifespan(app):
     task_partition = asyncio.create_task(periodic_partition_archive_loop())
     yield
     # ==================== GRACEFUL SHUTDOWN ====================
+    try:
+        hl_ws.stop()
+    except Exception:
+        pass
     print("[Lifespan] Shutdown initiated: cancelling resting orders (positions left open)...")
     # Cancel all resting orders via OMS, trigger order group for emergency safety.
     # SAFETY GATE (agreed plan, condition 1): NEVER issue real exchange cancels while
