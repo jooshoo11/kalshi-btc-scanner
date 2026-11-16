@@ -6,8 +6,8 @@ import math
 import sqlite3
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
-from starlette.applications import Starlette
-from starlette.responses import JSONResponse, HTMLResponse, StreamingResponse, Response
+from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect
+from starlette.responses import JSONResponse, HTMLResponse, StreamingResponse, Response, RedirectResponse
 from starlette.routing import Route
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
@@ -19,8 +19,25 @@ from btc_metrics import BitcoinMetricsProvider
 from core.prediction_engine import QuantPredictionEngine
 from kalshi_btc_scanner import KalshiBitcoinScanner
 from core.bot_database import AuditDatabase
+from core.db_pool import get_db_pool
 from paper_trader import PaperTradingBot
 from core.multi_coin_trader import MultiCoinPaperEngine, calculate_kalshi_taker_fee
+from core.portfolio_manager import PortfolioManager
+from core.db_async import init_async_models, get_async_db
+from core.dependencies import (
+    set_portfolio_manager_singleton,
+    set_multicoin_engine_singleton,
+    get_portfolio_manager,
+    get_multicoin_engine,
+    PortfolioManagerDep,
+    MultiCoinEngineDep
+)
+from core.ws_manager import WebSocketConnectionManager
+from schemas import (
+    RiskDashboardResponse,
+    MultiCoinPriceResponse,
+    PortfolioStatusResponse
+)
 from core.portfolio_state import (
     init_baseline as init_portfolio_baseline,
     check_portfolio_daily_loss,
@@ -28,6 +45,8 @@ from core.portfolio_state import (
     combined_equity,
     load_state as load_portfolio_state,
 )
+from core.kill_switch import kill_switch
+from core.blue_green_comparator import blue_green_comparator
 from core.live_executor import (
     KALSHI_PROD_REST_URL,
     KALSHI_PROD_WS_URL,
@@ -51,10 +70,10 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 # Dashboard display cap must match the engine's enforced entry-price cap
-# (MultiCoinPaperEngine.max_entry_price defaults to 0.68). The 0.20-0.80
+# (MultiCoinPaperEngine.max_entry_price defaults to 0.52). The 0.20-0.80
 # prefilter in the loop is only a coarse allow-band; the UI must never show
-# "BUY" for a setup the engine's 0.68 gate will reject.
-MAX_ENTRY_PRICE = 0.68
+# "BUY" for a setup the engine's gate will reject.
+MAX_ENTRY_PRICE = 0.52
 
 # Coins that must stay disabled regardless of config/global_risk contents.
 HARD_DISABLED_ASSETS = frozenset({"SOL", "XRP"})
@@ -145,14 +164,36 @@ live_oms = KalshiOrderManagementSystem(
     ws_client=live_ws,
     watchdog=watchdog,
 )
+kill_switch.register_cancel_callback(live_oms.cancel_all_orders)
 
 multicoin_engine = MultiCoinPaperEngine(
     initial_balance=100.0,
     db_path="multi_coin_paper.db",
-    pinned_weights={"BTC": 0.50, "ETH": 0.50, "SOL": 0.0, "XRP": 0.0},
+    pinned_weights=None,  # Enable dynamic performance-based rebalancing (BTC/ETH 20%-80% bounds)
     disabled_coins={"SOL", "XRP"},
     ws_client=live_ws  # Pass WebSocket client for L2 book access
 )
+multicoin_engine.max_entry_price = 0.52
+multicoin_engine.max_seconds_left = 500
+multicoin_engine.min_contracts_per_trade = 15
+multicoin_engine.maker_take_profit = True
+multicoin_engine.enable_dynamic_compounding = True
+
+portfolio_manager = PortfolioManager(
+    auth=live_auth,
+    rest_url=KALSHI_REST_URL,
+    initial_balance=100.0,
+    max_portfolio_allocation_pct=40.0,
+    max_single_trade_pct=20.0,
+    max_concurrent_positions=2,
+    global_stop_loss_daily_pct=10.0,
+    day_start_equity=100.0
+)
+
+# Initialize DI singletons and WebSocket streaming manager
+set_portfolio_manager_singleton(portfolio_manager)
+set_multicoin_engine_singleton(multicoin_engine)
+ws_manager = WebSocketConnectionManager()
 multicoin_live_matrix: Dict[str, Dict[str, Any]] = {}
 # FIX (crash): this was initialized as a dict {} but used with .append()/.pop(0),
 # raising AttributeError on every heartbeat and every trade log line.
@@ -266,23 +307,38 @@ def normal_cdf(x: float) -> float:
     return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
 
 async def periodic_reconciliation_loop():
-    """Periodically reconcile local state with exchange (every 60s)."""
-    while True:
-        await asyncio.sleep(60.0)
-        try:
-            if live_auth.is_configured:
-                report = await live_oms.reconcile_exchange_state(
-                    db_path_or_db=live_db,
-                    cancel_orphaned_orders=False  # SAFE DEFAULT: surface orphans fail-closed, never auto-cancel
-                )
-                if report.get("discrepancies_found"):
-                    print(f"[Reconcile] {len(report['discrepancies_found'])} discrepancy(ies) resolved:")
-                    for d in report["discrepancies_found"]:
-                        print(f"  - {d}")
-                else:
-                    print("[Reconcile] Local SQLite and exchange in sync.")
-        except Exception as e:
-            print(f"[Reconcile] Error: {e}")
+    """
+    Distributed Saga Maintenance Loop (every 30s):
+    1. Reconciles local portfolio_state.json with live exchange balances and positions.
+    2. Sweeps and auto-cancels orphaned ghost orders older than max_hold_seconds (120s).
+    3. Reconciles exchange state with local SQLite audit database.
+    """
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        while True:
+            await asyncio.sleep(30.0)
+            try:
+                # 1. 30s Portfolio State Exchange Sync
+                sync_rep = await live_oms.sync_portfolio_state_30s(client=client)
+                if sync_rep.get("discrepancies"):
+                    print(f"[Reconcile 30s] Portfolio sync notice: {sync_rep['discrepancies']}")
+
+                # 2. Orphan Ghost Order Auto-Cancellation (> 120s)
+                cancelled_orphans = await live_oms.sweep_and_cancel_orphaned_orders(max_hold_seconds=120.0)
+                if cancelled_orphans:
+                    print(f"[Reconcile 30s] Auto-cancelled {len(cancelled_orphans)} ghost order(s) (>120s old): {cancelled_orphans}")
+
+                # 3. Exchange state cross-check with local DB
+                if live_auth.is_configured:
+                    report = await live_oms.reconcile_exchange_state(
+                        db_path_or_db=live_db,
+                        cancel_orphaned_orders=False
+                    )
+                    if report.get("discrepancies_found"):
+                        print(f"[Reconcile 30s] {len(report['discrepancies_found'])} discrepancy(ies) resolved:")
+                        for d in report["discrepancies_found"]:
+                            print(f"  - {d}")
+            except Exception as e:
+                print(f"[Reconcile 30s] Error: {e}")
 
 async def paper_reconcile_loop():
     """
@@ -313,14 +369,27 @@ async def paper_reconcile_loop():
             print(f"[PaperReconcile] Error: {e}")
 
 async def kill_switch_watcher():
-    """Watch for KILL file and halt trading if found."""
+    """
+    Continuous Kill-Switch and 10% Daily Drawdown Circuit Breaker Watcher.
+    Monitors KILL file and combined equity drawdown against 10% stop loss.
+    Halts all trading, cancels resting orders, and triggers automated rollback.
+    """
     while True:
         await asyncio.sleep(2.0)
-        if os.path.exists("KILL"):
-            print("[KILL SWITCH] KILL file detected! Halting all new trades.")
-            # The multi_coin_engine will check this in its pre-trade gates
-            # Also halt the legacy paper_bot
-            paper_bot.enabled = False
+        try:
+            tripped, reason = kill_switch.is_tripped()
+            if not tripped:
+                tripped, reason = kill_switch.check_daily_loss(combined_equity())
+
+            if tripped:
+                if paper_bot.enabled:
+                    print(f"[KILL SWITCH] Emergency Halt Active ({reason})! Disabling paper bot.")
+                    paper_bot.enabled = False
+                if not live_oms.dry_run:
+                    print(f"[KILL SWITCH] Live trading armed during halt! Reverting to paper and cancelling orders.")
+                    await live_oms.trigger_rollback_to_paper(reason=f"Kill switch active: {reason}")
+        except Exception as e:
+            print(f"[KILL SWITCH] Watcher check error: {e}")
 
 async def multi_coin_production_loop():
     """
@@ -392,6 +461,15 @@ async def multi_coin_production_loop():
     last_mkt_fetch = 0.0
     last_heartbeat = 0.0
     _ws_subscribed_tickers: set = set()
+    from collections import deque as _deque
+    from core.rti_accumulator import RtiAccumulator
+    _spot_tick_history: Dict[str, _deque] = {c: _deque(maxlen=45) for c in ("BTC", "ETH", "SOL", "XRP")}
+    _rti_accumulators: Dict[str, RtiAccumulator] = {
+        "BTC": RtiAccumulator(index_name="BRTI", window_seconds=60),
+        "ETH": RtiAccumulator(index_name="ETHUSD_RTI", window_seconds=60),
+        "SOL": RtiAccumulator(index_name="SOLUSD_RTI", window_seconds=60),
+        "XRP": RtiAccumulator(index_name="XRPUSD_RTI", window_seconds=60),
+    }
 
     async with httpx.AsyncClient(timeout=4.0) as client:
         while True:
@@ -436,7 +514,9 @@ async def multi_coin_production_loop():
                     for coin in coin_configs:
                         val = mids.get(coin)
                         if val is not None:
-                            spot_prices[coin] = float(val)
+                            val_f = float(val)
+                            spot_prices[coin] = val_f
+                            _spot_tick_history.setdefault(coin, _deque(maxlen=45)).append((now, val_f))
                 else:
                     print(f"[MultiCoinProd] Hyperliquid allMids returned {hl_resp.status_code}")
 
@@ -533,18 +613,37 @@ async def multi_coin_production_loop():
                     n_ask = float(mkt.get("no_ask_dollars") or 0.0)
                     n_bid = float(mkt.get("no_bid_dollars") or 0.0)
 
+                    # Record 1-second settlement sample in final 60s window
+                    acc = _rti_accumulators.get(coin)
+                    if acc is not None:
+                        acc.add_sample(spot, seconds_left, candle_id=close_time)
+
+                    # Dynamic volatility scaling from recent spot ticks blended with base 15m vol
+                    base_vol = float(cfg["vol_15m"])
+                    eff_vol = base_vol
+                    tick_hist = _spot_tick_history.get(coin)
+                    if tick_hist and len(tick_hist) >= 12:
+                        diffs = [
+                            abs(tick_hist[i][1] - tick_hist[i - 1][1]) / math.sqrt(max(0.2, tick_hist[i][0] - tick_hist[i - 1][0]))
+                            for i in range(1, len(tick_hist))
+                        ]
+                        if diffs:
+                            realized_1s = sum(diffs) / len(diffs)
+                            realized_15m = realized_1s * 30.0
+                            eff_vol = max(base_vol * 0.6, min(base_vol * 2.2, 0.5 * base_vol + 0.5 * realized_15m))
+
                     # Model probability
                     delta = spot - open_p
-                    sigma = cfg["vol_15m"] * math.sqrt(seconds_left / 900.0)
+                    sigma = eff_vol * math.sqrt(seconds_left / 900.0)
                     z = delta / max(0.0001, sigma)
                     prob_yes = normal_cdf(z)
                     prob_no = 1.0 - prob_yes
                     prob_yes_pct = prob_yes * 100.0
                     prob_no_pct = prob_no * 100.0
 
-                    # Calculate net post-fee edges
-                    fee_y = calculate_kalshi_taker_fee(1, y_ask) if y_ask > 0 else 0.0
-                    fee_n = calculate_kalshi_taker_fee(1, n_ask) if n_ask > 0 else 0.0
+                    # Calculate net post-fee edges using realistic 40-contract batch (avoids 1-contract ceil() distortion)
+                    fee_y = (calculate_kalshi_taker_fee(40, y_ask) / 40.0) if 0.0 < y_ask < 1.0 else 0.0
+                    fee_n = (calculate_kalshi_taker_fee(40, n_ask) / 40.0) if 0.0 < n_ask < 1.0 else 0.0
                     edge_y = (prob_yes - (y_ask + fee_y)) * 100.0 if y_ask > 0 else -100.0
                     edge_n = (prob_no - (n_ask + fee_n)) * 100.0 if n_ask > 0 else -100.0
 
@@ -581,16 +680,76 @@ async def multi_coin_production_loop():
                         edge_pct = 0.0
                         prob_val = 50.0
 
-                        if prob_yes_pct >= 60.0 and 0.20 <= y_ask <= 0.80:
+                        spread_y = (y_ask - y_bid) if (y_ask > 0 and y_bid > 0) else 1.0
+                        spread_n = (n_ask - n_bid) if (n_ask > 0 and n_bid > 0) else 1.0
+                        max_allowed_spread = 0.10  # Max 10¢ spread
+                        max_rel_spread = 0.35      # Max 35% relative spread
+
+                        is_liquid_y = (y_bid >= 0.05) and (spread_y <= max_allowed_spread) and (spread_y / max(0.01, y_ask) <= max_rel_spread)
+                        is_liquid_n = (n_bid >= 0.05) and (spread_n <= max_allowed_spread) and (spread_n / max(0.01, n_ask) <= max_rel_spread)
+
+                        # Calculate 20-second spot momentum/velocity to prevent buying into exhaustion pullbacks
+                        hist = _spot_tick_history.get(coin, _deque())
+                        velocity_20s = 0.0
+                        if len(hist) >= 4:
+                            cutoff_ts = now - 20.0
+                            oldest_in_win = next((p for t, p in hist if t >= cutoff_ts), hist[0][1])
+                            velocity_20s = spot - oldest_in_win
+
+                        max_entry_cap = float(getattr(multicoin_engine, "max_entry_price", 0.65))
+                        spike_delta_thresh = 70.0 if coin == "BTC" else 5.0
+                        adverse_vel_thresh = 18.0 if coin == "BTC" else 2.0
+
+                        if prob_yes_pct >= 60.0 and 0.20 <= y_ask <= max_entry_cap:
                             if edge_y >= 4.0:
-                                signal = "BUY YES"
-                                edge_pct = edge_y
-                                prob_val = prob_yes_pct
-                        elif prob_no_pct >= 60.0 and 0.20 <= n_ask <= 0.80:
+                                if not is_liquid_y:
+                                    action_status = "HOLD_WIDE_SPREAD"
+                                    action_reason = f"Illiquid book: bid {int(y_bid*100)}¢ / ask {int(y_ask*100)}¢ (spread {int(spread_y*100)}¢ > 10¢)"
+                                elif seconds_left > 500 and delta > spike_delta_thresh and y_ask > 0.58:
+                                    action_status = "HOLD_OVEREXTENDED_SPIKE"
+                                    action_reason = f"{coin} delta {delta:+.1f} overextended early in candle (ask {int(y_ask*100)}¢ > 58¢)"
+                                elif velocity_20s < -adverse_vel_thresh:
+                                    action_status = "HOLD_ADVERSE_MOMENTUM"
+                                    action_reason = f"Adverse spot momentum: {coin} dropping {velocity_20s:+.1f} in 20s (exhaustion pullback)"
+                                else:
+                                    signal = "BUY YES"
+                                    edge_pct = edge_y
+                                    prob_val = prob_yes_pct
+                        elif prob_no_pct >= 60.0 and 0.20 <= n_ask <= max_entry_cap:
                             if edge_n >= 4.0:
-                                signal = "BUY NO"
-                                edge_pct = edge_n
-                                prob_val = prob_no_pct
+                                if not is_liquid_n:
+                                    action_status = "HOLD_WIDE_SPREAD"
+                                    action_reason = f"Illiquid book: bid {int(n_bid*100)}¢ / ask {int(n_ask*100)}¢ (spread {int(spread_n*100)}¢ > 10¢)"
+                                elif seconds_left > 500 and delta < -spike_delta_thresh and n_ask > 0.58:
+                                    action_status = "HOLD_OVEREXTENDED_SPIKE"
+                                    action_reason = f"{coin} delta {delta:+.1f} overextended early in candle (ask {int(n_ask*100)}¢ > 58¢)"
+                                elif velocity_20s > adverse_vel_thresh:
+                                    action_status = "HOLD_ADVERSE_MOMENTUM"
+                                    action_reason = f"Adverse spot momentum: {coin} rallying {velocity_20s:+.1f} in 20s (exhaustion squeeze)"
+                                else:
+                                    signal = "BUY NO"
+                                    edge_pct = edge_n
+                                    prob_val = prob_no_pct
+
+                        is_certainty_arb = False
+                        if not signal and acc is not None and 3 < seconds_left <= 45:
+                            cert_res = acc.evaluate_certainty_arb(
+                                strike=open_p,
+                                current_spot=spot,
+                                seconds_left=seconds_left,
+                                dollar_vol_15m=eff_vol,
+                            )
+                            if cert_res.get("is_certainty_arb") and cert_res.get("side"):
+                                c_side = cert_res["side"]
+                                c_ask = y_ask if c_side == "YES" else n_ask
+                                c_fee = (calculate_kalshi_taker_fee(40, c_ask) / 40.0) if 0.0 < c_ask < 1.0 else 0.0
+                                c_edge = (cert_res["prob"] - (c_ask + c_fee)) * 100.0 if c_ask > 0 else -100.0
+                                c_liquid = is_liquid_y if c_side == "YES" else is_liquid_n
+                                if c_liquid and 0.20 <= c_ask <= 0.95 and c_edge >= 3.0:
+                                    signal = f"BUY {c_side}"
+                                    edge_pct = c_edge
+                                    prob_val = cert_res["prob"] * 100.0
+                                    is_certainty_arb = True
 
                         if signal:
                             trade_pos = multicoin_engine.evaluate_entry(
@@ -604,7 +763,8 @@ async def multi_coin_production_loop():
                                 no_ask=n_ask,
                                 seconds_left=seconds_left,
                                 delta=delta,
-                                candle_id=close_time
+                                candle_id=close_time,
+                                is_certainty_arb=is_certainty_arb
                             )
                             if trade_pos:
                                 print(f"[MultiCoinProd] TRADE ENTERED: {coin} {trade_pos.get('side')} {trade_pos.get('contracts')}x @ {trade_pos.get('entry_price')} on {ticker}")
@@ -625,9 +785,9 @@ async def multi_coin_production_loop():
                         roi_unrealized = ((cur_bid - pos["entry_price"]) / max(0.01, pos["entry_price"])) * 100.0
                         action_status = f"IN_POSITION_{pos['side']}"
                         action_reason = f"Holding {pos['contracts']}x {pos['side']} @ {int(pos['entry_price']*100)}¢ (Now: {int(cur_bid*100)}¢ | ROI: {roi_unrealized:+.1f}%)"
-                    elif seconds_left < 90:
+                    elif seconds_left < 240:
                         action_status = "HOLD_EXPIRE"
-                        action_reason = f"Expiration gate active ({int(seconds_left)}s < 90s cutoff)"
+                        action_reason = f"Expiration gate active ({int(seconds_left)}s < 240s cutoff)"
                     elif seconds_left > 660:
                         action_status = "HOLD_EARLY"
                         action_reason = f"Early candle noise filter ({int(seconds_left)}s > 660s)"
@@ -638,11 +798,19 @@ async def multi_coin_production_loop():
                     # (0.68 today), not the broader 0.20-0.80 prefilter, so the UI
                     # never advertises a setup evaluate_entry will reject.
                     elif prob_yes_pct >= 60.0 and edge_y >= 4.0 and 0.20 <= y_ask <= max_entry_price:
-                        action_status = "BUY_YES"
-                        action_reason = f"Conviction {prob_yes_pct:.1f}% & Edge +{edge_y:.1f}% meets criteria"
+                        if is_liquid_y:
+                            action_status = "BUY_YES"
+                            action_reason = f"Conviction {prob_yes_pct:.1f}% & Edge +{edge_y:.1f}% meets criteria"
+                        else:
+                            action_status = "HOLD_WIDE_SPREAD"
+                            action_reason = f"Illiquid book: bid {int(y_bid*100)}¢ / ask {int(y_ask*100)}¢ (spread {int(spread_y*100)}¢ > 10¢)"
                     elif prob_no_pct >= 60.0 and edge_n >= 4.0 and 0.20 <= n_ask <= max_entry_price:
-                        action_status = "BUY_NO"
-                        action_reason = f"Conviction {prob_no_pct:.1f}% & Edge +{edge_n:.1f}% meets criteria"
+                        if is_liquid_n:
+                            action_status = "BUY_NO"
+                            action_reason = f"Conviction {prob_no_pct:.1f}% & Edge +{edge_n:.1f}% meets criteria"
+                        else:
+                            action_status = "HOLD_WIDE_SPREAD"
+                            action_reason = f"Illiquid book: bid {int(n_bid*100)}¢ / ask {int(n_ask*100)}¢ (spread {int(spread_n*100)}¢ > 10¢)"
                     else:
                         best_p = max(prob_yes_pct, prob_no_pct)
                         best_e = max(edge_y, edge_n)
@@ -757,6 +925,61 @@ async def lifespan(app):
         await metrics_provider.update_derivatives_context(client)
         await scanner.scan_all_btc_markets(client)
 
+    # Initialize Async SQLAlchemy 2.0 models
+    try:
+        await init_async_models()
+        print("[Lifespan] Async SQLAlchemy 2.0 models initialized.")
+    except Exception as e:
+        print(f"[Lifespan] Async DB notice: {e}")
+
+    # Real-time WebSocket broadcast loop (streams every 1s to active UI clients)
+    async def ws_tick_broadcast_loop():
+        while True:
+            try:
+                await asyncio.sleep(1.0)
+                if ws_manager.connection_count > 0:
+                    payload = assemble_portfolio_payload()
+                    await ws_manager.broadcast_json({
+                        "type": "tick_stream",
+                        "timestamp": time.time(),
+                        "data": payload
+                    })
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"[WS Broadcast] Broadcast notice: {e}")
+
+    # Automated 24h Data Partitioning & WAL Maintenance loop
+    async def periodic_partition_archive_loop():
+        from core.partition_manager import PartitionArchiveManager
+        archive_mgr = PartitionArchiveManager()
+        while True:
+            try:
+                # Initial wait 300s after boot, then every 6 hours
+                await asyncio.sleep(300.0)
+                res = archive_mgr.archive_all_databases(
+                    db_paths=["kalshi_audit.db", "multi_coin_paper.db", "kalshi_live_demo.db"],
+                    cutoff_hours=24,
+                    prune_hot=True
+                )
+                total_archived = sum(
+                    tbl_info.get("rows_archived", 0)
+                    for db_info in res.values()
+                    for tbl_info in db_info.values()
+                    if isinstance(tbl_info, dict)
+                )
+                if total_archived > 0:
+                    print(f"[PartitionManager] Automated 24h archival completed: {total_archived} cold rows exported to Parquet.")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[PartitionManager] Automated partition notice: {e}")
+            await asyncio.sleep(21300.0)
+
+    if os.environ.get("TESTING") == "1":
+        yield
+        return
+
     task_ws = asyncio.create_task(live_ws.connect_and_listen())
     task1 = asyncio.create_task(fast_spot_loop())
     task2 = asyncio.create_task(full_scan_loop())
@@ -765,6 +988,8 @@ async def lifespan(app):
     task_reconcile = asyncio.create_task(periodic_reconciliation_loop())
     task_paper_reconcile = asyncio.create_task(paper_reconcile_loop())
     task_killwatch = asyncio.create_task(kill_switch_watcher())
+    task_ws_broadcast = asyncio.create_task(ws_tick_broadcast_loop())
+    task_partition = asyncio.create_task(periodic_partition_archive_loop())
     yield
     # ==================== GRACEFUL SHUTDOWN ====================
     print("[Lifespan] Shutdown initiated: cancelling resting orders (positions left open)...")
@@ -787,7 +1012,7 @@ async def lifespan(app):
     except Exception as e:
         print(f"[Lifespan] Shutdown cancel error: {e}")
     live_ws.stop()
-    for t in (task_ws, task1, task2, task3, task_multicoin, task_reconcile, task_paper_reconcile, task_killwatch):
+    for t in (task_ws, task1, task2, task3, task_multicoin, task_reconcile, task_paper_reconcile, task_killwatch, task_ws_broadcast):
         t.cancel()
         try:
             await asyncio.wait_for(t, timeout=2.0)
@@ -835,12 +1060,22 @@ def assemble_portfolio_payload() -> Dict[str, Any]:
             "discrepancies": len(live_oms.last_reconcile_report.get("discrepancies_found", [])),
         },
     }
+    # Sync portfolio manager state
+    try:
+        portfolio_manager.total_equity = float(mc.get("total_equity", 100.0) or 100.0)
+        portfolio_manager.total_cash = float(mc.get("total_cash", 100.0) or 100.0)
+        for coin, sub_eq in multicoin_engine.coin_equities.items():
+            portfolio_manager.update_asset_equity(coin, sub_eq)
+    except Exception:
+        pass
+
     return {
         "timestamp": time.time(),
         "primary_engine": {"name": "multicoin", "trading_enabled": True, "status": mc},
         "legacy_engine": {"name": "paper_bot_btc_only", "trading_enabled": LEGACY_PAPER_BOT_TRADING, "status": legacy},
         "live_oms_safety": live_safety,
         "portfolio_risk": load_portfolio_state(),
+        "risk_dashboard": portfolio_manager.get_risk_dashboard(),
         "combined": {
             "equity": round(float(mc["total_equity"]) + legacy_equity, 2),
             "pnl": round(float(mc["total_pnl"]) + legacy_pnl, 2),
@@ -1186,8 +1421,18 @@ async def post_live_cancel_all(request):
             canceled_ids.append(oid)
     return JSONResponse({"status": "success", "canceled_orders": canceled_ids})
 
+def _is_browser_navigation(request) -> bool:
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept:
+        if "application/json" not in accept:
+            return True
+        return accept.find("text/html") < accept.find("application/json")
+    return False
+
 async def get_multicoin_status(request):
     """Return multi-coin paper trading engine status."""
+    if _is_browser_navigation(request):
+        return RedirectResponse(url="/", status_code=303)
     return JSONResponse(multicoin_engine.get_status_dict())
 
 async def get_multicoin_trades(request):
@@ -1197,6 +1442,25 @@ async def get_multicoin_trades(request):
 async def get_portfolio(request):
     """Unified portfolio view: primary multi-coin engine + legacy read-only bot, merged ledgers."""
     return JSONResponse(assemble_portfolio_payload())
+
+async def get_risk_dashboard(request):
+    """
+    Unified Institutional Risk Dashboard:
+    - Global Caps (40% portfolio, 20% single-asset, max 2 concurrent, 10% daily stop loss)
+    - Real-time Drawdown per Asset (BTC, ETH, SOL, XRP)
+    - R-Multiple Trade Tracking, Win Rate, and Expectancy
+    - Systematic Hedging Recommendations
+    """
+    if _is_browser_navigation(request):
+        return RedirectResponse(url="/", status_code=303)
+    try:
+        portfolio_manager.total_equity = float(multicoin_engine.total_equity)
+        portfolio_manager.total_cash = float(multicoin_engine.total_cash)
+        for coin, sub_eq in multicoin_engine.coin_equities.items():
+            portfolio_manager.update_asset_equity(coin, sub_eq)
+    except Exception:
+        pass
+    return JSONResponse(portfolio_manager.get_risk_dashboard())
 
 async def get_audit_block_summary(request):
     """
@@ -1211,8 +1475,7 @@ async def get_audit_block_summary(request):
 
     live_trades_15m = []
     try:
-        with sqlite3.connect("kalshi_live_demo.db") as conn:
-            conn.row_factory = sqlite3.Row
+        with get_db_pool("kalshi_live_demo.db").connection() as conn:
             c = conn.cursor()
             c.execute("SELECT id, timestamp, ticker, side, entry_price, exit_price, exit_reason, pnl_dollars, contracts FROM trades WHERE timestamp >= ? ORDER BY id DESC", (now - block_window,))
             live_trades_15m = [dict(r) for r in c.fetchall()]
@@ -1221,8 +1484,7 @@ async def get_audit_block_summary(request):
 
     paper_trades_15m = []
     try:
-        with sqlite3.connect("kalshi_audit.db") as conn:
-            conn.row_factory = sqlite3.Row
+        with get_db_pool("kalshi_audit.db").connection() as conn:
             c = conn.cursor()
             c.execute("SELECT id, timestamp, ticker, side, entry_price, exit_price, exit_reason, pnl_dollars, contracts FROM trades WHERE timestamp >= ? ORDER BY id DESC", (now - block_window,))
             paper_trades_15m = [dict(r) for r in c.fetchall()]
@@ -1231,8 +1493,7 @@ async def get_audit_block_summary(request):
 
     multicoin_trades_15m = []
     try:
-        with sqlite3.connect("multi_coin_paper.db") as conn:
-            conn.row_factory = sqlite3.Row
+        with get_db_pool("multi_coin_paper.db").connection() as conn:
             c = conn.cursor()
             c.execute("SELECT id, timestamp, coin, ticker, side, entry_price, exit_price, exit_reason, pnl_dollars, contracts FROM trades WHERE timestamp >= ? ORDER BY id DESC", (now - block_window,))
             multicoin_trades_15m = [dict(r) for r in c.fetchall()]
@@ -1261,8 +1522,60 @@ async def get_audit_block_summary(request):
         }
     })
 
+# --- Kill Switch & Deployment Safety Handlers ---
+async def get_kill_switch_status(request):
+    """Return real-time kill-switch status, daily drawdown, and lock state."""
+    return JSONResponse(kill_switch.get_status())
+
+async def post_kill_switch_trip(request):
+    """Manually trip emergency kill-switch with optional reason."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    reason = body.get("reason", "Manual trigger via API /api/kill-switch/trip")
+    await kill_switch.trip_async(reason)
+    return JSONResponse({"status": "tripped", "reason": reason, "timestamp": time.time()})
+
+async def post_kill_switch_reset(request):
+    """Reset emergency kill-switch and disarm circuit breaker."""
+    ok, msg = kill_switch.reset()
+    return JSONResponse({"success": ok, "message": msg, "timestamp": time.time()})
+
+async def get_blue_green_summary(request):
+    """Return summary comparison metrics between Blue (Paper) and Green (Live) execution."""
+    return JSONResponse(blue_green_comparator.get_summary())
+
+async def get_blue_green_audit(request):
+    """Return recent Blue vs Green fill comparison audit logs."""
+    limit = int(request.query_params.get("limit", 50))
+    return JSONResponse({"records": blue_green_comparator.get_recent_comparisons(limit=limit)})
+
+async def post_rollback_to_paper(request):
+    """Manually or programmatically trigger emergency rollback of live bot to paper mode."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    reason = body.get("reason", "Manual rollback requested via /api/rollback")
+    res = await live_oms.trigger_rollback_to_paper(reason)
+    return JSONResponse(res)
+
+async def post_partition_archive(request):
+    """Trigger on-demand 24h cold data export to Parquet and WAL checkpointing."""
+    from core.partition_manager import PartitionArchiveManager
+    mgr = PartitionArchiveManager()
+    res = mgr.archive_all_databases(
+        db_paths=["kalshi_audit.db", "multi_coin_paper.db", "kalshi_live_demo.db"],
+        cutoff_hours=24,
+        prune_hot=True
+    )
+    return JSONResponse({"status": "success", "archived": res})
+
 routes = [
     Route("/", serve_dashboard, methods=["GET"]),
+    Route("/dashboard", serve_dashboard, methods=["GET"]),
+    Route("/cockpit", serve_dashboard, methods=["GET"]),
     Route("/api/scan", get_live_scan, methods=["GET"]),
     Route("/api/stream", live_stream_sse, methods=["GET"]),
     Route("/api/simulate", post_simulate_monte_carlo, methods=["POST"]),
@@ -1288,16 +1601,51 @@ routes = [
     Route("/api/multicoin/status", get_multicoin_status, methods=["GET"]),
     Route("/api/multicoin/trades", get_multicoin_trades, methods=["GET"]),
     Route("/api/portfolio", get_portfolio, methods=["GET"]),
+    Route("/api/risk/dashboard", get_risk_dashboard, methods=["GET"]),
     Route("/api/audit/block_summary", get_audit_block_summary, methods=["GET"]),
+
+    # Deployment Safety, Kill-Switch & Blue/Green Routes
+    Route("/api/kill-switch/status", get_kill_switch_status, methods=["GET"]),
+    Route("/api/kill-switch/trip", post_kill_switch_trip, methods=["POST"]),
+    Route("/api/kill-switch/reset", post_kill_switch_reset, methods=["POST"]),
+    Route("/api/blue-green/summary", get_blue_green_summary, methods=["GET"]),
+    Route("/api/blue-green/audit", get_blue_green_audit, methods=["GET"]),
+    Route("/api/rollback", post_rollback_to_paper, methods=["POST"]),
+    Route("/api/partition/archive", post_partition_archive, methods=["POST"]),
 ]
 
-app = Starlette(
+app = FastAPI(
+    title="Kalshi Multi-Coin Quantitative Engine",
+    description="Production-grade Drift-Diffusion Trading & Risk Platform for Kalshi Crypto Binaries",
+    version="2.0.0",
     routes=routes,
     lifespan=lifespan,
     middleware=[
         Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
     ]
 )
+
+@app.websocket("/ws/ticks")
+@app.websocket("/ws/stream")
+async def websocket_tick_stream(websocket: WebSocket):
+    """
+    Real-time WebSocket tick streaming endpoint for subsecond pricing,
+    L2 order book changes, position updates, and risk metrics.
+    """
+    await ws_manager.connect(websocket)
+    try:
+        # Send immediate initial portfolio and market snapshot
+        snapshot = assemble_portfolio_payload()
+        await websocket.send_json({"type": "snapshot", "timestamp": time.time(), "data": snapshot})
+        while True:
+            msg = await websocket.receive_text()
+            if msg == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        await ws_manager.disconnect(websocket)
+    except Exception as e:
+        logger.debug(f"[WS Endpoint] Disconnected: {e}")
+        await ws_manager.disconnect(websocket)
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=8088, log_level="info")

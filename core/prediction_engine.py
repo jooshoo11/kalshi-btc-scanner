@@ -50,9 +50,10 @@ class QuantPredictionEngine:
     - Monotonicity & Inversion Arbitrage Detector
     - Net Expected Value (EV), Fee accounting, and Half-Kelly Staking
     """
-    def __init__(self, risk_free_rate: float = 0.045, taker_fee_cents: float = 0.5):
+    def __init__(self, risk_free_rate: float = 0.045, taker_fee_cents: float = 0.5, rng: Optional[np.random.Generator] = None):
         self.r = risk_free_rate
         self.taker_fee = taker_fee_cents / 100.0
+        self._rng = rng or np.random.default_rng()
 
     def black_scholes_binary(
         self,
@@ -189,13 +190,16 @@ class QuantPredictionEngine:
         t = max(1e-5, time_to_expiry_years)
         dt = t
 
+        # Thread-safe NumPy Generator (avoids legacy RNG lock contention)
+        rng = getattr(self, "_rng", None) or np.random.default_rng()
+
         # Standard Brownian motion component
-        z = np.random.standard_normal(num_paths)
+        z = rng.standard_normal(num_paths)
 
         # Poisson jump process
         k = math.exp(jump_mean + 0.5 * jump_std ** 2) - 1.0
-        num_jumps = np.random.poisson(jump_lambda * dt, num_paths)
-        jumps = np.random.normal(jump_mean, jump_std, num_paths) * num_jumps
+        num_jumps = rng.poisson(jump_lambda * dt, num_paths)
+        jumps = rng.normal(jump_mean, jump_std, num_paths) * num_jumps
 
         # Adjusted drift for jump compensation
         drift_adj = (drift - 0.5 * volatility ** 2 - jump_lambda * k) * dt
@@ -212,9 +216,10 @@ class QuantPredictionEngine:
 
         strike_probs = {}
         if strikes:
-            for k_val in strikes:
-                prob = float(np.mean(st >= k_val))
-                strike_probs[k_val] = round(prob, 4)
+            strikes_arr = np.asarray(strikes, dtype=np.float64)
+            # Vectorized broadcast: (num_strikes, num_paths)
+            probs = np.mean(st[None, :] >= strikes_arr[:, None], axis=1)
+            strike_probs = {k_val: round(float(p), 4) for k_val, p in zip(strikes, probs)}
 
         return {
             "spot": spot,
@@ -259,10 +264,9 @@ class QuantPredictionEngine:
         Kalshi KXBTC15M settles on the 60-second simple arithmetic average of 1-second
         spot samples during the final 60 seconds (seconds_left <= 60).
         
-        Variance of the remaining average decays linearly in remaining samples:
-        Var(S_settle | F_m) = sigma_1s^2 * T_rem / 3600
-        (an earlier cubic T_rem^3/3600 formulation collapsed variance far too
-        fast and was corrected — see the FIX comment in the body below).
+        Variance of the remaining average decays cubically in remaining samples
+        because spot follows a correlated Brownian random walk:
+        Var(S_settle | F_m) = sigma_1s^2 * k*(k+1)*(2k+1) / 21600.
         """
         if market_data:
             spot = market_data.get("spot", spot)
@@ -286,13 +290,14 @@ class QuantPredictionEngine:
         mu_settle = (sum_m + t_rem * spot) / 60.0
 
         # 1-second dollar standard deviation derived from 15m volatility
-        sigma_1s = max(1.0, dollar_vol_15m / 30.0)
+        # Use 0.001 floor (not 1.0) so lower-priced assets like ETH ($5.5/15m -> $0.183/s) are not distorted.
+        sigma_1s = max(0.001, dollar_vol_15m / 30.0)
 
         # Conditional standard deviation of the 60-second arithmetic average.
-        # FIX: Var of (sum_fixed + sum_rem)/60 with iid 1s samples = sigma_1s^2 * t_rem / 3600
-        # (was cubic t_rem^3/3600, which collapsed variance far too fast).
+        # Spot is a correlated Brownian random walk (not iid): Cov(S_{t+j}, S_{t+l}) = min(j,l)*sigma_1s^2.
+        # Exact discrete sum over k remaining ticks gives Var = sigma_1s^2 * k*(k+1)*(2k+1) / 21600.
         if t_rem > 0.0:
-            var_settle = (sigma_1s ** 2) * t_rem / 3600.0
+            var_settle = (sigma_1s ** 2) * t_rem * (t_rem + 1.0) * (2.0 * t_rem + 1.0) / 21600.0
             sigma_settle = max(0.001, math.sqrt(var_settle))
         else:
             sigma_settle = 0.001

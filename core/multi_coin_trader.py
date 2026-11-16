@@ -14,6 +14,8 @@ import logging
 import json
 from typing import Dict, Any, List, Optional
 
+from core.db_pool import get_db_pool, SQLiteConnectionPool, PooledConnection
+
 logger = logging.getLogger("MultiCoinTrader")
 
 
@@ -25,13 +27,27 @@ def calculate_kalshi_taker_fee(contracts: int, price: float) -> float:
 
 
 class MultiCoinAuditDatabase:
-    """SQLite storage for multi-coin paper portfolio."""
-    def __init__(self, db_path: str = "multi_coin_paper.db"):
+    """SQLite storage for multi-coin paper portfolio with pooled connections and WAL mode."""
+    def __init__(self, db_path: str = "multi_coin_paper.db", pool_size: int = 10):
         self.db_path = db_path
+        self.pool: SQLiteConnectionPool = get_db_pool(db_path, max_connections=pool_size)
         self._init_db()
 
+    def _ensure_pool(self) -> SQLiteConnectionPool:
+        if not hasattr(self, "pool") or self.pool is None or getattr(self.pool, "_closed", False):
+            self.pool = get_db_pool(self.db_path)
+        return self.pool
+
+    def _get_conn(self) -> PooledConnection:
+        """Acquire a pooled connection with WAL mode and 5000ms busy_timeout."""
+        return self._ensure_pool().get_connection()
+
+    def connection(self):
+        """Context manager to acquire and return a connection safely."""
+        return self._ensure_pool().connection()
+
     def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
@@ -55,15 +71,32 @@ class MultiCoinAuditDatabase:
                     delta_at_entry REAL,
                     seconds_left_at_entry INTEGER,
                     rationale TEXT,
-                    order_group_id TEXT
+                    order_group_id TEXT,
+                    order_id TEXT
                 )
             """)
-            # Schema migration: DBs created before order_group_id existed won't get
+            # Schema migration: DBs created before order_group_id/order_id existed won't get
             # the column from CREATE TABLE IF NOT EXISTS -> every insert would fail.
             cols = {row[1] for row in cursor.execute("PRAGMA table_info(trades)").fetchall()}
             if "order_group_id" not in cols:
                 cursor.execute("ALTER TABLE trades ADD COLUMN order_group_id TEXT")
                 print("[MultiCoinDB] Migrated trades table: added order_group_id column")
+            if "order_id" not in cols:
+                cursor.execute("ALTER TABLE trades ADD COLUMN order_id TEXT")
+                print("[MultiCoinDB] Migrated trades table: added order_id column")
+
+            # High-throughput B-tree indexes
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_trades_ticker ON trades(ticker)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_trades_series ON trades(series)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_trades_coin ON trades(coin)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_trades_timestamp ON trades(timestamp)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_trades_status ON trades(status)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_trades_order_group ON trades(order_group_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_trades_order_id ON trades(order_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_trades_series_ticker ON trades(series, ticker)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_trades_coin_status ON trades(coin, status)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_trades_status_series_ts ON trades(status, series, timestamp)")
+
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,17 +113,20 @@ class MultiCoinAuditDatabase:
                     xrp_equity REAL
                 )
             """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_portfolio_snapshots_ts ON portfolio_snapshots(timestamp)")
             conn.commit()
 
     def record_trade_open(self, **kwargs) -> int:
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             cursor = conn.cursor()
+            actual_order_id = kwargs.get("order_id") or kwargs.get("order_group_id")
+            actual_group_id = kwargs.get("order_group_id") or kwargs.get("order_id")
             cursor.execute("""
                 INSERT INTO trades (
                     timestamp, coin, ticker, series, side, entry_price, contracts,
                     cost_dollars, fee_dollars, status, model_prob_entry,
-                    delta_at_entry, seconds_left_at_entry, rationale, order_group_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?)
+                    delta_at_entry, seconds_left_at_entry, rationale, order_group_id, order_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?)
             """, (
                 kwargs.get("timestamp", time.time()),
                 kwargs.get("coin", "BTC"),
@@ -105,13 +141,14 @@ class MultiCoinAuditDatabase:
                 kwargs.get("delta_at_entry", 0.0),
                 kwargs.get("seconds_left_at_entry", 0),
                 kwargs.get("rationale", ""),
-                kwargs.get("order_group_id", None)
+                actual_group_id,
+                actual_order_id
             ))
             conn.commit()
             return cursor.lastrowid
 
     def record_trade_close(self, trade_id: int, **kwargs):
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 UPDATE trades SET
@@ -133,14 +170,13 @@ class MultiCoinAuditDatabase:
             conn.commit()
 
     def get_recent_trades(self, limit: int = 50) -> List[Dict[str, Any]]:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,))
             return [dict(row) for row in cursor.fetchall()]
 
     def get_coin_stats(self, coin: str) -> Dict[str, Any]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT
@@ -159,6 +195,24 @@ class MultiCoinAuditDatabase:
             wins = row[1] or 0
             pnl = row[2] or 0.0
             volume = row[3] or 0.0
+
+            # Merge with cold Parquet archives if any
+            try:
+                import glob
+                import pandas as _pd
+                for _f in glob.glob("archive/trades/*/*/*.parquet"):
+                    try:
+                        _df_a = _pd.read_parquet(_f)
+                        _coin_df = _df_a[(_df_a["coin"] == coin) & (_df_a["status"] == "CLOSED")]
+                        total += len(_coin_df)
+                        wins += int((_coin_df["pnl_dollars"] > 0).sum())
+                        pnl += float(_coin_df["pnl_dollars"].fillna(0.0).sum())
+                        volume += float(_coin_df["cost_dollars"].fillna(0.0).sum())
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
             win_rate = (wins / total * 100.0) if total > 0 else 0.0
             return {
                 "coin": coin,
@@ -169,6 +223,62 @@ class MultiCoinAuditDatabase:
                 "total_pnl": round(pnl, 2),
                 "volume": round(volume, 2)
             }
+
+    def get_hot_trades(
+        self,
+        cutoff_hours: int = 24,
+        limit: int = 500,
+        ticker: Optional[str] = None,
+        series: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Query hot trades residing in SQLite within the last cutoff_hours."""
+        from core.partition_manager import PartitionArchiveManager
+        manager = PartitionArchiveManager()
+        return manager.query_hot_trades(
+            db_path=self.db_path,
+            table_name="trades",
+            cutoff_hours=cutoff_hours,
+            limit=limit,
+            ticker=ticker,
+            series=series,
+        )
+
+    def get_unified_trades(
+        self,
+        archive_dir: str = "archive",
+        start_ts: Optional[float] = None,
+        end_ts: Optional[float] = None,
+        ticker: Optional[str] = None,
+        series: Optional[str] = None,
+        limit: int = 1000,
+    ) -> List[Dict[str, Any]]:
+        """Query unified trades across hot SQLite and cold Parquet partitions."""
+        from core.partition_manager import PartitionArchiveManager
+        manager = PartitionArchiveManager(archive_base_dir=archive_dir)
+        return manager.query_unified_trades(
+            db_path=self.db_path,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            ticker=ticker,
+            series=series,
+            limit=limit,
+        )
+
+    def checkpoint(self, mode: str = "PASSIVE"):
+        """Trigger WAL checkpoint to flush WAL pages into primary DB file."""
+        return self.pool.checkpoint(mode=mode)
+
+    def close(self):
+        """Close connection pool and release file handles."""
+        if hasattr(self, "pool") and self.pool is not None:
+            self.pool.close_all()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
 
 
 class MultiCoinPaperEngine:
@@ -235,15 +345,19 @@ class MultiCoinPaperEngine:
 
         # Risk parameters
         self.max_trade_alloc_pct = 20.0     # 20% of coin's sub-equity per trade
+        self.max_trade_collateral_dollars = 25.0  # Max collateral per trade ($25 baseline)
+        self.enable_dynamic_compounding = False  # If True, scales collateral cap safely with equity (12%, max $50)
         self.max_contracts_per_trade = 60   # Liquidity protection cap to prevent orderbook slippage
-        self.max_entry_price = 0.68         # Cap entry price at 68¢ to maintain positive risk/reward
+        self.max_entry_price = 0.65         # Default max entry price (overridden by coin config e.g. 0.52)
+        self.max_spike_entry_price = 0.58   # Early spike breakout ceiling: avoid buying >58¢ on overextended wicks
+        self.early_spike_delta_threshold = 70.0  # Spot delta threshold defining an overextended early move
         self.take_profit_roi_pct = 25.0     # Lock in +25% ROI
         self.stop_loss_roi_pct = 25.0       # Exit at -25% ROI if model confirms decay
         self.stop_loss_max_prob_pct = 38.0  # Dual confirmation: cut loss if model prob <= 38.0%
-        self.stop_loss_hard_roi_pct = 28.0  # Hard circuit-breaker: cut immediately at -28% ROI regardless of model prob
-        self.min_seconds_left = 90          # 90s expiration safety cutoff (avoid pin risk)
-        self.max_seconds_left = 660         # 660s (first 4 minutes noise filter: avoid entering with >11m left)
-        self.max_hold_seconds = 120.0       # CREATOR PREFERENCE: never hold to expiry — market-exit after this long (quick scalps like the first trades)
+        self.stop_loss_hard_roi_pct = 50.0  # Hard catastrophe stop: cut unconditionally if <= -50% ROI
+        self.min_seconds_left = 240         # 240s expiration safety cutoff (avoid high-gamma late candle trap)
+        self.max_seconds_left = 500         # 500s (enter only after candle direction is established; skip 0-5m noise)
+        self.max_hold_seconds = 600.0       # 600s (10 min) hold window for 15m contracts; let winning trades reach expiry
         self.min_edge_pct = 4.0             # 4.0% min model edge
         self.min_prob_pct = 60.0            # 60.0% min model conviction
 
@@ -399,8 +513,7 @@ class MultiCoinPaperEngine:
         the positions were never rebuilt), so a restart orphaned OPEN rows and
         corrupted equity.
         """
-        with sqlite3.connect(self.db.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.db.pool.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT SUM(pnl_dollars) FROM trades WHERE status='CLOSED'")
             cum_pnl = cursor.fetchone()[0] or 0.0
@@ -408,6 +521,19 @@ class MultiCoinPaperEngine:
             open_cost = cursor.fetchone()[0] or 0.0
             cursor.execute("SELECT * FROM trades WHERE status='OPEN' ORDER BY id")
             open_rows = [dict(r) for r in cursor.fetchall()]
+
+        # Include cold Parquet archive PnL so 24h partitioning doesn't erase historical equity
+        try:
+            import glob
+            import pandas as _pd
+            for _f in glob.glob("archive/trades/*/*/*.parquet"):
+                try:
+                    _df_arch = _pd.read_parquet(_f, columns=["pnl_dollars"])
+                    cum_pnl += float(_df_arch["pnl_dollars"].fillna(0.0).sum())
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         self.total_cash = round(self.initial_balance + cum_pnl - open_cost, 2)
         self.total_equity = round(self.total_cash + open_cost, 2)
@@ -443,13 +569,25 @@ class MultiCoinPaperEngine:
         Returns a report dict for the app-level reconcile loop.
         """
         report: Dict[str, Any] = {"timestamp": time.time(), "discrepancies": [], "cash_before": round(self.total_cash, 2)}
-        with sqlite3.connect(self.db.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.db.pool.connection() as conn:
             cur = conn.cursor()
             cur.execute("SELECT SUM(pnl_dollars) FROM trades WHERE status='CLOSED'")
             cum_pnl = cur.fetchone()[0] or 0.0
             cur.execute("SELECT * FROM trades WHERE status='OPEN' ORDER BY id")
             open_rows = [dict(r) for r in cur.fetchall()]
+
+        # Include cold Parquet archive PnL so 24h partitioning doesn't erase historical equity
+        try:
+            import glob
+            import pandas as _pd
+            for _f in glob.glob("archive/trades/*/*/*.parquet"):
+                try:
+                    _df_arch = _pd.read_parquet(_f, columns=["pnl_dollars"])
+                    cum_pnl += float(_df_arch["pnl_dollars"].fillna(0.0).sum())
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         expected_cash = round(self.initial_balance + cum_pnl - sum(r["cost_dollars"] + r["fee_dollars"] for r in open_rows), 2)
         if abs(expected_cash - self.total_cash) > 0.01:
@@ -510,8 +648,11 @@ class MultiCoinPaperEngine:
                 self.coin_equities[coin] = round(self.total_equity * weight, 2)
             return
 
+        disabled = getattr(self, "disabled_coins", None) or set()
         raw_scores = {}
         for coin in self.coin_weights:
+            if coin in disabled:
+                continue
             stats = self.db.get_coin_stats(coin)
             trades = stats["total_trades"]
             win_rate = stats["win_rate_pct"]
@@ -521,28 +662,22 @@ class MultiCoinPaperEngine:
             if trades >= 3:
                 score = max(0.2, (win_rate / 100.0) + (pnl / max(10.0, self.initial_balance)))
             else:
-                score = {"BTC": 1.2, "ETH": 1.0, "SOL": 0.9, "XRP": 0.7}[coin]
+                score = {"BTC": 1.2, "ETH": 1.0, "SOL": 0.9, "XRP": 0.7}.get(coin, 1.0)
             raw_scores[coin] = score
 
         total_score = sum(raw_scores.values())
         if total_score > 0:
+            active_count = len(raw_scores)
+            min_w = 0.20 if active_count <= 2 else 0.05
+            max_w = 0.80 if active_count <= 2 else 0.50
             for coin in self.coin_weights:
-                norm_w = raw_scores[coin] / total_score
-                # Clamped between 5% and 50%
-                self.coin_weights[coin] = round(max(0.05, min(0.50, norm_w)), 3)
-
-            # Re-normalize to exactly 1.00
-            s = sum(self.coin_weights.values())
-            for coin in self.coin_weights:
-                self.coin_weights[coin] = round(self.coin_weights[coin] / s, 3)
-
-        # FIX: respect disabled coins — pin them to 0 (overrides the 5% floor clamp above)
-        # and re-normalize the remaining enabled coins to sum to 1.00
-        disabled = getattr(self, "disabled_coins", None) or set()
-        if disabled:
-            for coin in disabled:
-                if coin in self.coin_weights:
+                if coin in disabled:
                     self.coin_weights[coin] = 0.0
+                else:
+                    norm_w = raw_scores[coin] / total_score
+                    self.coin_weights[coin] = round(max(min_w, min(max_w, norm_w)), 3)
+
+            # Re-normalize active coins to exactly 1.00
             s = sum(self.coin_weights.values())
             if s > 0:
                 for coin in self.coin_weights:
@@ -585,6 +720,29 @@ class MultiCoinPaperEngine:
             # FINDING #7: book marked stale after a delta parse failure — refuse to gate on drifted data
             logger.warning(f"[L2 Validation] Book for {ticker} is STALE — aborting entry on stale data")
             return False
+
+        # Bid-ask spread & predatory liquidity protection
+        best_bid_p, _ = book.get_best_bid()
+        best_ask_p, _ = book.get_best_ask()
+        if best_bid_p > 0 and best_ask_p < 100:
+            spread_cents = best_ask_p - best_bid_p
+            if spread_cents > 10:
+                logger.warning(
+                    f"[L2 Validation] Spread too wide on {ticker}: "
+                    f"bid {best_bid_p}¢, ask {best_ask_p}¢ (spread {spread_cents}¢ > 10¢ limit) — aborting entry"
+                )
+                return False
+            if spread_cents / float(best_ask_p) > 0.35:
+                logger.warning(
+                    f"[L2 Validation] Relative spread too wide on {ticker}: "
+                    f"{spread_cents / float(best_ask_p):.1%} > 35% limit — aborting entry"
+                )
+                return False
+            if best_bid_p < 5:
+                logger.warning(
+                    f"[L2 Validation] Bid too low on {ticker}: {best_bid_p}¢ < 5¢ (illiquid order book) — aborting entry"
+                )
+                return False
 
         # Determine which side of the book to sweep
         is_buy_yes = (side == "YES")
@@ -663,7 +821,8 @@ class MultiCoinPaperEngine:
         seconds_left: float,
         delta: float,
         candle_id: str,
-        current_time: Optional[float] = None
+        current_time: Optional[float] = None,
+        is_certainty_arb: bool = False
     ) -> Optional[Dict[str, Any]]:
         """Evaluate paper entry for a specific coin under portfolio rules."""
         now = current_time or time.time()
@@ -675,8 +834,15 @@ class MultiCoinPaperEngine:
         if risk_reason:
             return None
 
-        # Timing constraints: Avoid first 3 minutes of noise (>720s) and final 90s expiration trap (<90s)
-        if seconds_left < self.min_seconds_left or seconds_left > self.max_seconds_left:
+        # Timing constraints: Avoid first 5 minutes of noise (>500s) and final 240s expiration trap (<240s)
+        # Exception: Deterministic Certainty Arbitrage in the final 45s settlement window.
+        coin_cfg = getattr(self, "coin_configs", {}).get(coin, {}) if hasattr(self, "coin_configs") else {}
+        min_sec = coin_cfg.get("min_seconds_left_for_entry", getattr(self, "min_seconds_left", 240))
+        max_sec = coin_cfg.get("max_seconds_left_for_entry", getattr(self, "max_seconds_left", 500))
+        if is_certainty_arb:
+            if seconds_left <= 3 or seconds_left > 45:
+                return None
+        elif seconds_left < min_sec or seconds_left > max_sec:
             return None
 
         # Re-entry Lockout: Do not re-enter if coin stopped out in current candle
@@ -696,41 +862,68 @@ class MultiCoinPaperEngine:
             return None
 
         # Conviction & edge requirements
-        if edge_pct < self.min_edge_pct or model_prob < self.min_prob_pct:
+        if is_certainty_arb:
+            if edge_pct < 3.0 or model_prob < 99.0:
+                return None
+        elif edge_pct < self.min_edge_pct or model_prob < self.min_prob_pct:
             return None
 
         target_side = None
         target_price = 0.0
-        if "BUY YES" in signal and 0.20 <= yes_ask <= 0.80:
+        max_ask_bound = 0.95 if is_certainty_arb else 0.80
+        if "BUY YES" in signal and 0.20 <= yes_ask <= max_ask_bound:
             target_side = "YES"
             target_price = yes_ask
-        elif "BUY NO" in signal and 0.20 <= no_ask <= 0.80:
+        elif "BUY NO" in signal and 0.20 <= no_ask <= max_ask_bound:
             target_side = "NO"
             target_price = no_ask
 
         if not target_side or target_price <= 0.0:
             return None
 
-        # Entry price gate: reject contracts priced above 68¢ (or below 20¢)
-        if target_price > getattr(self, "max_entry_price", 0.68) or target_price < 0.20:
+        # Entry price gate: reject contracts priced above max_entry_price (e.g. 52¢) or below 20¢
+        # Certainty arb bypasses the 52¢ directional ceiling up to 95¢.
+        max_entry = 0.95 if is_certainty_arb else coin_cfg.get("max_entry_price", getattr(self, "max_entry_price", 0.65))
+        if target_price > max_entry or target_price < 0.20:
             return None
+
+        # Early spike breakout ceiling: if early in candle (>500s left) and spot is overextended,
+        # cap entry price at 58¢ to avoid buying the top/bottom of 1-minute false wicks
+        spike_cap = getattr(self, "max_spike_entry_price", 0.58)
+        spike_thresh = getattr(self, "early_spike_delta_threshold", 70.0) if coin == "BTC" else 5.0
+        if seconds_left > 500:
+            if target_side == "YES" and delta > spike_thresh and target_price > spike_cap:
+                logger.info(f"[MultiCoin] Skipped {coin} YES: overextended early spike (delta {delta:+.1f} > +{spike_thresh}, price {target_price:.2f} > {spike_cap})")
+                return None
+            elif target_side == "NO" and delta < -spike_thresh and target_price > spike_cap:
+                logger.info(f"[MultiCoin] Skipped {coin} NO: overextended early dump (delta {delta:+.1f} < -{spike_thresh}, price {target_price:.2f} > {spike_cap})")
+                return None
 
         # ==================== POSITION SIZING ====================
         # Compute size FIRST: L2 validation needs the contract count to walk the book.
         # FIX (crash): this block used to run AFTER _validate_l2_entry, so `contracts`
         # was unbound at the call site -> UnboundLocalError on EVERY entry attempt,
         # which silently froze the engine (no trades since the L2 gate was added).
-        # 20% of coin's sub-equity capped at max_contracts_per_trade
+        # 20% of coin's sub-equity capped at max_contracts_per_trade AND max_trade_collateral_dollars ($25)
         sub_equity = self.coin_equities.get(coin, self.total_equity * self.coin_weights.get(coin, 0.25))
         trade_budget = sub_equity * (self.max_trade_alloc_pct / 100.0)
         trade_budget = min(trade_budget, self.total_cash)
 
-        fee_est = calculate_kalshi_taker_fee(1, target_price)
+        # Enforce max collateral cap ($25 baseline, scaling dynamically with equity if enabled)
+        max_collateral = getattr(self, "max_trade_collateral_dollars", 25.0)
+        if getattr(self, "enable_dynamic_compounding", False):
+            dynamic_cap = min(max(25.0, self.total_equity * 0.12), 50.0)
+            trade_budget = min(trade_budget, dynamic_cap)
+        elif max_collateral > 0:
+            trade_budget = min(trade_budget, max_collateral)
+
+        fee_est = 0.07 * target_price * (1.0 - target_price)
         contracts = int(trade_budget / (target_price + fee_est))
         max_c = getattr(self, "max_contracts_per_trade", 60)
         if max_c > 0:
             contracts = min(contracts, max_c)
-        if contracts < 1:
+        min_c = getattr(self, "min_contracts_per_trade", 1)
+        if contracts < min_c:
             return None
 
         cost = round(contracts * target_price, 2)
@@ -828,34 +1021,49 @@ class MultiCoinPaperEngine:
             reason = "SETTLED_ESTIMATED_WIN" if won else "SETTLED_ESTIMATED_LOSS"
             return self._close_position(coin, exit_price=1.0 if won else 0.0, reason=reason, pnl=pnl, payout=payout, current_time=now)
 
-        # B. Take Profit Exit (+25% ROI)
+        # B. Take Profit Exit (+25% ROI) via Passive Maker Limit Order (0 taker exit fee)
         if roi_pct >= self.take_profit_roi_pct:
-            exit_fee = calculate_kalshi_taker_fee(pos["contracts"], current_bid)
+            use_maker_tp = getattr(self, "maker_take_profit", True)
+            exit_fee = 0.0 if use_maker_tp else calculate_kalshi_taker_fee(pos["contracts"], current_bid)
             gross = pos["contracts"] * current_bid
             pnl = gross - exit_fee - (pos["cost_dollars"] + pos["fee_dollars"])
             return self._close_position(coin, exit_price=current_bid, reason="TAKE_PROFIT", pnl=pnl, payout=gross - exit_fee, current_time=now)
 
-        # C. Dynamic Dual-Confirmation Stop Loss (-25% ROI AND Model Prob <= 38%, OR Hard Circuit-Breaker at -28% ROI)
-        is_dual_confirmed = (roi_pct <= -self.stop_loss_roi_pct and (model_prob is None or model_prob <= self.stop_loss_max_prob_pct))
-        is_hard_stop = (roi_pct <= -self.stop_loss_hard_roi_pct)
-        if is_dual_confirmed or is_hard_stop:
-            exit_fee = calculate_kalshi_taker_fee(pos["contracts"], current_bid)
-            gross = pos["contracts"] * current_bid
-            pnl = gross - exit_fee - (pos["cost_dollars"] + pos["fee_dollars"])
-            candle_id = pos.get("candle_id", "")
-            if candle_id:
-                self.candle_stopped_out[coin] = candle_id
-            return self._close_position(coin, exit_price=current_bid, reason="STOP_LOSS", pnl=pnl, payout=gross - exit_fee, current_time=now)
-
-        # D. Time-based exit: NEVER hold a position to expiry. If the trade has been
-        # open longer than max_hold_seconds and neither TP nor SL fired, exit at market.
+        # C. Dynamic Dual-Confirmation Stop Loss
+        # Only stop out if BOTH the price has decayed (-25% ROI) AND model/spot confirms the thesis has failed.
+        # Microstructure protection: within the first 30s of entry, do not stop out unless spot actually crosses strike adversely.
         hold_secs = now - pos.get("entry_timestamp", now)
+        is_spot_adverse = (settle_spot < strike) if pos["side"] == "YES" else (settle_spot > strike)
+
+        if hold_secs < 30 and not is_spot_adverse:
+            pass  # Entry spread grace period: spot is favorable, do not liquidate on resting bid noise
+        else:
+            is_dual_confirmed = (
+                roi_pct <= -self.stop_loss_roi_pct and 
+                (model_prob is None or model_prob <= self.stop_loss_max_prob_pct or is_spot_adverse)
+            )
+            is_hard_stop = (roi_pct <= -self.stop_loss_hard_roi_pct)  # Unconditional -50% catastrophe circuit breaker
+            if is_dual_confirmed or is_hard_stop:
+                exit_fee = calculate_kalshi_taker_fee(pos["contracts"], current_bid)
+                gross = pos["contracts"] * current_bid
+                pnl = gross - exit_fee - (pos["cost_dollars"] + pos["fee_dollars"])
+                candle_id = pos.get("candle_id", "")
+                if candle_id:
+                    self.candle_stopped_out[coin] = candle_id
+                logger.info(f"[MultiCoin] STOP_LOSS {coin} triggered: ROI {roi_pct:+.1f}%, model_prob={model_prob}, adverse={is_spot_adverse} | PnL ${pnl:+.2f}")
+                return self._close_position(coin, exit_price=current_bid, reason="STOP_LOSS", pnl=pnl, payout=gross - exit_fee, current_time=now)
+
+        # D. Time-based exit: If held past max_hold_seconds, exit if decaying or adverse.
+        # If the position is strongly in the money and model prob is healthy (>= 55%), let it ride to expiration!
         if hold_secs >= self.max_hold_seconds:
-            exit_fee = calculate_kalshi_taker_fee(pos["contracts"], current_bid)
-            gross = pos["contracts"] * current_bid
-            pnl = gross - exit_fee - (pos["cost_dollars"] + pos["fee_dollars"])
-            logger.info(f"[MultiCoin] TIME_EXIT {coin} after {hold_secs:.0f}s (max_hold {self.max_hold_seconds:.0f}s) | ROI {roi_pct:+.1f}% | PnL ${pnl:+.2f}")
-            return self._close_position(coin, exit_price=current_bid, reason="TIME_EXIT", pnl=pnl, payout=gross - exit_fee, current_time=now)
+            if not is_spot_adverse and (model_prob is not None and model_prob >= 55.0):
+                pass  # Let in-the-money winning positions capture the full $1.00 payout at expiry
+            else:
+                exit_fee = calculate_kalshi_taker_fee(pos["contracts"], current_bid)
+                gross = pos["contracts"] * current_bid
+                pnl = gross - exit_fee - (pos["cost_dollars"] + pos["fee_dollars"])
+                logger.info(f"[MultiCoin] TIME_EXIT {coin} after {hold_secs:.0f}s (max_hold {self.max_hold_seconds:.0f}s) | ROI {roi_pct:+.1f}% | PnL ${pnl:+.2f}")
+                return self._close_position(coin, exit_price=current_bid, reason="TIME_EXIT", pnl=pnl, payout=gross - exit_fee, current_time=now)
 
         return None
 
