@@ -174,8 +174,10 @@ multicoin_engine = MultiCoinPaperEngine(
     disabled_coins={"SOL", "XRP"},
     ws_client=live_ws  # Pass WebSocket client for L2 book access
 )
-multicoin_engine.max_entry_price = 0.52
+multicoin_engine.max_entry_price = 0.42
 multicoin_engine.max_seconds_left = 500
+multicoin_engine.min_seconds_left_by_coin = {"BTC": 360, "ETH": 240}
+multicoin_engine.min_prob_by_coin = {"BTC": 65.0, "ETH": 60.0}
 multicoin_engine.min_contracts_per_trade = 15
 multicoin_engine.max_contracts_per_trade = 120
 multicoin_engine.stop_loss_hard_roi_pct = 35.0

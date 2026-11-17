@@ -221,3 +221,43 @@ def test_p2_hyperliquid_ws_feed_5level_ofi():
 
     ofi_z = feed.get_ofi_z("BTC")
     assert ofi_z > 2.0
+
+
+def test_trial3_win_rate_gates(tmp_path):
+    import app
+
+    assert app.multicoin_engine.max_entry_price == 0.42
+    assert app.multicoin_engine.min_seconds_left_by_coin == {"BTC": 360, "ETH": 240}
+    assert app.multicoin_engine.min_prob_by_coin == {"BTC": 65.0, "ETH": 60.0}
+
+    db_path = str(tmp_path / "test_trial3.db")
+    engine = MultiCoinPaperEngine(
+        initial_balance=100.0,
+        db_path=db_path,
+        disabled_coins={"SOL", "XRP"},
+    )
+    engine.max_entry_price = 0.42
+    engine.min_seconds_left_by_coin = {"BTC": 360, "ETH": 240}
+    engine.min_prob_by_coin = {"BTC": 65.0, "ETH": 60.0}
+
+    # BTC rejected at 300s left (<360s)
+    assert engine.evaluate_entry(
+        coin="BTC", ticker="KXBTC15M-T", series="KXBTC15M",
+        signal="BUY YES", edge_pct=10.0, model_prob=70.0,
+        yes_ask=0.35, no_ask=0.65, seconds_left=300, delta=50.0, candle_id="c1",
+    ) is None
+
+    # BTC rejected at 62% prob (<65%)
+    assert engine.evaluate_entry(
+        coin="BTC", ticker="KXBTC15M-T", series="KXBTC15M",
+        signal="BUY YES", edge_pct=10.0, model_prob=62.0,
+        yes_ask=0.35, no_ask=0.65, seconds_left=400, delta=50.0, candle_id="c1",
+    ) is None
+
+    # 41c entry rejected if edge < 8% or prob < 68%
+    assert engine.evaluate_entry(
+        coin="ETH", ticker="KXETH15M-T", series="KXETH15M",
+        signal="BUY YES", edge_pct=6.0, model_prob=66.0,
+        yes_ask=0.41, no_ask=0.59, seconds_left=300, delta=5.0, candle_id="c1",
+    ) is None
+

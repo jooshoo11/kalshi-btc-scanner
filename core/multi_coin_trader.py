@@ -410,6 +410,8 @@ class MultiCoinPaperEngine:
         self.max_hold_seconds = 600.0       # 600s (10 min) hold window for 15m contracts; let winning trades reach expiry
         self.min_edge_pct = 4.0             # 4.0% min model edge
         self.min_prob_pct = 60.0            # 60.0% min model conviction
+        self.min_seconds_left_by_coin: Dict[str, int] = {}
+        self.min_prob_by_coin: Dict[str, float] = {}
 
         # Hybrid Trailing Peak Drawdown Guard (P1): -6% soft throttle (0.5x), -10% 15m pause
         self.intraday_peak_equity = max(float(self.total_equity), float(initial_balance))
@@ -430,7 +432,8 @@ class MultiCoinPaperEngine:
         self._restore_from_db()
 
         # State persistence
-        self.state_file = "multi_coin_state.json"
+        db_dir = os.path.dirname(db_path) if (db_path and db_path != ":memory:") else ""
+        self.state_file = os.path.join(db_dir, "multi_coin_state.json") if db_dir else "multi_coin_state.json"
         self.max_daily_loss_pct = 10.0
         self.max_daily_loss_usd = None
         self.max_open_exposure_pct = 50.0
@@ -929,7 +932,9 @@ class MultiCoinPaperEngine:
         # Timing constraints: Avoid first 5 minutes of noise (>500s) and final 240s expiration trap (<240s)
         # Exception: Deterministic Certainty Arbitrage in the final 45s settlement window.
         coin_cfg = getattr(self, "coin_configs", {}).get(coin, {}) if hasattr(self, "coin_configs") else {}
-        min_sec = coin_cfg.get("min_seconds_left_for_entry", getattr(self, "min_seconds_left", 240))
+        min_sec = getattr(self, "min_seconds_left_by_coin", {}).get(
+            coin, coin_cfg.get("min_seconds_left_for_entry", getattr(self, "min_seconds_left", 240))
+        )
         max_sec = coin_cfg.get("max_seconds_left_for_entry", getattr(self, "max_seconds_left", 500))
         if is_certainty_arb:
             if seconds_left <= 3 or seconds_left > 45:
@@ -954,10 +959,11 @@ class MultiCoinPaperEngine:
             return None
 
         # Conviction & edge requirements
+        eff_min_prob = getattr(self, "min_prob_by_coin", {}).get(coin, self.min_prob_pct)
         if is_certainty_arb:
             if edge_pct < 3.0 or model_prob < 99.0:
                 return None
-        elif edge_pct < self.min_edge_pct or model_prob < self.min_prob_pct:
+        elif edge_pct < self.min_edge_pct or model_prob < eff_min_prob:
             return None
 
         target_side = None
@@ -977,6 +983,8 @@ class MultiCoinPaperEngine:
         # Certainty arb bypasses the 52¢ directional ceiling up to 95¢.
         max_entry = 0.95 if is_certainty_arb else coin_cfg.get("max_entry_price", getattr(self, "max_entry_price", 0.65))
         if target_price > max_entry or target_price < 0.20:
+            return None
+        if not is_certainty_arb and target_price >= 0.40 and (edge_pct < 8.0 or model_prob < 68.0):
             return None
 
         # Early spike breakout ceiling: if early in candle (>500s left) and spot is overextended,
@@ -1138,7 +1146,7 @@ class MultiCoinPaperEngine:
         is_spot_adverse = (settle_spot < strike) if pos["side"] == "YES" else (settle_spot > strike)
         is_hard_stop = (roi_pct <= -self.stop_loss_hard_roi_pct)  # Unconditional -35% catastrophe circuit breaker
 
-        if hold_secs < 15 and not is_spot_adverse:
+        if hold_secs < 30 and not is_spot_adverse:
             pass  # Entry spread grace period: spot is favorable, do not liquidate on resting bid noise
         else:
             is_dual_confirmed = (
