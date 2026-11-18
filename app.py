@@ -174,7 +174,7 @@ multicoin_engine = MultiCoinPaperEngine(
     disabled_coins={"SOL", "XRP"},
     ws_client=live_ws  # Pass WebSocket client for L2 book access
 )
-multicoin_engine.max_entry_price = 0.42
+multicoin_engine.max_entry_price = 0.35
 multicoin_engine.max_seconds_left = 500
 multicoin_engine.min_seconds_left_by_coin = {"BTC": 360, "ETH": 240}
 multicoin_engine.min_prob_by_coin = {"BTC": 65.0, "ETH": 60.0}
@@ -771,7 +771,7 @@ async def multi_coin_production_loop():
                                 c_fee = (calculate_kalshi_taker_fee(40, c_ask) / 40.0) if 0.0 < c_ask < 1.0 else 0.0
                                 c_edge = (cert_res["prob"] - (c_ask + c_fee)) * 100.0 if c_ask > 0 else -100.0
                                 c_liquid = is_liquid_y if c_side == "YES" else is_liquid_n
-                                if c_liquid and 0.20 <= c_ask <= 0.95 and c_edge >= 3.0:
+                                if c_liquid and 0.20 <= c_ask <= 0.78 and c_edge >= 3.0:
                                     signal = f"BUY {c_side}"
                                     edge_pct = c_edge
                                     prob_val = cert_res["prob"] * 100.0

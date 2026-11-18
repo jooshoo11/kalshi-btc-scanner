@@ -91,15 +91,24 @@ def test_maker_tp_certainty_bypass_and_rebalancing():
         )
         assert blocked is None
 
-        # 2. Certainty arb entry at 20s left and 88c should succeed
-        pos = engine.evaluate_entry(
+        # 2a. Certainty arb entry at 20s left and 88c should be BLOCKED (>78c tail-risk cap)
+        blocked_hi = engine.evaluate_entry(
             coin="BTC", ticker="KXBTC15M-TEST", series="KXBTC15M",
             signal="BUY YES", edge_pct=10.0, model_prob=100.0,
             yes_ask=0.88, no_ask=0.12, seconds_left=20, delta=50.0, candle_id="c1",
             is_certainty_arb=True
         )
+        assert blocked_hi is None
+
+        # 2b. Certainty arb entry at 20s left and 75c (<=78c cap) should succeed
+        pos = engine.evaluate_entry(
+            coin="BTC", ticker="KXBTC15M-TEST", series="KXBTC15M",
+            signal="BUY YES", edge_pct=10.0, model_prob=100.0,
+            yes_ask=0.75, no_ask=0.25, seconds_left=20, delta=50.0, candle_id="c1",
+            is_certainty_arb=True
+        )
         assert pos is not None
-        assert pos["entry_price"] == 0.88
+        assert pos["entry_price"] == 0.75
 
         # 3. Maker TP exit incurs 0 exit fee
         # Entry @ 0.40 -> +25% ROI at 0.50 bid

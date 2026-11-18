@@ -226,7 +226,7 @@ def test_p2_hyperliquid_ws_feed_5level_ofi():
 def test_trial3_win_rate_gates(tmp_path):
     import app
 
-    assert app.multicoin_engine.max_entry_price == 0.42
+    assert app.multicoin_engine.max_entry_price == 0.35
     assert app.multicoin_engine.min_seconds_left_by_coin == {"BTC": 360, "ETH": 240}
     assert app.multicoin_engine.min_prob_by_coin == {"BTC": 65.0, "ETH": 60.0}
 
@@ -236,7 +236,7 @@ def test_trial3_win_rate_gates(tmp_path):
         db_path=db_path,
         disabled_coins={"SOL", "XRP"},
     )
-    engine.max_entry_price = 0.42
+    engine.max_entry_price = 0.35
     engine.min_seconds_left_by_coin = {"BTC": 360, "ETH": 240}
     engine.min_prob_by_coin = {"BTC": 65.0, "ETH": 60.0}
 
@@ -254,10 +254,18 @@ def test_trial3_win_rate_gates(tmp_path):
         yes_ask=0.35, no_ask=0.65, seconds_left=400, delta=50.0, candle_id="c1",
     ) is None
 
-    # 41c entry rejected if edge < 8% or prob < 68%
+    # 36c normal entry rejected (>35c cap)
     assert engine.evaluate_entry(
         coin="ETH", ticker="KXETH15M-T", series="KXETH15M",
-        signal="BUY YES", edge_pct=6.0, model_prob=66.0,
-        yes_ask=0.41, no_ask=0.59, seconds_left=300, delta=5.0, candle_id="c1",
+        signal="BUY YES", edge_pct=12.0, model_prob=75.0,
+        yes_ask=0.36, no_ask=0.64, seconds_left=300, delta=5.0, candle_id="c1",
+    ) is None
+
+    # 85c certainty arb rejected (>78c cap)
+    assert engine.evaluate_entry(
+        coin="ETH", ticker="KXETH15M-T", series="KXETH15M",
+        signal="BUY YES", edge_pct=12.0, model_prob=100.0,
+        yes_ask=0.85, no_ask=0.15, seconds_left=20, delta=5.0, candle_id="c1",
+        is_certainty_arb=True,
     ) is None
 

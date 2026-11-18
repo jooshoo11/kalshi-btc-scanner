@@ -968,7 +968,7 @@ class MultiCoinPaperEngine:
 
         target_side = None
         target_price = 0.0
-        max_ask_bound = 0.95 if is_certainty_arb else 0.80
+        max_ask_bound = 0.78 if is_certainty_arb else 0.80
         if "BUY YES" in signal and 0.20 <= yes_ask <= max_ask_bound:
             target_side = "YES"
             target_price = yes_ask
@@ -979,9 +979,9 @@ class MultiCoinPaperEngine:
         if not target_side or target_price <= 0.0:
             return None
 
-        # Entry price gate: reject contracts priced above max_entry_price (e.g. 52¢) or below 20¢
-        # Certainty arb bypasses the 52¢ directional ceiling up to 95¢.
-        max_entry = 0.95 if is_certainty_arb else coin_cfg.get("max_entry_price", getattr(self, "max_entry_price", 0.65))
+        # Entry price gate: reject contracts priced above max_entry_price (e.g. 35¢) or below 20¢.
+        # Certainty arb bypasses the directional ceiling up to 78¢ (blocks >78¢ tail-risk entries).
+        max_entry = 0.78 if is_certainty_arb else coin_cfg.get("max_entry_price", getattr(self, "max_entry_price", 0.35))
         if target_price > max_entry or target_price < 0.20:
             return None
         if not is_certainty_arb and target_price >= 0.40 and (edge_pct < 8.0 or model_prob < 68.0):
