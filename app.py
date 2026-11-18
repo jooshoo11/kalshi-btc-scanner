@@ -33,6 +33,7 @@ from core.dependencies import (
     MultiCoinEngineDep
 )
 from core.ws_manager import WebSocketConnectionManager
+from core.live_bridge import LiveMultiCoinBridge
 from core.hl_ws_feed import HyperliquidWSFeed
 from schemas import (
     RiskDashboardResponse,
@@ -196,6 +197,13 @@ portfolio_manager = PortfolioManager(
     max_concurrent_positions=2,
     global_stop_loss_daily_pct=10.0,
     day_start_equity=100.0
+)
+
+live_bridge = LiveMultiCoinBridge(
+    oms=live_oms,
+    portfolio_manager=portfolio_manager,
+    normal_max_price_cents=int(round(multicoin_engine.max_entry_price * 100)),
+    certainty_max_price_cents=78,
 )
 
 # Initialize DI singletons and WebSocket streaming manager
@@ -686,6 +694,13 @@ async def multi_coin_production_loop():
                             model_prob=curr_prob
                         )
                         if closed_trade:
+                            if live_bridge.is_live_armed:
+                                await live_bridge.on_exit(
+                                    coin=coin,
+                                    exit_reason=closed_trade["reason"],
+                                    current_bid=cur_bid,
+                                    paper_trade=closed_trade,
+                                )
                             icon = "🎯" if closed_trade["pnl"] >= 0 else "🛑"
                             multicoin_brain_logs.append({
                                 "time": time.strftime("%H:%M:%S", time.localtime(now)),
@@ -793,6 +808,16 @@ async def multi_coin_production_loop():
                                 is_certainty_arb=is_certainty_arb
                             )
                             if trade_pos:
+                                if live_bridge.is_live_armed:
+                                    await live_bridge.on_entry(
+                                        coin=coin,
+                                        ticker=ticker,
+                                        side=trade_pos["side"],
+                                        entry_price=trade_pos["entry_price"],
+                                        model_prob_pct=prob_val,
+                                        is_certainty_arb=is_certainty_arb,
+                                        http_client=client,
+                                    )
                                 print(f"[MultiCoinProd] TRADE ENTERED: {coin} {trade_pos.get('side')} {trade_pos.get('contracts')}x @ {trade_pos.get('entry_price')} on {ticker}")
                                 multicoin_brain_logs.append({
                                     "time": time.strftime("%H:%M:%S", time.localtime(now)),
