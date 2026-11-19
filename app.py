@@ -185,6 +185,11 @@ multicoin_engine.stop_loss_hard_roi_pct = 35.0
 multicoin_engine.maker_take_profit = True
 multicoin_engine.enable_dynamic_compounding = True
 multicoin_engine.max_hold_seconds = 120.0
+multicoin_engine.enforce_rest_ws_consistency = True
+multicoin_engine.max_rest_ws_divergence_cents = 2
+multicoin_engine.allow_partial_l2_fills = True
+multicoin_engine.enforce_l2_depth_cap = True
+multicoin_engine.l2_depth_cap_pct = 0.15
 
 hl_ws = HyperliquidWSFeed(coins=["BTC", "ETH"])
 
@@ -639,6 +644,12 @@ async def multi_coin_production_loop():
                     n_ask = float(mkt.get("no_ask_dollars") or 0.0)
                     n_bid = float(mkt.get("no_bid_dollars") or 0.0)
 
+                    # Cross-check WS L2 book against fresh REST quote; if stale, trigger REST book refresh
+                    _l2_book = live_ws.get_book(ticker)
+                    if _l2_book is not None:
+                        if not _l2_book.validate_against_rest_quote(y_bid, y_ask, max_divergence_cents=2):
+                            asyncio.create_task(live_ws.refresh_orderbook_rest(ticker, overwrite_fresh=True))
+
                     # Record 1-second settlement sample in final 60s window
                     acc = _rti_accumulators.get(coin)
                     if acc is not None:
@@ -904,6 +915,13 @@ async def multi_coin_production_loop():
                 # Periodic brain scan log
                 if now - last_heartbeat > 15.0:
                     last_heartbeat = now
+                    try:
+                        await multicoin_engine.reconcile_official_settlements(
+                            rest_base_url=KALSHI_REST_URL,
+                            http_client=client,
+                        )
+                    except Exception as _settle_err:
+                        print(f"[MultiCoinProd] Official settlement reconcile error: {_settle_err}")
                     # Log the same authoritative reference/expiry the evaluator uses.
                     _ref_deltas = {
                         c: spot_prices.get(c, 0.0) - _authoritative_open(

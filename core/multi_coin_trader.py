@@ -161,6 +161,68 @@ class MultiCoinAuditDatabase:
             conn.commit()
             return cursor.lastrowid
 
+    def record_trade_partial_update(
+        self,
+        trade_id: int,
+        remaining_contracts: int,
+        remaining_cost_dollars: float,
+        remaining_fee_dollars: float,
+        realized_pnl_delta: float = 0.0,
+    ):
+        """Update an open trade row when a partial exit occurs."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE trades SET
+                    contracts = ?,
+                    cost_dollars = ?,
+                    fee_dollars = ?,
+                    pnl_dollars = COALESCE(pnl_dollars, 0.0) + ?
+                WHERE id = ?
+            """, (
+                remaining_contracts,
+                round(remaining_cost_dollars, 2),
+                round(remaining_fee_dollars, 2),
+                round(realized_pnl_delta, 2),
+                trade_id,
+            ))
+            conn.commit()
+
+    def confirm_estimated_settlement(
+        self,
+        trade_id: int,
+        won: bool,
+        contracts: int,
+        cost_dollars: float,
+        fee_dollars: float,
+    ) -> float:
+        """
+        Upgrade a SETTLED_ESTIMATED_WIN/LOSS row to official SETTLED_WIN/SETTLED_LOSS
+        once Kalshi REST /markets/{ticker} finalizes the outcome.
+        Returns the PnL adjustment (new_pnl - old_pnl) so cash/equity can be reconciled.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT pnl_dollars FROM trades WHERE id = ?", (trade_id,))
+            row = cursor.fetchone()
+            old_pnl = float(row[0] or 0.0) if row else 0.0
+            exit_price = 1.0 if won else 0.0
+            payout = contracts * exit_price
+            new_pnl = round(payout - (cost_dollars + fee_dollars), 2)
+            roi = round((new_pnl / max(0.01, cost_dollars + fee_dollars)) * 100.0, 1)
+            reason = "SETTLED_WIN" if won else "SETTLED_LOSS"
+            cursor.execute("""
+                UPDATE trades SET
+                    exit_price = ?,
+                    exit_vwap = ?,
+                    exit_reason = ?,
+                    pnl_dollars = ?,
+                    pnl_pct = ?
+                WHERE id = ?
+            """, (exit_price, exit_price, reason, new_pnl, roi, trade_id))
+            conn.commit()
+            return round(new_pnl - old_pnl, 2)
+
     def record_trade_close(self, trade_id: int, **kwargs):
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -775,6 +837,15 @@ class MultiCoinPaperEngine:
         for coin, weight in self.coin_weights.items():
             self.coin_equities[coin] = round(self.total_equity * weight, 2)
 
+    def _get_l2_book(self, ticker: str) -> Optional[Any]:
+        if not self.ws_client:
+            return None
+        if hasattr(self.ws_client, "books") and ticker in self.ws_client.books:
+            return self.ws_client.books[ticker]
+        if hasattr(self.ws_client, "get_or_create_book"):
+            return self.ws_client.get_or_create_book(ticker)
+        return None
+
     def _validate_l2_entry(
         self,
         ticker: str,
@@ -786,25 +857,31 @@ class MultiCoinPaperEngine:
     ) -> bool:
         """
         Validate entry against live L2 order book for slippage/VWAP edge protection.
-        Returns True if entry passes L2 validation, False if should abort.
+        Supports partial fills and 15%-of-visible-depth cap, and returns True if entry
+        passes L2 validation (saving filled_contracts and entry_vwap in _last_l2_telemetry).
         """
         if not self.ws_client:
             # No WS client available - skip L2 validation (fallback to REST prices)
+            self._last_l2_telemetry = {
+                "slippage_bps": 0.0,
+                "entry_vwap": round(target_price, 4),
+                "book_depth_at_entry": None,
+                "filled_contracts": contracts,
+            }
             return True
 
-        # Get L2 book for this ticker
-        book = None
-        if hasattr(self.ws_client, "books") and ticker in self.ws_client.books:
-            book = self.ws_client.books[ticker]
-        elif hasattr(self.ws_client, "get_or_create_book"):
-            book = self.ws_client.get_or_create_book(ticker)
-
+        book = self._get_l2_book(ticker)
         if not book:
-            # No L2 book available - skip validation
+            self._last_l2_telemetry = {
+                "slippage_bps": 0.0,
+                "entry_vwap": round(target_price, 4),
+                "book_depth_at_entry": None,
+                "filled_contracts": contracts,
+            }
             return True
 
         if getattr(book, "stale", False):
-            # FINDING #7: book marked stale after a delta parse failure — refuse to gate on drifted data
+            # FINDING #7: book marked stale after a delta parse failure / seq gap / REST divergence
             logger.warning(f"[L2 Validation] Book for {ticker} is STALE — aborting entry on stale data")
             return False
 
@@ -812,6 +889,12 @@ class MultiCoinPaperEngine:
         best_bid_p, _ = book.get_best_bid()
         best_ask_p, _ = book.get_best_ask()
         if best_bid_p > 0 and best_ask_p < 100:
+            if best_bid_p >= best_ask_p:
+                logger.warning(
+                    f"[L2 Validation] Crossed L2 book on {ticker}: bid {best_bid_p}¢ >= ask {best_ask_p}¢ — marking STALE"
+                )
+                book.stale = True
+                return False
             spread_cents = best_ask_p - best_bid_p
             if spread_cents > 10:
                 logger.warning(
@@ -831,48 +914,75 @@ class MultiCoinPaperEngine:
                 )
                 return False
 
+        # Cross-check L2 top-of-book against REST target_price (if diverging > 2¢, book is stale)
+        l2_top_cents = best_ask_p if side == "YES" else ((100 - best_bid_p) if best_bid_p > 0 else 0)
+        rest_top_cents = int(round(target_price * 100.0))
+        max_div = int(getattr(self, "max_rest_ws_divergence_cents", 2))
+        if getattr(self, "enforce_rest_ws_consistency", False) and 1 <= l2_top_cents <= 99 and rest_top_cents > 0:
+            if abs(l2_top_cents - rest_top_cents) > max_div:
+                logger.warning(
+                    f"[L2 Validation] REST/WS divergence on {ticker} ({side}): "
+                    f"WS top {l2_top_cents}¢ vs REST {rest_top_cents}¢ (> {max_div}¢) — marking book STALE"
+                )
+                book.stale = True
+                return False
+
         # Determine which side of the book to sweep
         is_buy_yes = (side == "YES")
         order_levels = book.asks if is_buy_yes else book.bids
+        # Filter to valid [1..99] levels
+        valid_levels = {
+            p: q for p, q in order_levels.items()
+            if q > 0 and 1 <= ((100 - p) if side == "NO" else p) <= 99
+        }
 
-        if not order_levels:
+        if not valid_levels:
             logger.warning(f"[L2 Validation] No L2 depth on {'asks' if is_buy_yes else 'bids'} for {ticker}")
             return False
 
+        total_book_depth = int(sum(valid_levels.values()))
+        # Optional 15%-of-visible-depth cap when enabled (default preserves existing depth behavior unless book is smaller)
+        depth_cap_pct = float(getattr(self, "l2_depth_cap_pct", 0.15))
+        if getattr(self, "enforce_l2_depth_cap", False) and total_book_depth > 0:
+            depth_cap = max(1, int(total_book_depth * depth_cap_pct))
+            target_contracts = min(contracts, depth_cap)
+        else:
+            target_contracts = contracts
+
         # Walk down L2 book to calculate VWAP for target contracts
-        sorted_prices = sorted(order_levels.keys()) if is_buy_yes else sorted(order_levels.keys(), reverse=True)
+        sorted_prices = sorted(valid_levels.keys()) if is_buy_yes else sorted(valid_levels.keys(), reverse=True)
         accumulated_qty = 0
         total_cost_cents = 0
         worst_price_cents = 0
 
         for p in sorted_prices:
-            avail = order_levels[p]
-            needed = contracts - accumulated_qty
+            avail = valid_levels[p]
+            needed = target_contracts - accumulated_qty
             fill = min(avail, needed)
             effective_level_price = (100 - p) if side == "NO" else p
             total_cost_cents += fill * effective_level_price
             accumulated_qty += fill
             worst_price_cents = effective_level_price
-            if accumulated_qty >= contracts:
+            if accumulated_qty >= target_contracts:
                 break
 
-        if accumulated_qty < contracts:
-            # Partial liquidity - scale down or reject
-            logger.warning(
-                f"[L2 Validation] Insufficient liquidity on {ticker}: "
-                f"requested {contracts}, available {accumulated_qty} at {side} levels"
+        allow_partial = getattr(self, "allow_partial_l2_fills", False)
+        if accumulated_qty < target_contracts:
+            if not allow_partial or accumulated_qty < 1:
+                logger.warning(
+                    f"[L2 Validation] Insufficient liquidity on {ticker}: "
+                    f"requested {target_contracts}, available {accumulated_qty} at {side} levels"
+                )
+                return False
+            logger.info(
+                f"[L2 Validation] Partial entry fill on {ticker}: scaling {target_contracts} -> {accumulated_qty} contracts"
             )
-            return False
 
         vwap_cents = round(total_cost_cents / float(accumulated_qty), 2)
-        vwap_dollars = vwap_cents / 100.0
+        vwap_dollars = round(vwap_cents / 100.0, 4)
 
         # Calculate net edge after VWAP slippage and fees.
-        # FIX (units): model_prob arrives in PERCENT (e.g. 77.3) while VWAP/fee are
-        # dollars (0-1). Mixing them made net_edge ~76 -> edge_pct ~7600%, so the
-        # slippage abort could never fire. Also FIX (name): calculate_kalshi_fee
-        # does not exist in this module -> NameError; use calculate_kalshi_taker_fee.
-        kalshi_fee = calculate_kalshi_taker_fee(1, vwap_dollars)
+        kalshi_fee = calculate_kalshi_taker_fee(accumulated_qty, vwap_dollars) / float(accumulated_qty)
         model_frac = model_prob / 100.0 if model_prob > 1.0 else model_prob
         net_edge = model_frac - (vwap_dollars + kalshi_fee)
         actual_edge_pct = round(net_edge * 100.0, 2)
@@ -887,17 +997,16 @@ class MultiCoinPaperEngine:
             )
             return False
 
-        total_book_depth = int(sum(order_levels.values()))
         slippage_bps = round(((vwap_dollars - target_price) / max(0.01, target_price)) * 10000.0, 2)
         self._last_l2_telemetry = {
             "slippage_bps": slippage_bps,
-            "entry_vwap": round(vwap_dollars, 4),
+            "entry_vwap": vwap_dollars,
             "book_depth_at_entry": total_book_depth,
+            "filled_contracts": accumulated_qty,
         }
 
-        # Log VWAP info for debugging
         logger.info(
-            f"[L2 Validation] {ticker} {side} {contracts}x @ VWAP {vwap_cents:.1f}¢ "
+            f"[L2 Validation] {ticker} {side} {accumulated_qty}x @ VWAP {vwap_cents:.1f}¢ "
             f"(REST: {target_price*100:.0f}¢, worst: {worst_price_cents}¢, depth: {total_book_depth}) | "
             f"Model prob {model_prob:.1f}% | Net edge {actual_edge_pct:.1f}%"
         )
@@ -1046,13 +1155,32 @@ class MultiCoinPaperEngine:
             return None
 
         l2_tel = getattr(self, "_last_l2_telemetry", {}) or {}
+        if l2_tel.get("filled_contracts"):
+            contracts = int(l2_tel["filled_contracts"])
+
+        # Book entry at L2 sweep VWAP when available (or REST target_price when no L2 book attached)
+        fill_price = float(l2_tel.get("entry_vwap") or target_price)
+        if not is_certainty_arb and fill_price > max_entry:
+            logger.warning(
+                f"[L2 Validation] {ticker} {target_side} L2 VWAP {fill_price*100:.1f}¢ exceeds max_entry_price {max_entry*100:.0f}¢ — aborting"
+            )
+            return None
+
+        cost = round(contracts * fill_price, 2)
+        total_fee = calculate_kalshi_taker_fee(contracts, fill_price)
+        if cost + total_fee > self.total_cash:
+            contracts = int((self.total_cash - total_fee) / max(0.01, fill_price))
+            if contracts < 1:
+                return None
+            cost = round(contracts * fill_price, 2)
+            total_fee = calculate_kalshi_taker_fee(contracts, fill_price)
 
         # Debit cash (only after ALL gates pass, incl. L2 VWAP sweep)
         self.total_cash -= (cost + total_fee)
         self.trades_in_candle[coin] = self.trades_in_candle.get(coin, 0) + 1
 
         rationale = (
-            f"Multi-Coin Paper entered {target_side} on {ticker} ({contracts}x @ {int(target_price*100)}¢). "
+            f"Multi-Coin Paper entered {target_side} on {ticker} ({contracts}x @ {fill_price*100:.1f}¢ VWAP, quote {int(target_price*100)}¢). "
             f"{coin} delta {delta:+.2f}. Model prob {model_prob:.1f}% (+{edge_pct:.1f}% edge)."
         )
 
@@ -1067,7 +1195,7 @@ class MultiCoinPaperEngine:
             ticker=ticker,
             series=series,
             side=target_side,
-            entry_price=target_price,
+            entry_price=fill_price,
             contracts=contracts,
             cost_dollars=cost,
             fee_dollars=total_fee,
@@ -1077,7 +1205,7 @@ class MultiCoinPaperEngine:
             rationale=rationale,
             order_group_id=self.order_group_id,
             slippage_bps=l2_tel.get("slippage_bps"),
-            entry_vwap=l2_tel.get("entry_vwap"),
+            entry_vwap=l2_tel.get("entry_vwap", fill_price),
             book_depth_at_entry=l2_tel.get("book_depth_at_entry"),
         )
 
@@ -1088,18 +1216,103 @@ class MultiCoinPaperEngine:
             "series": series,
             "side": target_side,
             "contracts": contracts,
-            "entry_price": target_price,
+            "entry_price": fill_price,
             "cost_dollars": cost,
             "fee_dollars": total_fee,
             "entry_timestamp": time.time(),
-            "current_bid": target_price,
+            "current_bid": fill_price,
             "candle_id": candle_id,
             "rationale": rationale,
             "order_group_id": self.order_group_id
         }
         self.active_positions[coin] = pos_dict
-        logger.info(f"[MultiCoin Open] {coin} | {ticker} {target_side} {contracts}x @ {int(target_price*100)}¢ | Cost: ${cost:.2f}")
+        logger.info(f"[MultiCoin Open] {coin} | {ticker} {target_side} {contracts}x @ {fill_price*100:.1f}¢ | Cost: ${cost:.2f}")
         return pos_dict
+
+    def _compute_l2_exit_fill(
+        self,
+        ticker: str,
+        side: str,
+        requested_contracts: int,
+        fallback_bid: float,
+    ) -> Tuple[int, float]:
+        """
+        Sweep the bid side of the L2 book when selling a position:
+        - Selling YES sweeps YES bids (`book.bids`) descending at price `p`
+        - Selling NO sweeps NO bids (`book.asks`, where NO bid = `100 - p`) ascending at `100 - p`
+        Supports partial fills when visible liquidity < requested_contracts.
+        Falls back to (requested_contracts, fallback_bid) only if no L2 book or book is stale/empty.
+        """
+        book = self._get_l2_book(ticker)
+        if not book or getattr(book, "stale", False):
+            if book and getattr(book, "stale", False):
+                logger.warning(f"[L2 Exit] Book for {ticker} is STALE — falling back to REST bid {fallback_bid:.2f}")
+            return requested_contracts, fallback_bid
+
+        sweep = book.calculate_sweep_vwap(side, requested_contracts, action="SELL")
+        filled = int(sweep.get("filled_count") or 0)
+        if filled <= 0:
+            logger.warning(f"[L2 Exit] No bid depth on {ticker} for SELL {side} — falling back to REST bid {fallback_bid:.2f}")
+            return requested_contracts, fallback_bid
+
+        return filled, float(sweep["vwap_dollars"])
+
+    def _execute_exit_with_l2(
+        self,
+        coin: str,
+        reason: str,
+        fallback_bid: float,
+        is_maker: bool,
+        now: float,
+        model_prob_at_stop: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        pos = self.active_positions.get(coin)
+        if not pos:
+            return None
+        total_c = int(pos["contracts"])
+        filled_c, exit_vwap = self._compute_l2_exit_fill(pos["ticker"], pos["side"], total_c, fallback_bid)
+        filled_c = max(1, min(total_c, filled_c))
+        exit_fee = 0.0 if is_maker else calculate_kalshi_taker_fee(filled_c, exit_vwap)
+        gross = filled_c * exit_vwap
+        payout = gross - exit_fee
+
+        if filled_c < total_c:
+            # Partial exit fill: realize proportional share of cost/fee and keep remaining contracts open
+            frac = filled_c / float(total_c)
+            cost_share = round(pos["cost_dollars"] * frac, 2)
+            fee_share = round(pos["fee_dollars"] * frac, 2)
+            partial_pnl = round(payout - (cost_share + fee_share), 2)
+            pos["contracts"] = total_c - filled_c
+            pos["cost_dollars"] = round(pos["cost_dollars"] - cost_share, 2)
+            pos["fee_dollars"] = round(pos["fee_dollars"] - fee_share, 2)
+            pos["realized_partial_pnl"] = round(pos.get("realized_partial_pnl", 0.0) + partial_pnl, 2)
+            pos["realized_partial_cost"] = round(pos.get("realized_partial_cost", 0.0) + cost_share + fee_share, 2)
+            self.total_cash += payout
+            self.db.record_trade_partial_update(
+                trade_id=pos["trade_id"],
+                remaining_contracts=pos["contracts"],
+                remaining_cost_dollars=pos["cost_dollars"],
+                remaining_fee_dollars=pos["fee_dollars"],
+                realized_pnl_delta=partial_pnl,
+            )
+            self._update_total_equity()
+            logger.info(
+                f"[MultiCoin Partial Exit] {coin} | {pos['ticker']} {reason} filled {filled_c}/{total_c}x @ "
+                f"{exit_vwap*100:.1f}¢ | Partial PnL: ${partial_pnl:+.2f} | Remaining: {pos['contracts']}x"
+            )
+            return None
+
+        total_pnl = (payout - (pos["cost_dollars"] + pos["fee_dollars"])) + float(pos.get("realized_partial_pnl", 0.0))
+        return self._close_position(
+            coin,
+            exit_price=exit_vwap,
+            reason=reason,
+            pnl=total_pnl,
+            payout=payout,
+            current_time=now,
+            exit_vwap=exit_vwap,
+            model_prob_at_stop=model_prob_at_stop,
+        )
 
     def update_position(
         self,
@@ -1109,7 +1322,8 @@ class MultiCoinPaperEngine:
         settle_spot: float,
         strike: float,
         current_time: Optional[float] = None,
-        model_prob: Optional[float] = None
+        model_prob: Optional[float] = None,
+        official_result: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Update open position: checks +25% Take Profit, Dual-Confirmation Stop Loss, or Expiration."""
         pos = self.active_positions.get(coin)
@@ -1122,21 +1336,27 @@ class MultiCoinPaperEngine:
 
         # A. Expiration Resolution
         if seconds_left <= 3:
-            won = (settle_spot >= strike) if pos["side"] == "YES" else (settle_spot < strike)
+            if official_result and str(official_result).lower() in ("yes", "no"):
+                won = (str(official_result).lower() == pos["side"].lower())
+                reason = "SETTLED_WIN" if won else "SETTLED_LOSS"
+            else:
+                won = (settle_spot >= strike) if pos["side"] == "YES" else (settle_spot < strike)
+                # Spot-vs-strike simulation: tagged ESTIMATED until official Kalshi settlement confirms it
+                reason = "SETTLED_ESTIMATED_WIN" if won else "SETTLED_ESTIMATED_LOSS"
             payout = pos["contracts"] * 1.00 if won else 0.00
-            pnl = payout - (pos["cost_dollars"] + pos["fee_dollars"])
-            # Spot-vs-strike simulation: tagged ESTIMATED (excluded from win-rate/Kelly/baseline
-            # until the exchange settlement confirms it) — agreed plan, condition 2.
-            reason = "SETTLED_ESTIMATED_WIN" if won else "SETTLED_ESTIMATED_LOSS"
+            pnl = payout - (pos["cost_dollars"] + pos["fee_dollars"]) + float(pos.get("realized_partial_pnl", 0.0))
             return self._close_position(coin, exit_price=1.0 if won else 0.0, reason=reason, pnl=pnl, payout=payout, current_time=now)
 
         # B. Take Profit Exit (+25% ROI) via Passive Maker Limit Order (0 taker exit fee)
         if roi_pct >= self.take_profit_roi_pct:
             use_maker_tp = getattr(self, "maker_take_profit", True)
-            exit_fee = 0.0 if use_maker_tp else calculate_kalshi_taker_fee(pos["contracts"], current_bid)
-            gross = pos["contracts"] * current_bid
-            pnl = gross - exit_fee - (pos["cost_dollars"] + pos["fee_dollars"])
-            return self._close_position(coin, exit_price=current_bid, reason="TAKE_PROFIT", pnl=pnl, payout=gross - exit_fee, current_time=now)
+            return self._execute_exit_with_l2(
+                coin=coin,
+                reason="TAKE_PROFIT",
+                fallback_bid=current_bid,
+                is_maker=use_maker_tp,
+                now=now,
+            )
 
         # C. Dynamic Dual-Confirmation Stop Loss
         # Only stop out if BOTH the price has decayed (-25% ROI) AND model/spot confirms the thesis has failed.
@@ -1154,14 +1374,18 @@ class MultiCoinPaperEngine:
                 (model_prob is None or model_prob <= self.stop_loss_max_prob_pct or is_spot_adverse)
             )
             if is_dual_confirmed or is_hard_stop:
-                exit_fee = calculate_kalshi_taker_fee(pos["contracts"], current_bid)
-                gross = pos["contracts"] * current_bid
-                pnl = gross - exit_fee - (pos["cost_dollars"] + pos["fee_dollars"])
                 candle_id = pos.get("candle_id", "")
                 if candle_id:
                     self.candle_stopped_out[coin] = candle_id
-                logger.info(f"[MultiCoin] STOP_LOSS {coin} triggered: ROI {roi_pct:+.1f}%, model_prob={model_prob}, adverse={is_spot_adverse} | PnL ${pnl:+.2f}")
-                return self._close_position(coin, exit_price=current_bid, reason="STOP_LOSS", pnl=pnl, payout=gross - exit_fee, current_time=now, exit_vwap=current_bid, model_prob_at_stop=model_prob)
+                logger.info(f"[MultiCoin] STOP_LOSS {coin} triggered: ROI {roi_pct:+.1f}%, model_prob={model_prob}, adverse={is_spot_adverse}")
+                return self._execute_exit_with_l2(
+                    coin=coin,
+                    reason="STOP_LOSS",
+                    fallback_bid=current_bid,
+                    is_maker=False,
+                    now=now,
+                    model_prob_at_stop=model_prob,
+                )
 
         # D. Time-based exit: If held past max_hold_seconds, exit if decaying or adverse.
         # If the position is strongly in the money and model prob is healthy (>= 55%), let it ride to expiration!
@@ -1169,13 +1393,94 @@ class MultiCoinPaperEngine:
             if not is_spot_adverse and (model_prob is not None and model_prob >= 55.0):
                 pass  # Let in-the-money winning positions capture the full $1.00 payout at expiry
             else:
-                exit_fee = calculate_kalshi_taker_fee(pos["contracts"], current_bid)
-                gross = pos["contracts"] * current_bid
-                pnl = gross - exit_fee - (pos["cost_dollars"] + pos["fee_dollars"])
-                logger.info(f"[MultiCoin] TIME_EXIT {coin} after {hold_secs:.0f}s (max_hold {self.max_hold_seconds:.0f}s) | ROI {roi_pct:+.1f}% | PnL ${pnl:+.2f}")
-                return self._close_position(coin, exit_price=current_bid, reason="TIME_EXIT", pnl=pnl, payout=gross - exit_fee, current_time=now, exit_vwap=current_bid, model_prob_at_stop=model_prob)
+                logger.info(f"[MultiCoin] TIME_EXIT {coin} after {hold_secs:.0f}s (max_hold {self.max_hold_seconds:.0f}s) | ROI {roi_pct:+.1f}%")
+                return self._execute_exit_with_l2(
+                    coin=coin,
+                    reason="TIME_EXIT",
+                    fallback_bid=current_bid,
+                    is_maker=False,
+                    now=now,
+                    model_prob_at_stop=model_prob,
+                )
 
         return None
+
+    async def reconcile_official_settlements(
+        self,
+        rest_base_url: str = "https://api.elections.kalshi.com/trade-api/v2",
+        http_client: Optional[Any] = None,
+        fallback_timeout_sec: float = 1800.0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Query Kalshi REST GET /markets/{ticker} for any CLOSED trades still marked
+        SETTLED_ESTIMATED_WIN or SETTLED_ESTIMATED_LOSS, and reconcile them to
+        SETTLED_WIN or SETTLED_LOSS (adjusting cash/equity if the official outcome differed).
+        """
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, coin, ticker, side, contracts, cost_dollars, fee_dollars, exit_timestamp, exit_reason
+                FROM trades
+                WHERE status = 'CLOSED' AND exit_reason IN ('SETTLED_ESTIMATED_WIN', 'SETTLED_ESTIMATED_LOSS')
+                ORDER BY id ASC
+            """)
+            pending = [dict(r) for r in cursor.fetchall()]
+
+        if not pending:
+            return []
+
+        import httpx
+        own_client = http_client is None
+        client = http_client or httpx.AsyncClient(timeout=5.0)
+        resolved: List[Dict[str, Any]] = []
+        try:
+            for row in pending:
+                ticker = row["ticker"]
+                if not ticker:
+                    continue
+                try:
+                    resp = await client.get(f"{rest_base_url.rstrip('/')}/markets/{ticker}")
+                    if resp.status_code != 200:
+                        continue
+                    data = resp.json()
+                    mkt = data.get("market", data)
+                    status = str(mkt.get("status") or "").lower()
+                    result = str(mkt.get("result") or "").lower()
+                    settlement_val = mkt.get("settlement_value_dollars", mkt.get("settlement_value"))
+
+                    won: Optional[bool] = None
+                    if result in ("yes", "no"):
+                        won = (result == str(row["side"]).lower())
+                    elif status in ("finalized", "settled") and settlement_val is not None:
+                        sv = float(settlement_val)
+                        yes_won = (sv >= 0.99 or sv >= 99)
+                        won = yes_won if str(row["side"]).upper() == "YES" else (not yes_won)
+
+                    if won is not None:
+                        pnl_delta = self.db.confirm_estimated_settlement(
+                            trade_id=row["id"],
+                            won=won,
+                            contracts=int(row["contracts"]),
+                            cost_dollars=float(row["cost_dollars"]),
+                            fee_dollars=float(row["fee_dollars"]),
+                        )
+                        if abs(pnl_delta) > 1e-6:
+                            self.total_cash = round(self.total_cash + pnl_delta, 2)
+                            self._update_total_equity()
+                        resolved.append({
+                            "trade_id": row["id"],
+                            "ticker": ticker,
+                            "side": row["side"],
+                            "official_result": result or ("yes" if won else "no"),
+                            "won": won,
+                            "pnl_delta": pnl_delta,
+                        })
+                except Exception as e:
+                    logger.debug(f"[Settlement Reconciler] Failed checking {ticker}: {e}")
+        finally:
+            if own_client:
+                await client.aclose()
+        return resolved
 
     def _close_position(self, coin: str, exit_price: float, reason: str, pnl: float, payout: float, current_time: Optional[float] = None, exit_vwap: Optional[float] = None, model_prob_at_stop: Optional[float] = None) -> Optional[Dict[str, Any]]:
         pos = self.active_positions.pop(coin, None)

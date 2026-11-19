@@ -32,8 +32,10 @@ except ImportError as e:
 
 try:
     from .prediction_engine import calculate_kalshi_fee  # package import (core.*)
+    from .order_saga import OrderSagaState, OrderSaga, OrderSagaOrchestrator
 except ImportError:
     from prediction_engine import calculate_kalshi_fee  # script-style fallback (repo root on sys.path)
+    from core.order_saga import OrderSagaState, OrderSaga, OrderSagaOrchestrator
 import contextlib
 
 # Phoenix/OpenTelemetry tracing DISABLED (no collector on :4317 -> log spam). No-op tracer:
@@ -162,28 +164,113 @@ class L2OrderBook:
     """
     def __init__(self, ticker: str):
         self.ticker = ticker
-        self.bids: Dict[int, int] = {} # price_cents -> quantity
-        self.asks: Dict[int, int] = {} # price_cents -> quantity
+        self.bids: Dict[int, int] = {}  # YES bids: price_cents -> quantity
+        self.asks: Dict[int, int] = {}  # YES asks (100 - NO bid): price_cents -> quantity
         self.last_update_ts: float = 0.0
-        self.stale: bool = False  # FINDING #7: set when a delta fails to parse; cleared on fresh snapshot
+        self.stale: bool = False  # FINDING #7: set when a delta fails to parse or seq gap / REST divergence
+        self.last_seq: Optional[int] = None
 
-    def apply_snapshot(self, bids: List[List[int]], asks: List[List[int]]):
+    @staticmethod
+    def parse_price_cents(raw_price: Any) -> int:
+        """
+        Convert Kalshi price (dollar string like '0.4700', sub-cent '0.0010', or integer cents)
+        into integer cents [1..99]. Sub-cent dust (< 0.005 dollars = 0.5c) returns 0 and is filtered out.
+        """
+        if raw_price is None:
+            return 0
+        s = str(raw_price).strip()
+        if "." in s:
+            val = float(s)
+            if val <= 1.0:
+                return int(round(val * 100.0))
+            return int(round(val))
+        val_i = int(s)
+        return val_i
+
+    def apply_snapshot(self, bids: List[List[int]], asks: List[List[int]], seq: Optional[int] = None):
         """Initialize book from full snapshot [[price_cents, qty], ...]"""
-        self.bids = {int(p): int(q) for p, q in bids if int(q) > 0}
-        self.asks = {int(p): int(q) for p, q in asks if int(q) > 0}
+        new_bids: Dict[int, int] = {}
+        for p, q in bids:
+            pc, qc = int(p), int(q)
+            if 1 <= pc <= 99 and qc > 0:
+                new_bids[pc] = new_bids.get(pc, 0) + qc
+        new_asks: Dict[int, int] = {}
+        for p, q in asks:
+            pc, qc = int(p), int(q)
+            if 1 <= pc <= 99 and qc > 0:
+                new_asks[pc] = new_asks.get(pc, 0) + qc
+        self.bids = new_bids
+        self.asks = new_asks
         self.last_update_ts = time.time()
         self.stale = False  # fresh full snapshot clears the stale flag
+        if seq is not None:
+            self.last_seq = int(seq)
 
-    def apply_delta(self, side: str, price_cents: int, delta_qty: int):
-        """Update price level from orderbook_delta stream."""
+    def apply_delta(self, side: str, price_cents: int, delta_qty: int, seq: Optional[int] = None) -> bool:
+        """
+        Update price level from orderbook_delta stream.
+        Returns False (and marks book stale) if a sequence gap is detected.
+        """
+        if seq is not None:
+            seq_i = int(seq)
+            if self.last_seq is not None and seq_i != self.last_seq + 1:
+                self.stale = True
+                self.last_seq = seq_i
+                return False
+            self.last_seq = seq_i
+
         p = int(price_cents)
-        book = self.bids if side.lower() == "yes_bid" or side.lower() == "bid" else self.asks
+        s = side.lower()
+        if s in ("no", "no_bid"):
+            if 1 <= p <= 99:
+                p = 100 - p
+            else:
+                return True
+            book = self.asks
+        elif s in ("yes_bid", "bid", "yes"):
+            if not (1 <= p <= 99):
+                return True
+            book = self.bids
+        else:
+            if not (1 <= p <= 99):
+                return True
+            book = self.asks
+
         new_qty = book.get(p, 0) + int(delta_qty)
         if new_qty <= 0:
             book.pop(p, None)
         else:
             book[p] = new_qty
         self.last_update_ts = time.time()
+        return True
+
+    def validate_against_rest_quote(
+        self,
+        rest_yes_bid_dollars: Optional[float] = None,
+        rest_yes_ask_dollars: Optional[float] = None,
+        max_divergence_cents: int = 2,
+    ) -> bool:
+        """
+        Cross-check WS L2 best bid/ask against REST top-of-book quote.
+        Marks book stale and returns False if crossed (best_bid >= best_ask)
+        or diverging from REST quote by more than max_divergence_cents.
+        """
+        best_bid, _ = self.get_best_bid()
+        best_ask, _ = self.get_best_ask()
+        if best_bid > 0 and best_ask < 100 and best_bid >= best_ask:
+            self.stale = True
+            return False
+        if rest_yes_bid_dollars is not None and rest_yes_bid_dollars > 0 and best_bid > 0:
+            rest_bid_c = int(round(float(rest_yes_bid_dollars) * 100.0)) if rest_yes_bid_dollars <= 1.0 else int(round(rest_yes_bid_dollars))
+            if abs(best_bid - rest_bid_c) > max_divergence_cents:
+                self.stale = True
+                return False
+        if rest_yes_ask_dollars is not None and rest_yes_ask_dollars > 0 and best_ask < 100:
+            rest_ask_c = int(round(float(rest_yes_ask_dollars) * 100.0)) if rest_yes_ask_dollars <= 1.0 else int(round(rest_yes_ask_dollars))
+            if abs(best_ask - rest_ask_c) > max_divergence_cents:
+                self.stale = True
+                return False
+        return not self.stale
 
     def get_best_bid(self) -> Tuple[int, int]:
         """Return (best_bid_cents, qty) or (0, 0)"""
@@ -199,24 +286,43 @@ class L2OrderBook:
         p = min(self.asks.keys())
         return p, self.asks[p]
 
-    def calculate_sweep_vwap(self, side: str, count: int) -> Dict[str, Any]:
+    def calculate_sweep_vwap(self, side: str, count: int, action: str = "BUY") -> Dict[str, Any]:
         """
         Simulate walking the book to fill `count` contracts:
-        - Calculates Volume-Weighted Average Price (VWAP)
-        - Computes worst fill price (tail slippage)
-        - Checks whether sufficient liquidity exists to fill desired size
+        - BUY YES: walks YES asks (`self.asks`) ascending at price `p`
+        - BUY NO: walks YES bids (`self.bids`) descending at NO price `100 - p`
+        - SELL YES: walks YES bids (`self.bids`) descending at YES price `p`
+        - SELL NO: walks YES asks (`self.asks`, i.e. NO bids at `100 - p`) ascending at NO price `100 - p`
         """
         if count <= 0:
-            return {"can_fill": False, "vwap_cents": 0.0, "reason": "Invalid count"}
+            return {"can_fill": False, "vwap_cents": 0.0, "filled_count": 0, "reason": "Invalid count"}
 
-        # For BUY YES: walk asks ascending
-        # For SELL YES / BUY NO: walk bids descending
-        is_buy_yes = (side.upper() == "YES" or side.upper() == "BUY")
-        book = self.asks if is_buy_yes else self.bids
+        s = side.upper()
+        act = action.upper()
+        if s in ("SELL_YES",):
+            s, act = "YES", "SELL"
+        elif s in ("SELL_NO",):
+            s, act = "NO", "SELL"
+        elif s in ("BUY_YES", "BUY"):
+            s, act = "YES", "BUY"
+        elif s in ("BUY_NO", "SELL"):
+            # Legacy compatibility: side="NO" with default action="BUY" buys NO
+            s = "NO"
+
+        if act == "BUY":
+            is_yes = (s == "YES")
+            book = self.asks if is_yes else self.bids
+            sorted_prices = sorted(book.keys()) if is_yes else sorted(book.keys(), reverse=True)
+            price_fn = (lambda p: p) if is_yes else (lambda p: 100 - p)
+        else:
+            # SELL
+            is_yes = (s == "YES")
+            book = self.bids if is_yes else self.asks
+            sorted_prices = sorted(book.keys(), reverse=True) if is_yes else sorted(book.keys())
+            price_fn = (lambda p: p) if is_yes else (lambda p: 100 - p)
+
         if not book:
-            return {"can_fill": False, "vwap_cents": 0.0, "reason": "Empty order book"}
-
-        sorted_prices = sorted(book.keys()) if is_buy_yes else sorted(book.keys(), reverse=True)
+            return {"can_fill": False, "vwap_cents": 0.0, "filled_count": 0, "reason": "Empty order book"}
 
         accumulated_qty = 0
         total_cost_cents = 0
@@ -225,13 +331,18 @@ class L2OrderBook:
 
         for p in sorted_prices:
             available_at_level = book[p]
+            if available_at_level <= 0:
+                continue
+            eff_price = price_fn(p)
+            if not (1 <= eff_price <= 99):
+                continue
             needed = count - accumulated_qty
             fill_at_level = min(available_at_level, needed)
 
-            total_cost_cents += fill_at_level * p
+            total_cost_cents += fill_at_level * eff_price
             accumulated_qty += fill_at_level
             levels_swept += 1
-            worst_price = p
+            worst_price = eff_price
 
             if accumulated_qty >= count:
                 break
@@ -248,7 +359,117 @@ class L2OrderBook:
             "filled_count": accumulated_qty,
             "requested_count": count,
             "worst_price_cents": worst_price,
-            "levels_swept": levels_swept
+            "levels_swept": levels_swept,
+            "total_book_depth": int(sum(book.values())),
+        }
+
+    def book_depth_on_side(self, is_buy_yes: bool) -> int:
+        """Total visible depth (contracts) on the side that would be swept."""
+        book = self.asks if is_buy_yes else self.bids
+        return sum(book.values())
+
+
+class BookAwareExecutor:
+    """
+    Book-depth-aware execution guard for paper and live trading.
+    
+    Prevents sweeping more than 15% of visible order book depth on any single order,
+    tracks adverse slippage as a cost in PnL calculation, and splits/rejects orders
+    that would over-consume liquidity.
+    """
+    
+    BOOK_SWEEP_CAP_PCT = 0.15  # Max 15% of visible book depth per order
+
+    def __init__(self):
+        self.sweep_violations_blocked = 0
+        self.sweep_violations_split = 0
+        self.total_adverse_slippage_cents = 0.0
+        self.total_contracts_executed = 0
+
+    def max_safe_contracts(
+        self,
+        book: L2OrderBook,
+        is_buy_yes: bool,
+        requested_contracts: int
+    ) -> int:
+        """
+        Return max contracts that won't sweep > BOOK_SWEEP_CAP_PCT of visible book depth.
+        Returns 0 if book is empty or too thin.
+        """
+        depth = book.book_depth_on_side(is_buy_yes)
+        if depth <= 0:
+            return 0
+        cap = int(depth * self.BOOK_SWEEP_CAP_PCT)
+        return min(requested_contracts, max(1, cap))
+
+    def estimate_adverse_slippage(
+        self,
+        book: L2OrderBook,
+        is_buy_yes: bool,
+        contracts: int,
+        mid_price_cents: int
+    ) -> Dict[str, Any]:
+        """
+        Model adverse slippage from walking the book vs. mid price.
+        Returns slippage in cents per contract and total slippage cost.
+        """
+        vwap_res = book.calculate_sweep_vwap("yes" if is_buy_yes else "no", contracts)
+        if not vwap_res["can_fill"]:
+            return {
+                "slippage_cents_per_contract": 0.0,
+                "total_slippage_cost_cents": 0.0,
+                "vwap_cents": 0.0,
+                "filled_count": 0,
+                "reason": "Cannot fill"
+            }
+
+        vwap = vwap_res["vwap_cents"]
+        if is_buy_yes:
+            # Buying: slippage = VWAP - mid (paying above mid)
+            slippage = vwap - mid_price_cents
+        else:
+            # Selling: slippage = mid - VWAP (selling below mid)
+            slippage = mid_price_cents - vwap
+
+        total_cost = slippage * vwap_res["filled_count"]
+        self.total_adverse_slippage_cents += total_cost
+        self.total_contracts_executed += vwap_res["filled_count"]
+
+        return {
+            "slippage_cents_per_contract": round(slippage, 2),
+            "total_slippage_cost_cents": round(total_cost, 2),
+            "vwap_cents": vwap,
+            "filled_count": vwap_res["filled_count"],
+            "reason": "OK"
+        }
+
+    def should_split_or_reject(
+        self,
+        requested_contracts: int,
+        max_safe: int
+    ) -> Tuple[bool, int]:
+        """
+        Decide whether to split or reject an order.
+        Returns (should_proceed, adjusted_contracts).
+        """
+        if max_safe <= 0:
+            self.sweep_violations_blocked += 1
+            return False, 0
+        if requested_contracts > max_safe:
+            self.sweep_violations_split += 1
+            return True, max_safe
+        return True, requested_contracts
+
+    def get_stats(self) -> Dict[str, Any]:
+        return {
+            "sweep_cap_pct": self.BOOK_SWEEP_CAP_PCT,
+            "sweep_violations_blocked": self.sweep_violations_blocked,
+            "sweep_violations_split": self.sweep_violations_split,
+            "total_adverse_slippage_cents": round(self.total_adverse_slippage_cents, 2),
+            "total_contracts_executed": self.total_contracts_executed,
+            "avg_slippage_cents_per_contract": round(
+                self.total_adverse_slippage_cents / max(1, self.total_contracts_executed), 2
+            )
         }
 
 
@@ -278,6 +499,10 @@ class KalshiWebSocketClient:
         if ticker not in self.books:
             self.books[ticker] = L2OrderBook(ticker)
         return self.books[ticker]
+
+    def get_book(self, ticker: str) -> Optional[L2OrderBook]:
+        """Return the current L2 order book for ticker if tracked, else None."""
+        return self.books.get(ticker)
 
     async def connect_and_listen(self):
         """Long-running async connection loop with exponential backoff."""
@@ -314,6 +539,10 @@ class KalshiWebSocketClient:
                 break
             except Exception as e:
                 logger.warning(f"WebSocket disconnected ({e}). Retrying in {self._reconnect_delay:.1f}s...")
+                # Fallback: keep L2 orderbook populated via public REST while WS is disconnected
+                if self.subscribed_tickers:
+                    for t in list(self.subscribed_tickers):
+                        await self.refresh_orderbook_rest(t)
                 await asyncio.sleep(self._reconnect_delay)
                 self._reconnect_delay = min(self._max_reconnect_delay, self._reconnect_delay * 1.8)
 
@@ -340,9 +569,62 @@ class KalshiWebSocketClient:
             return getattr(self._ws.state, "name", "") == "OPEN"
         return getattr(self._ws, "open", not getattr(self._ws, "closed", True))
 
+    async def refresh_orderbook_rest(self, ticker: str, overwrite_fresh: bool = True) -> bool:
+        """Fetch real L2 orderbook snapshot via public REST endpoint."""
+        existing = self.books.get(ticker)
+        if not overwrite_fresh and existing and not existing.stale and (existing.bids or existing.asks) and existing.last_seq is not None:
+            # WS snapshot already arrived — do not overwrite live sequence-tracked book
+            return True
+        base = self.ws_url.replace("wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2", "https://demo-api.kalshi.co/trade-api/v2")
+        base = base.replace("wss://demo-api.kalshi.co/trade-api/ws/v2", "https://demo-api.kalshi.co/trade-api/v2")
+        base = base.replace("wss://api.elections.kalshi.com/trade-api/ws/v2", "https://api.elections.kalshi.com/trade-api/v2")
+        if not base.startswith("http"):
+            base = "https://demo-api.kalshi.co/trade-api/v2"
+        url = f"{base}/markets/{ticker}/orderbook"
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    ob_fp = data.get("orderbook_fp") or data.get("orderbook", {})
+                    raw_yes = ob_fp.get("yes_dollars") or ob_fp.get("yes") or []
+                    raw_no = ob_fp.get("no_dollars") or ob_fp.get("no") or []
+
+                    yes_levels = []
+                    for item in raw_yes:
+                        try:
+                            p_cents = L2OrderBook.parse_price_cents(item[0])
+                            qty = int(round(float(item[1])))
+                            if 1 <= p_cents <= 99 and qty > 0:
+                                yes_levels.append([p_cents, qty])
+                        except Exception:
+                            pass
+
+                    asks_from_no = []
+                    for item in raw_no:
+                        try:
+                            p_cents = L2OrderBook.parse_price_cents(item[0])
+                            qty = int(round(float(item[1])))
+                            if 1 <= p_cents <= 99 and qty > 0:
+                                asks_from_no.append([100 - p_cents, qty])
+                        except Exception:
+                            pass
+
+                    book = self.get_or_create_book(ticker)
+                    if not overwrite_fresh and not book.stale and book.last_seq is not None and (book.bids or book.asks):
+                        return True
+                    book.apply_snapshot(yes_levels, asks_from_no)
+                    self._notify_book_update(ticker, book)
+                    return True
+        except Exception as e:
+            logger.debug(f"REST orderbook fallback failed for {ticker}: {e}")
+        return False
+
     async def subscribe_ticker(self, ticker: str):
         self.subscribed_tickers.add(ticker)
         self.get_or_create_book(ticker)
+        asyncio.create_task(self.refresh_orderbook_rest(ticker, overwrite_fresh=False))
         if self.is_ws_connected:
             await self._send_subscribe([ticker])
 
@@ -363,36 +645,48 @@ class KalshiWebSocketClient:
             data = json.loads(raw_msg)
             msg_type = data.get("type")
             msg_data = data.get("msg", {})
+            seq = data.get("seq")
 
             if msg_type == "orderbook_snapshot":
                 ticker = msg_data.get("market_ticker")
                 if ticker:
                     book = self.get_or_create_book(ticker)
-                    raw_yes = msg_data.get("yes_dollars_fp") or msg_data.get("yes") or msg_data.get("bids") or []
-                    raw_no = msg_data.get("no_dollars_fp") or msg_data.get("no") or msg_data.get("asks") or []
+                    raw_yes = msg_data.get("yes_dollars_fp") or msg_data.get("yes_dollars") or msg_data.get("yes") or msg_data.get("bids") or []
+                    raw_no = msg_data.get("no_dollars_fp") or msg_data.get("no_dollars") or msg_data.get("no") or []
+                    raw_asks = msg_data.get("asks") if not raw_no else None
 
                     yes_levels = []
                     for item in raw_yes:
                         try:
-                            p_cents = int(round(float(item[0]) * 100)) if "." in str(item[0]) else int(item[0])
+                            p_cents = L2OrderBook.parse_price_cents(item[0])
                             qty = int(round(float(item[1])))
-                            if p_cents > 0 and qty > 0:
+                            if 1 <= p_cents <= 99 and qty > 0:
                                 yes_levels.append([p_cents, qty])
                         except Exception:
                             pass
 
                     # In Kalshi binary structure, NO bids at P are equivalent to YES asks at (100 - P)
                     asks_from_no = []
-                    for item in raw_no:
-                        try:
-                            p_cents = int(round(float(item[0]) * 100)) if "." in str(item[0]) else int(item[0])
-                            qty = int(round(float(item[1])))
-                            if p_cents > 0 and qty > 0:
-                                asks_from_no.append([100 - p_cents, qty])
-                        except Exception:
-                            pass
+                    if raw_asks is not None:
+                        for item in raw_asks:
+                            try:
+                                p_cents = L2OrderBook.parse_price_cents(item[0])
+                                qty = int(round(float(item[1])))
+                                if 1 <= p_cents <= 99 and qty > 0:
+                                    asks_from_no.append([p_cents, qty])
+                            except Exception:
+                                pass
+                    else:
+                        for item in raw_no:
+                            try:
+                                p_cents = L2OrderBook.parse_price_cents(item[0])
+                                qty = int(round(float(item[1])))
+                                if 1 <= p_cents <= 99 and qty > 0:
+                                    asks_from_no.append([100 - p_cents, qty])
+                            except Exception:
+                                pass
 
-                    book.apply_snapshot(yes_levels, asks_from_no)
+                    book.apply_snapshot(yes_levels, asks_from_no, seq=seq)
                     self._notify_book_update(ticker, book)
 
             elif msg_type == "orderbook_delta":
@@ -403,15 +697,21 @@ class KalshiWebSocketClient:
 
                     try:
                         raw_price = msg_data.get("price_dollars", msg_data.get("price", 0))
-                        price = int(round(float(raw_price) * 100)) if "." in str(raw_price) else int(raw_price)
+                        price = L2OrderBook.parse_price_cents(raw_price)
                         raw_delta = msg_data.get("delta_fp", msg_data.get("delta", 0))
                         delta = int(round(float(raw_delta)))
 
                         if raw_side in ("yes", "bid", "yes_bid"):
-                            book.apply_delta("yes_bid", price, delta)
-                        elif raw_side in ("no", "ask", "yes_ask"):
-                            ask_price = (100 - price) if raw_side == "no" else price
-                            book.apply_delta("yes_ask", ask_price, delta)
+                            ok = book.apply_delta("yes_bid", price, delta, seq=seq)
+                        elif raw_side in ("no", "no_bid"):
+                            ok = book.apply_delta("no", price, delta, seq=seq)
+                        elif raw_side in ("ask", "yes_ask"):
+                            ok = book.apply_delta("yes_ask", price, delta, seq=seq)
+                        else:
+                            ok = True
+                        if not ok:
+                            logger.warning(f"[WS] Sequence gap on {ticker} (seq={seq}) — marking L2 book STALE and refreshing")
+                            asyncio.create_task(self.refresh_orderbook_rest(ticker, overwrite_fresh=True))
                         self._notify_book_update(ticker, book)
                     except Exception as e:
                         # FINDING #7: never silently discard book deltas — mark the book STALE so
@@ -715,8 +1015,8 @@ class KalshiStateReconciler:
             conn = db_path_or_db._get_conn()
             should_close = False
         elif isinstance(db_path_or_db, str):
-            conn = sqlite3.connect(db_path_or_db)
-            conn.row_factory = sqlite3.Row
+            from core.db_pool import get_db_pool
+            conn = get_db_pool(db_path_or_db).get_connection()
             should_close = True
         else:
             raise ValueError("Invalid database instance or path provided to reconciler")
@@ -969,12 +1269,26 @@ class KalshiOrderManagementSystem:
             dry_run = os.environ.get("KALSHI_LIVE_TRADING", "0").strip().lower() not in ("1", "true", "yes")
         self.reconciler = KalshiStateReconciler(auth=self.auth, rest_url=self.rest_url, dry_run=dry_run)
         self.dry_run = dry_run
+        # Distributed Order Lifecycle Saga Orchestrator
+        try:
+            from .order_saga import OrderSagaOrchestrator, OrderSagaState, OrderSaga
+        except ImportError:
+            from core.order_saga import OrderSagaOrchestrator, OrderSagaState, OrderSaga
+        self.saga_orchestrator = OrderSagaOrchestrator(
+            auth=self.auth,
+            rest_url=self.rest_url,
+            max_hold_seconds=120.0,
+            ws_client=self.ws_client,
+            on_orphan_detected=self._handle_orphans_rollback
+        )
         # FAIL-CLOSED orphan gate (condition 3): set when untracked resting orders are observed
         self.blocked_by_orphans: bool = False
         self.untracked_resting_orders: List[str] = []
         self.last_reconcile_report: Dict[str, Any] = {}
         # Simulated order ledger so mock fills report their REAL count (finding #6)
         self.mock_orders: Dict[str, Dict[str, Any]] = {}
+        # Book-depth-aware execution guard (15% book sweep cap)
+        self.book_aware_executor = BookAwareExecutor()
         logger.info(f"[OMS] dry_run={self.dry_run} — live order placement {'ARMED' if not dry_run else 'DISABLED (set KALSHI_LIVE_TRADING=1 to arm)'}")
 
     async def execute_trade(
@@ -1030,13 +1344,50 @@ class KalshiOrderManagementSystem:
             logger.error(f"[OMS] ABORT: L2 book for {ticker} is STALE — refusing to trade on drifted data.")
             return {"status": "ABORTED_STALE_BOOK", "reason": "L2 book marked stale after orderbook_delta parse failure"}
 
-        if not book:
-            if not self.dry_run and (self.auth and self.auth.is_configured and not self.auth.key_id.startswith("test-")):
-                logger.warning(f"[OMS] ABORT: No L2 book in local cache for {ticker}.")
+        # 2b. BOOK-DEPTH-AWARE EXECUTION: enforce 15% book sweep cap (AGENTS.md Section 7.3)
+        # Only enforce when a real L2 book is available; skip in mock/dry-run without WS.
+        max_safe = target_contracts
+        slippage_info = None
+        if book is not None:
+            # Mid price for slippage modeling: midpoint of best bid/ask
+            mid_price_cents = 50  # neutral fallback
+            best_bid, _ = book.get_best_bid()
+            best_ask, _ = book.get_best_ask()
+            if best_bid > 0 and best_ask < 100:
+                mid_price_cents = (best_bid + best_ask) // 2
+
+            is_buy_yes = (direction.upper() in ("BUY", "YES", "BUY_YES"))
+            max_safe = self.book_aware_executor.max_safe_contracts(book, is_buy_yes, target_contracts)
+            should_proceed, adjusted_contracts = self.book_aware_executor.should_split_or_reject(
+                target_contracts, max_safe
+            )
+            if not should_proceed:
+                logger.error(
+                    f"[OMS] ABORTED_BOOK_SWEEP: {target_contracts} contracts would exceed "
+                    f"{self.book_aware_executor.BOOK_SWEEP_CAP_PCT*100:.0f}% of visible book depth "
+                    f"on {ticker}. Order blocked."
+                )
                 return {
-                    "status": "ABORTED_EMPTY_BOOK",
-                    "reason": f"No L2 order book found in WebSocket cache for {ticker}"
+                    "status": "ABORTED_BOOK_SWEEP",
+                    "reason": f"Order would sweep >{self.book_aware_executor.BOOK_SWEEP_CAP_PCT*100:.0f}% of visible book depth",
+                    "target_contracts": target_contracts,
+                    "max_safe_contracts": max_safe
                 }
+            if adjusted_contracts < target_contracts:
+                logger.warning(
+                    f"[OMS] Book-depth split: scaling {target_contracts} → {adjusted_contracts} contracts "
+                    f"to respect 15% book sweep cap on {ticker}"
+                )
+                target_contracts = adjusted_contracts
+
+            # Model adverse slippage before execution for PnL tracking
+            slippage_info = self.book_aware_executor.estimate_adverse_slippage(
+                book, is_buy_yes, target_contracts, mid_price_cents
+            )
+            if slippage_info["reason"] != "OK":
+                logger.warning(
+                    f"[OMS] Slippage model warning on {ticker}: {slippage_info['reason']}"
+                )
 
         # 2. Walk down L2 book to calculate VWAP
         if book:
@@ -1142,6 +1493,17 @@ class KalshiOrderManagementSystem:
             f"[OMS] Executing {target_contracts}x {direction} on {ticker} | "
             f"Sweep VWAP: {vwap_cents:.1f}¢ | Cap Limit: {effective_cap_cents}¢ (Worst Level: {worst_price_cents}¢) | Levels: {levels_swept}"
         )
+
+        # Create Order Saga (PENDING)
+        saga = self.saga_orchestrator.create_saga(
+            ticker=ticker,
+            side=side_label,
+            action="buy" if is_buy else "sell",
+            target_contracts=target_contracts,
+            price_cents=effective_cap_cents,
+            metadata={"vwap_cents": vwap_cents, "model_prob": model_prob}
+        )
+
         order_res = await self._place_rest_order(
             ticker=ticker,
             action="buy" if is_buy else "sell",
@@ -1156,18 +1518,27 @@ class KalshiOrderManagementSystem:
             order_res["status"] = "FILLED"
             order_res["filled_count"] = target_contracts
             order_res.setdefault("order_id", f"sim_{int(time.time()*1000)}")
+            saga.order_id = order_res["order_id"]
+            saga.filled_contracts = target_contracts
+            saga.remaining_contracts = 0
+            self.saga_orchestrator.advance_state(saga, OrderSagaState.FILLED, "Simulation fill")
             return order_res
         if not order_id:
             # FINDING #4: REJECTED / timeout / error with no order_id must propagate —
             # NEVER rewrite it into a phantom FILLED position.
             st = order_res.get("status") or "UNKNOWN"
             logger.error(f"[OMS] Order placement returned no order_id (status={st}): {order_res}")
+            self.saga_orchestrator.advance_state(saga, OrderSagaState.CANCELLED, "Placement rejected / no order_id")
             return {
                 "status": st if st in ("REJECTED", "UNKNOWN") else "UNKNOWN",
                 "reason": order_res.get("error") or order_res.get("reason") or "no order_id in response",
                 "filled_count": 0,
                 "raw": order_res,
             }
+
+        saga.order_id = order_id
+        self.saga_orchestrator.order_id_to_saga[order_id] = saga.saga_id
+        self.saga_orchestrator.advance_state(saga, OrderSagaState.SUBMITTED, f"Order ID: {order_id}")
 
         # Allow matching engine to execute against book (Option C Hybrid Execution)
         # Step 1: Initial fast taker check (1.0s)
@@ -1220,6 +1591,7 @@ class KalshiOrderManagementSystem:
         # Step 4: Accept and commit any filled contracts
         if filled_count <= 0:
             logger.warning(f"[OMS Entry] Order {order_id} received 0 fills on exchange book after resting window. Entry canceled cleanly.")
+            self.saga_orchestrator.advance_state(saga, OrderSagaState.CANCELLED, "0 fills received on orderbook")
             return {
                 "status": "UNFILLED",
                 "reason": "Order received 0 fills on orderbook",
@@ -1227,6 +1599,10 @@ class KalshiOrderManagementSystem:
             }
 
         logger.info(f"[OMS Entry] Order {order_id} confirmed filled {filled_count}/{target_contracts} contracts @ {worst_price_cents}¢.")
+        saga.filled_contracts = filled_count
+        saga.remaining_contracts = max(0, target_contracts - filled_count)
+        saga.fill_price_cents = float(worst_price_cents)
+        self.saga_orchestrator.advance_state(saga, OrderSagaState.FILLED, f"Filled {filled_count}/{target_contracts} contracts")
         return {
             "status": "FILLED",
             "order_id": order_id,
@@ -1672,23 +2048,161 @@ class KalshiOrderManagementSystem:
             cnt = int(mock.get("count", 0)) if mock else 0
             return {"status": "executed", "remaining_count": 0, "fill_count": cnt, "initial_count": cnt}
 
-        endpoint = f"/portfolio/orders/{order_id}"
-        headers = self.auth.sign_request("GET", endpoint)
+        endpoints_to_try = [
+            f"/portfolio/events/orders/{order_id}",
+            f"/portfolio/orders/{order_id}"
+        ]
         async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get(f"{self.rest_url}{endpoint}", headers=headers)
-            if resp.status_code == 200:
-                ord_data = resp.json().get("order", {})
+            for endpoint in endpoints_to_try:
+                headers = self.auth.sign_request("GET", endpoint)
                 try:
-                    rem_fp = float(ord_data.get("remaining_count_fp", ord_data.get("remaining_count", 0)))
-                    fill_fp = float(ord_data.get("fill_count_fp", ord_data.get("fill_count", 0)))
-                    init_fp = float(ord_data.get("initial_count_fp", ord_data.get("count", 0)))
-                    ord_data["remaining_count"] = int(round(rem_fp))
-                    ord_data["fill_count"] = int(round(fill_fp))
-                    ord_data["initial_count"] = int(round(init_fp))
-                except Exception:
-                    pass
-                return ord_data
+                    resp = await client.get(f"{self.rest_url}{endpoint}", headers=headers)
+                    if resp.status_code == 200:
+                        ord_data = resp.json().get("order", resp.json())
+                        try:
+                            rem_fp = float(ord_data.get("remaining_count_fp", ord_data.get("remaining_count", 0)))
+                            fill_fp = float(ord_data.get("fill_count_fp", ord_data.get("fill_count", 0)))
+                            init_fp = float(ord_data.get("initial_count_fp", ord_data.get("count", 0)))
+                            ord_data["remaining_count"] = int(round(rem_fp))
+                            ord_data["fill_count"] = int(round(fill_fp))
+                            ord_data["initial_count"] = int(round(init_fp))
+                        except Exception:
+                            pass
+                        return ord_data
+                except Exception as e:
+                    logger.debug(f"[OMS Status] Polling error on {endpoint}: {e}")
             return {"status": "unknown"}
+
+    async def execute_order_with_saga(
+        self,
+        ticker: str,
+        direction: str,
+        target_contracts: int,
+        price_cents: int,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> Any:
+        """
+        Executes order under the Saga Distributed Order Lifecycle:
+        PENDING -> SUBMITTED -> PARTIAL_FILL -> FILLED -> CANCELLED -> SETTLED
+        With compensating transactions if WebSocket fills are missed.
+        """
+        dir_upper = direction.upper()
+        is_buy_no = dir_upper in ("NO", "BUY_NO")
+        is_buy_yes = dir_upper in ("BUY", "YES", "BUY_YES")
+        is_buy = is_buy_yes or is_buy_no
+        side_label = "NO" if is_buy_no else "YES"
+        action = "buy" if is_buy else "sell"
+
+        saga = self.saga_orchestrator.create_saga(
+            ticker=ticker,
+            side=side_label,
+            action=action,
+            target_contracts=target_contracts,
+            price_cents=price_cents,
+            metadata=metadata
+        )
+
+        return await self.saga_orchestrator.execute_saga_order(
+            saga=saga,
+            place_order_fn=self._place_rest_order,
+            get_status_fn=self._get_order_status,
+            cancel_order_fn=self._cancel_rest_order
+        )
+
+    async def sweep_and_cancel_orphaned_orders(self, max_hold_seconds: float = 120.0, auto_rollback: bool = True) -> List[Dict[str, Any]]:
+        """
+        Detect and auto-cancel orders resting older than max_hold_seconds (120s) with no fill.
+        If auto_rollback is True and orphans are found, auto-cancels resting orders and reverts to paper mode.
+        """
+        orphans = await self.saga_orchestrator.detect_and_cancel_orphans(
+            cancel_fn=self._cancel_rest_order,
+            max_hold_seconds=max_hold_seconds
+        )
+        if orphans and auto_rollback:
+            await self._handle_orphans_rollback(orphans)
+        return orphans
+
+    async def _handle_orphans_rollback(self, orphans: List[Dict[str, Any]]) -> None:
+        """Callback triggered when saga orchestrator detects and cancels orphaned orders."""
+        if not orphans:
+            return
+        logger.critical(
+            f"[KalshiOMS Orphan Guard] {len(orphans)} orphaned order(s) detected! "
+            f"Executing automated rollback: cancelling all resting orders and reverting to paper mode."
+        )
+        await self.trigger_rollback_to_paper(
+            reason=f"Orphaned order guard triggered: {len(orphans)} order(s) exceeded max hold time"
+        )
+
+    async def trigger_rollback_to_paper(self, reason: str) -> Dict[str, Any]:
+        """
+        Automated Rollback:
+        If live bot causes orphaned orders (>120s with no fill) or critical exchange failure,
+        auto-cancel resting orders via DELETE /portfolio/events/orders and revert to paper mode.
+        """
+        was_live = not self.dry_run
+        logger.critical(f"[LIVE OMS ROLLBACK] Reverting to paper mode! Reason: {reason} (was_live={was_live})")
+
+        # 1. Auto-cancel all resting orders on exchange
+        cancel_report = {}
+        try:
+            cancel_report = await self.cancel_all_orders()
+        except Exception as e:
+            logger.error(f"[Rollback] Failed to cancel resting orders on exchange: {e}")
+
+        # 2. Revert execution mode to dry-run (paper mode)
+        self.dry_run = True
+
+        # 3. Update portfolio_state.json
+        try:
+            from core.portfolio_state import load_state, save_state
+            state = load_state()
+            state["rollback_triggered"] = True
+            state["rollback_reason"] = reason
+            state["rollback_ts"] = time.time()
+            state["execution_mode"] = "REVERTED_TO_PAPER"
+            save_state(state)
+        except Exception as e:
+            logger.error(f"[Rollback] Failed to update portfolio_state.json: {e}")
+
+        # 4. Record to Audit DB if available
+        try:
+            from core.bot_database import AuditDatabase, TradeEventType
+            audit_db = AuditDatabase()
+            audit_db.append_event(
+                event_type=TradeEventType.OMS_ROLLBACK,
+                aggregate_id="system",
+                payload={
+                    "reason": reason,
+                    "was_live": was_live,
+                    "cancel_report": cancel_report,
+                    "timestamp": time.time()
+                }
+            )
+        except Exception as e:
+            logger.error(f"[Rollback] Failed to log audit event: {e}")
+
+        return {
+            "status": "REVERTED_TO_PAPER",
+            "reason": reason,
+            "was_live": was_live,
+            "cancel_report": cancel_report
+        }
+
+    async def sync_portfolio_state_30s(self, client: Optional[httpx.AsyncClient] = None) -> Dict[str, Any]:
+        """
+        30-second reconciliation loop step: syncs local portfolio_state.json with exchange.
+        """
+        return await self.saga_orchestrator.sync_portfolio_state_with_exchange(client=client)
+
+    async def start_saga_maintenance_loop(self, sync_interval_seconds: float = 30.0):
+        """
+        Runs continuous 30s background loop for orphan cancellation and portfolio state synchronization.
+        """
+        return await self.saga_orchestrator.start_reconciliation_and_orphan_loop(
+            cancel_fn=self._cancel_rest_order,
+            sync_interval_seconds=sync_interval_seconds
+        )
 
     @tracer.tool
     async def cancel_order(self, order_id: str, market_ticker: Optional[str] = None) -> bool:
