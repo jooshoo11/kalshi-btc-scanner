@@ -175,21 +175,29 @@ multicoin_engine = MultiCoinPaperEngine(
     disabled_coins={"SOL", "XRP"},
     ws_client=live_ws  # Pass WebSocket client for L2 book access
 )
-multicoin_engine.max_entry_price = 0.35
-multicoin_engine.max_seconds_left = 500
-multicoin_engine.min_seconds_left_by_coin = {"BTC": 360, "ETH": 240}
-multicoin_engine.min_prob_by_coin = {"BTC": 65.0, "ETH": 60.0}
-multicoin_engine.min_contracts_per_trade = 15
+multicoin_engine.max_entry_price = 0.48
+multicoin_engine.max_seconds_left = 660
+multicoin_engine.min_seconds_left_by_coin = {"BTC": 90, "ETH": 90}
+multicoin_engine.min_prob_by_coin = {"BTC": 52.0, "ETH": 52.0}
+multicoin_engine.min_edge_pct = 6.0
+multicoin_engine.take_profit_roi_pct = 55.0
+multicoin_engine.max_trades_per_candle = 1
+multicoin_engine.min_contracts_per_trade = 5
 multicoin_engine.max_contracts_per_trade = 120
-multicoin_engine.stop_loss_hard_roi_pct = 35.0
+multicoin_engine.stop_loss_hard_roi_pct = 45.0
 multicoin_engine.maker_take_profit = True
 multicoin_engine.enable_dynamic_compounding = True
-multicoin_engine.max_hold_seconds = 120.0
-multicoin_engine.enforce_rest_ws_consistency = True
-multicoin_engine.max_rest_ws_divergence_cents = 2
+multicoin_engine.max_hold_seconds = 600.0
+multicoin_engine.enforce_rest_ws_consistency = False
+multicoin_engine.max_rest_ws_divergence_cents = 3
 multicoin_engine.allow_partial_l2_fills = True
 multicoin_engine.enforce_l2_depth_cap = True
 multicoin_engine.l2_depth_cap_pct = 0.15
+multicoin_engine.cf_disloc_mode = True
+multicoin_engine.structural_stop_enabled = True
+multicoin_engine.structural_stop_min_hold_sec = 60.0
+multicoin_engine.structural_stop_roi_pct = 45.0
+multicoin_engine.structural_stop_z = -1.8
 
 hl_ws = HyperliquidWSFeed(coins=["BTC", "ETH"])
 
@@ -485,6 +493,9 @@ async def multi_coin_production_loop():
     from collections import deque as _deque
     from core.rti_accumulator import RtiAccumulator
     _spot_tick_history: Dict[str, _deque] = {c: _deque(maxlen=45) for c in ("BTC", "ETH", "SOL", "XRP")}
+    _cf_spot_cache: Dict[str, float] = {}
+    _perp_basis_ema: Dict[str, float] = {}
+    _last_cf_fetch: float = 0.0
     _rti_accumulators: Dict[str, RtiAccumulator] = {
         "BTC": RtiAccumulator(index_name="BRTI", window_seconds=60),
         "ETH": RtiAccumulator(index_name="ETHUSD_RTI", window_seconds=60),
@@ -527,14 +538,13 @@ async def multi_coin_production_loop():
                             _paper_equity, _exchange_equity, _paper_equity,
                         )
 
-                # 1. Refresh spot prices from persistent Hyperliquid WebSocket (REST fallback only if stale)
-                spot_prices = {}
+                # 1A. Refresh Hyperliquid perp lead prices from persistent WebSocket (REST fallback only if stale)
+                hl_lead_prices: Dict[str, float] = {}
                 stale_coins = []
                 for coin in coin_configs:
                     ws_spot = hl_ws.get_spot(coin)
                     if ws_spot is not None and hl_ws.is_fresh(coin, max_age=5.0):
-                        spot_prices[coin] = ws_spot
-                        _spot_tick_history.setdefault(coin, _deque(maxlen=45)).append((now, ws_spot))
+                        hl_lead_prices[coin] = ws_spot
                     else:
                         stale_coins.append(coin)
 
@@ -545,11 +555,74 @@ async def multi_coin_production_loop():
                         for coin in stale_coins:
                             val = mids.get(coin)
                             if val is not None:
-                                val_f = float(val)
-                                spot_prices[coin] = val_f
-                                _spot_tick_history.setdefault(coin, _deque(maxlen=45)).append((now, val_f))
+                                hl_lead_prices[coin] = float(val)
                     else:
                         print(f"[MultiCoinProd] Hyperliquid allMids fallback returned {hl_resp.status_code}")
+
+                # 1B. Refresh Coinbase + Kraken CF Benchmarks spot reference (BRTI / ETHUSD_RTI) every 1.5s
+                if now - _last_cf_fetch >= 1.5 or not _cf_spot_cache:
+                    _last_cf_fetch = now
+                    _cb_prices: Dict[str, float] = {}
+                    _kr_prices: Dict[str, float] = {}
+                    for coin in coin_configs:
+                        try:
+                            cb_r = await client.get(
+                                f"https://api.exchange.coinbase.com/products/{coin}-USD/ticker",
+                                timeout=1.5,
+                            )
+                            if cb_r.status_code == 200:
+                                _p = float(cb_r.json().get("price") or 0.0)
+                                if _p > 0:
+                                    _cb_prices[coin] = _p
+                        except Exception:
+                            pass
+                    try:
+                        kr_r = await client.get(
+                            "https://api.kraken.com/0/public/Ticker?pair=XBTUSD,ETHUSD",
+                            timeout=1.5,
+                        )
+                        if kr_r.status_code == 200:
+                            kr_res = kr_r.json().get("result", {})
+                            for k_name, k_obj in kr_res.items():
+                                c_list = k_obj.get("c") or []
+                                if c_list:
+                                    _kp = float(c_list[0] or 0.0)
+                                    if _kp > 0:
+                                        if "XBT" in k_name or "BTC" in k_name:
+                                            _kr_prices["BTC"] = _kp
+                                        elif "ETH" in k_name:
+                                            _kr_prices["ETH"] = _kp
+                    except Exception:
+                        pass
+
+                    for coin in coin_configs:
+                        samples = [p for p in (_cb_prices.get(coin), _kr_prices.get(coin)) if p and p > 0]
+                        if samples:
+                            _cf_spot_cache[coin] = sum(samples) / len(samples)
+
+                # Combine CF Spot + De-Biased Hyperliquid Perp Lead-Lag Basis
+                spot_prices = {}
+                leadlag_impulse_bps: Dict[str, float] = {}
+                for coin in coin_configs:
+                    hl_p = hl_lead_prices.get(coin, 0.0)
+                    cf_p = _cf_spot_cache.get(coin, 0.0)
+                    if cf_p > 0 and hl_p > 0:
+                        inst_basis = hl_p - cf_p
+                        if coin not in _perp_basis_ema:
+                            _perp_basis_ema[coin] = inst_basis
+                        else:
+                            _perp_basis_ema[coin] = 0.95 * _perp_basis_ema[coin] + 0.05 * inst_basis
+                        imp_dollar = inst_basis - _perp_basis_ema[coin]
+                        leadlag_impulse_bps[coin] = (imp_dollar / cf_p) * 10000.0
+                        spot_prices[coin] = cf_p
+                    elif cf_p > 0:
+                        spot_prices[coin] = cf_p
+                        leadlag_impulse_bps[coin] = 0.0
+                    elif hl_p > 0:
+                        spot_prices[coin] = hl_p - _perp_basis_ema.get(coin, 0.0)
+                        leadlag_impulse_bps[coin] = 0.0
+                    if coin in spot_prices and spot_prices[coin] > 0:
+                        _spot_tick_history.setdefault(coin, _deque(maxlen=45)).append((now, spot_prices[coin]))
 
                 # 2. Refresh candle opens every 20s
                 if now - last_candle_fetch > 20.0 or not candle_opens:
@@ -639,16 +712,28 @@ async def multi_coin_production_loop():
                     # candle open is only a proxy and would bias settlement PnL.
                     open_p = _authoritative_open(mkt, candle_opens.get(coin, 0.0), spot)
 
-                    y_ask = float(mkt.get("yes_ask_dollars") or 0.0)
-                    y_bid = float(mkt.get("yes_bid_dollars") or 0.0)
-                    n_ask = float(mkt.get("no_ask_dollars") or 0.0)
-                    n_bid = float(mkt.get("no_bid_dollars") or 0.0)
+                    rest_y_ask = float(mkt.get("yes_ask_dollars") or 0.0)
+                    rest_y_bid = float(mkt.get("yes_bid_dollars") or 0.0)
+                    rest_n_ask = float(mkt.get("no_ask_dollars") or 0.0)
+                    rest_n_bid = float(mkt.get("no_bid_dollars") or 0.0)
+                    y_ask, y_bid, n_ask, n_bid = rest_y_ask, rest_y_bid, rest_n_ask, rest_n_bid
 
-                    # Cross-check WS L2 book against fresh REST quote; if stale, trigger REST book refresh
+                    # Use real-time WebSocket L2 top-of-book to avoid 10-second stale REST cache lag
+                    # NOTE: REST /markets quotes lag the real order book by several seconds (measured
+                    # 0.71 REST vs 0.73->0.77 book). The WS book is the source of truth, so it is NOT
+                    # invalidated against REST; only seq gaps / crossed books mark it stale.
                     _l2_book = live_ws.get_book(ticker)
                     if _l2_book is not None:
-                        if not _l2_book.validate_against_rest_quote(y_bid, y_ask, max_divergence_cents=2):
+                        if getattr(_l2_book, "stale", False) and (now - getattr(_l2_book, "last_update_ts", 0.0)) > 3.0:
                             asyncio.create_task(live_ws.refresh_orderbook_rest(ticker, overwrite_fresh=True))
+                        if not getattr(_l2_book, "stale", False):
+                            ws_bid_c, _ = _l2_book.get_best_bid()
+                            ws_ask_c, _ = _l2_book.get_best_ask()
+                            if 1 <= ws_bid_c < ws_ask_c <= 99:
+                                y_bid = ws_bid_c / 100.0
+                                y_ask = ws_ask_c / 100.0
+                                n_bid = (100 - ws_ask_c) / 100.0
+                                n_ask = (100 - ws_bid_c) / 100.0
 
                     # Record 1-second settlement sample in final 60s window
                     acc = _rti_accumulators.get(coin)
@@ -669,13 +754,15 @@ async def multi_coin_production_loop():
                             realized_15m = realized_1s * 30.0
                             eff_vol = max(base_vol * 0.6, min(base_vol * 2.2, 0.5 * base_vol + 0.5 * realized_15m))
 
-                    # Model probability (with bounded 5-level OFI drift bias from Hyperliquid WS)
+                    # S5 De-Biased CF Spot Z-Score & Probability
                     delta = spot - open_p
-                    sigma = eff_vol * math.sqrt(seconds_left / 900.0)
+                    sigma_base = base_vol * math.sqrt(max(1.0, seconds_left) / 900.0)
+                    sigma = eff_vol * math.sqrt(max(1.0, seconds_left) / 900.0)
+                    z_cf = delta / max(0.0001, sigma_base)
                     z = delta / max(0.0001, sigma)
                     ofi_z = hl_ws.get_ofi_z(coin) if hl_ws.is_fresh(coin, max_age=5.0) else 0.0
-                    ofi_bias = max(-0.35, min(0.35, 0.12 * ofi_z))
-                    prob_yes = normal_cdf(z + ofi_bias)
+                    lead_imp_bps = leadlag_impulse_bps.get(coin, 0.0)
+                    prob_yes = normal_cdf(z_cf)
                     prob_no = 1.0 - prob_yes
                     prob_yes_pct = prob_yes * 100.0
                     prob_no_pct = prob_no * 100.0
@@ -685,6 +772,8 @@ async def multi_coin_production_loop():
                     fee_n = (calculate_kalshi_taker_fee(40, n_ask) / 40.0) if 0.0 < n_ask < 1.0 else 0.0
                     edge_y = (prob_yes - (y_ask + fee_y)) * 100.0 if y_ask > 0 else -100.0
                     edge_n = (prob_no - (n_ask + fee_n)) * 100.0 if n_ask > 0 else -100.0
+                    raw_disloc_y = (prob_yes - y_ask) if y_ask > 0 else -1.0
+                    raw_disloc_n = (prob_no - n_ask) if n_ask > 0 else -1.0
 
                     # Evaluate open positions
                     if coin in multicoin_engine.active_positions:
@@ -692,17 +781,17 @@ async def multi_coin_production_loop():
                         cur_bid = y_bid if pos["side"] == "YES" else n_bid
                         if cur_bid <= 0.01:
                             cur_bid = pos.get("current_bid", pos["entry_price"])
-                        # Persist the freshly computed bid for the dashboard's live
-                        # ROI display. Engine PnL/exit math below is unchanged.
                         pos["current_bid"] = cur_bid
                         curr_prob = prob_yes_pct if pos["side"] == "YES" else prob_no_pct
+                        dir_z = z_cf if pos["side"] == "YES" else -z_cf
                         closed_trade = multicoin_engine.update_position(
                             coin=coin,
                             current_bid=cur_bid,
                             seconds_left=seconds_left,
                             settle_spot=spot,
                             strike=open_p,
-                            model_prob=curr_prob
+                            model_prob=curr_prob,
+                            dir_z=dir_z,
                         )
                         if closed_trade:
                             if live_bridge.is_live_armed:
@@ -720,7 +809,7 @@ async def multi_coin_production_loop():
                                 "text": f"{icon} EXITED {closed_trade['coin']} ({closed_trade['reason']}): PnL {closed_trade['pnl']:+.2f} ({closed_trade['roi']:+.1f}%) | Equity: ${closed_trade['equity']:.2f}"
                             })
 
-                    # Evaluate new entry
+                    # Evaluate new entry (S5_REC_LEADLAG_ENSEMBLE rules)
                     else:
                         signal = ""
                         edge_pct = 0.0
@@ -728,60 +817,60 @@ async def multi_coin_production_loop():
 
                         spread_y = (y_ask - y_bid) if (y_ask > 0 and y_bid > 0) else 1.0
                         spread_n = (n_ask - n_bid) if (n_ask > 0 and n_bid > 0) else 1.0
-                        max_allowed_spread = 0.10  # Max 10¢ spread
+                        max_allowed_spread = 0.05  # Max 5¢ spread per S5
                         max_rel_spread = 0.35      # Max 35% relative spread
 
                         is_liquid_y = (y_bid >= 0.05) and (spread_y <= max_allowed_spread) and (spread_y / max(0.01, y_ask) <= max_rel_spread)
                         is_liquid_n = (n_bid >= 0.05) and (spread_n <= max_allowed_spread) and (spread_n / max(0.01, n_ask) <= max_rel_spread)
 
-                        # Calculate 20-second spot momentum/velocity to prevent buying into exhaustion pullbacks
+                        # Calculate 10-second and 20-second CF spot velocity
                         hist = _spot_tick_history.get(coin, _deque())
                         velocity_20s = 0.0
-                        if len(hist) >= 4:
-                            cutoff_ts = now - 20.0
-                            oldest_in_win = next((p for t, p in hist if t >= cutoff_ts), hist[0][1])
-                            velocity_20s = spot - oldest_in_win
+                        vel_10s_bps = 0.0
+                        if len(hist) >= 3:
+                            cutoff_20 = now - 20.0
+                            oldest_20 = next((p for t, p in hist if t >= cutoff_20), hist[0][1])
+                            velocity_20s = spot - oldest_20
+                            cutoff_10 = now - 10.0
+                            oldest_10 = next((p for t, p in hist if t >= cutoff_10), hist[0][1])
+                            vel_10s_bps = ((spot - oldest_10) / max(1e-6, spot)) * 10000.0
 
-                        max_entry_cap = float(getattr(multicoin_engine, "max_entry_price", 0.65))
-                        spike_delta_thresh = 70.0 if coin == "BTC" else 5.0
-                        adverse_vel_thresh = 18.0 if coin == "BTC" else 2.0
+                        max_entry_cap = float(getattr(multicoin_engine, "max_entry_price", 0.48))
 
-                        if prob_yes_pct >= 60.0 and 0.20 <= y_ask <= max_entry_cap:
-                            if edge_y >= 4.0:
-                                if not is_liquid_y:
-                                    action_status = "HOLD_WIDE_SPREAD"
-                                    action_reason = f"Illiquid book: bid {int(y_bid*100)}¢ / ask {int(y_ask*100)}¢ (spread {int(spread_y*100)}¢ > 10¢)"
-                                elif seconds_left > 500 and delta > spike_delta_thresh and y_ask > 0.58:
-                                    action_status = "HOLD_OVEREXTENDED_SPIKE"
-                                    action_reason = f"{coin} delta {delta:+.1f} overextended early in candle (ask {int(y_ask*100)}¢ > 58¢)"
-                                elif velocity_20s < -adverse_vel_thresh:
-                                    action_status = "HOLD_ADVERSE_MOMENTUM"
-                                    action_reason = f"Adverse spot momentum: {coin} dropping {velocity_20s:+.1f} in 20s (exhaustion pullback)"
-                                elif ofi_z <= -2.5:
-                                    action_status = "HOLD_ADVERSE_OFI"
-                                    action_reason = f"Extreme counter-OFI on {coin}: Z_OFI={ofi_z:+.2f} <= -2.50"
-                                else:
-                                    signal = "BUY YES"
-                                    edge_pct = edge_y
-                                    prob_val = prob_yes_pct
-                        elif prob_no_pct >= 60.0 and 0.20 <= n_ask <= max_entry_cap:
-                            if edge_n >= 4.0:
-                                if not is_liquid_n:
-                                    action_status = "HOLD_WIDE_SPREAD"
-                                    action_reason = f"Illiquid book: bid {int(n_bid*100)}¢ / ask {int(n_ask*100)}¢ (spread {int(spread_n*100)}¢ > 10¢)"
-                                elif seconds_left > 500 and delta < -spike_delta_thresh and n_ask > 0.58:
-                                    action_status = "HOLD_OVEREXTENDED_SPIKE"
-                                    action_reason = f"{coin} delta {delta:+.1f} overextended early in candle (ask {int(n_ask*100)}¢ > 58¢)"
-                                elif velocity_20s > adverse_vel_thresh:
-                                    action_status = "HOLD_ADVERSE_MOMENTUM"
-                                    action_reason = f"Adverse spot momentum: {coin} rallying {velocity_20s:+.1f} in 20s (exhaustion squeeze)"
-                                elif ofi_z >= 2.5:
-                                    action_status = "HOLD_ADVERSE_OFI"
-                                    action_reason = f"Extreme counter-OFI on {coin}: Z_OFI={ofi_z:+.2f} >= +2.50"
-                                else:
-                                    signal = "BUY NO"
-                                    edge_pct = edge_n
-                                    prob_val = prob_no_pct
+                        if z_cf >= 0.05 and 0.20 <= y_ask <= max_entry_cap and raw_disloc_y >= 0.09 and edge_y >= 6.0:
+                            if not is_liquid_y:
+                                action_status = "HOLD_WIDE_SPREAD"
+                                action_reason = f"Illiquid book: bid {int(y_bid*100)}¢ / ask {int(y_ask*100)}¢ (spread {int(spread_y*100)}¢ > 5¢)"
+                            elif vel_10s_bps < 0.0:
+                                action_status = "HOLD_ADVERSE_MOMENTUM"
+                                action_reason = f"10s CF velocity negative ({vel_10s_bps:+.2f} bps < 0)"
+                            elif lead_imp_bps < -0.50:
+                                action_status = "HOLD_ADVERSE_LEADLAG"
+                                action_reason = f"Adverse de-biased lead-lag impulse ({lead_imp_bps:+.2f} bps < -0.50)"
+                            elif ofi_z <= -2.5:
+                                action_status = "HOLD_ADVERSE_OFI"
+                                action_reason = f"Extreme counter-OFI on {coin}: Z_OFI={ofi_z:+.2f} <= -2.50"
+                            else:
+                                signal = "BUY YES"
+                                edge_pct = edge_y
+                                prob_val = prob_yes_pct
+                        elif (-z_cf) >= 0.05 and 0.20 <= n_ask <= max_entry_cap and raw_disloc_n >= 0.09 and edge_n >= 6.0:
+                            if not is_liquid_n:
+                                action_status = "HOLD_WIDE_SPREAD"
+                                action_reason = f"Illiquid book: bid {int(n_bid*100)}¢ / ask {int(n_ask*100)}¢ (spread {int(spread_n*100)}¢ > 5¢)"
+                            elif (-vel_10s_bps) < 0.0:
+                                action_status = "HOLD_ADVERSE_MOMENTUM"
+                                action_reason = f"10s CF velocity positive against NO ({vel_10s_bps:+.2f} bps > 0)"
+                            elif (-lead_imp_bps) < -0.50:
+                                action_status = "HOLD_ADVERSE_LEADLAG"
+                                action_reason = f"Adverse de-biased lead-lag impulse ({lead_imp_bps:+.2f} bps > +0.50)"
+                            elif ofi_z >= 2.5:
+                                action_status = "HOLD_ADVERSE_OFI"
+                                action_reason = f"Extreme counter-OFI on {coin}: Z_OFI={ofi_z:+.2f} >= +2.50"
+                            else:
+                                signal = "BUY NO"
+                                edge_pct = edge_n
+                                prob_val = prob_no_pct
 
                         is_certainty_arb = False
                         if not signal and acc is not None and 3 < seconds_left <= 45:

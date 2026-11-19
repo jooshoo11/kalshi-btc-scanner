@@ -13,6 +13,7 @@ Verifies:
 
 import os
 import sys
+import time
 import tempfile
 import asyncio
 from typing import Dict, Any
@@ -115,7 +116,17 @@ async def test_kalshi_client_rest():
     assert canceled is True
     print("  ✓ cancel_order() verified.")
 
-    await client.close()
+    # Context manager test
+    async with KalshiClient(dry_run=True) as ctx_client:
+        bal = await ctx_client.get_balance()
+        assert "balance" in bal
+    assert ctx_client._http_client is None
+
+    # Alias verification
+    from core.kalshi_client import WebSocketSubscriptionManager, KalshiWebSocketSubscriptionManager
+    assert WebSocketSubscriptionManager is AsyncOrderManager
+    assert KalshiWebSocketSubscriptionManager is AsyncOrderManager
+    print("  ✓ Async context manager and SubscriptionManager aliases verified.")
 
 
 async def test_order_book_and_vwap():
@@ -198,7 +209,102 @@ async def test_async_order_manager_execution():
     assert sl_res["action"] == "sell"
     print(f"  ✓ Limit-chasing stop loss order placed: {sl_res}")
 
-    await client.close()
+    # Context manager test
+    async with KalshiClient(dry_run=True) as ctx_client:
+        bal = await ctx_client.get_balance()
+        assert "balance" in bal
+    assert ctx_client._http_client is None
+
+    # Alias verification
+    from core.kalshi_client import WebSocketSubscriptionManager, KalshiWebSocketSubscriptionManager
+    assert WebSocketSubscriptionManager is AsyncOrderManager
+    assert KalshiWebSocketSubscriptionManager is AsyncOrderManager
+    print("  ✓ Async context manager and SubscriptionManager aliases verified.")
+
+
+async def test_multi_series_and_taker_fee():
+    print("\n[+] 5. Testing Multi-Series Support & Non-Linear Fee Math...")
+    from core.kalshi_client import calculate_kalshi_taker_fee, SUPPORTED_SERIES
+    assert "KXBTC15M" in SUPPORTED_SERIES
+    assert "KXETH15M" in SUPPORTED_SERIES
+    assert "KXSOL15M" in SUPPORTED_SERIES
+    assert "KXXRP15M" in SUPPORTED_SERIES
+
+    # Fee formula check: ceil(0.07 * contracts * price * (1 - price) * 100) / 100
+    # contracts=10, price=0.50 -> 0.07 * 10 * 0.50 * 0.50 = 0.175 -> ceil to 0.18
+    fee = calculate_kalshi_taker_fee(contracts=10, price=0.50)
+    assert fee == 0.18, f"Expected 0.18, got {fee}"
+
+    # Edge cases: 0 contracts or 0/1 price -> 0.0 fee
+    assert calculate_kalshi_taker_fee(0, 0.50) == 0.0
+    assert calculate_kalshi_taker_fee(10, 0.0) == 0.0
+    assert calculate_kalshi_taker_fee(10, 1.0) == 0.0
+
+    # Multi-series client calls in dry-run mode
+    client = KalshiClient(dry_run=True, env="demo")
+    assert client.calculate_fee(10, 0.50) == 0.18
+
+    series_info = await client.get_series("KXETH15M")
+    assert "error" in series_info or series_info is not None
+
+    markets = await client.get_markets(series_ticker="KXSOL15M", limit=5)
+    assert "error" in markets or markets is not None
+    # Context manager test
+    async with KalshiClient(dry_run=True) as ctx_client:
+        bal = await ctx_client.get_balance()
+        assert "balance" in bal
+    assert ctx_client._http_client is None
+
+    # Alias verification
+    from core.kalshi_client import WebSocketSubscriptionManager, KalshiWebSocketSubscriptionManager
+    assert WebSocketSubscriptionManager is AsyncOrderManager
+    assert KalshiWebSocketSubscriptionManager is AsyncOrderManager
+    print("  ✓ Async context manager and SubscriptionManager aliases verified.")
+    print("  ✓ Multi-series and taker fee tests passed.")
+
+
+async def test_rate_limiter_and_retry_backoff():
+    print("\n[+] 6. Testing Rate Limiter & Retry Backoff...")
+    from core.kalshi_client import TokenBucketRateLimiter
+    from unittest.mock import patch, AsyncMock
+    import httpx
+
+    limiter = TokenBucketRateLimiter(rate_per_second=50.0, burst_capacity=2.0)
+    start = time.time()
+    await limiter.acquire()
+    await limiter.acquire()
+    # Third acquire should slightly throttle
+    await limiter.acquire()
+    elapsed = time.time() - start
+    assert elapsed >= 0.01
+
+    # Retry backoff mock test
+    client = KalshiClient(dry_run=False, max_retries=2)
+    mock_resp_429 = httpx.Response(status_code=429, text='{"error": "rate_limit"}', request=httpx.Request("GET", "http://test"))
+    mock_resp_200 = httpx.Response(status_code=200, json={"balance": 50000}, request=httpx.Request("GET", "http://test"))
+
+    mock_http = AsyncMock()
+    mock_http.request.side_effect = [mock_resp_429, mock_resp_200]
+    mock_http.is_closed = False
+
+    with patch.object(client, "get_http_client", return_value=mock_http):
+        res = await client._request("GET", "/portfolio/balance")
+        assert res.get("balance") == 50000
+        assert mock_http.request.call_count == 2
+        print("  ✓ Automatic 429 retry with backoff confirmed.")
+
+    # Context manager test
+    async with KalshiClient(dry_run=True) as ctx_client:
+        bal = await ctx_client.get_balance()
+        assert "balance" in bal
+    assert ctx_client._http_client is None
+
+    # Alias verification
+    from core.kalshi_client import WebSocketSubscriptionManager, KalshiWebSocketSubscriptionManager
+    assert WebSocketSubscriptionManager is AsyncOrderManager
+    assert KalshiWebSocketSubscriptionManager is AsyncOrderManager
+    print("  ✓ Async context manager and SubscriptionManager aliases verified.")
+
 
 
 async def main():

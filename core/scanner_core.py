@@ -63,11 +63,16 @@ class KalshiScanner:
         }
         self.is_scanning = False
 
-    async def fetch_open_events(self, max_pages: int = 5, page_limit: int = 200) -> List[Dict[str, Any]]:
-        """Fetch open events with nested markets from Kalshi API v2."""
+    async def fetch_open_events(self, client: Optional[httpx.AsyncClient] = None, max_pages: int = 5, page_limit: int = 200) -> List[Dict[str, Any]]:
+        """Fetch open events with nested markets from Kalshi API v2, optionally reusing an AsyncClient pool."""
         events = []
         cursor = ""
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        should_close = False
+        if client is None:
+            client = httpx.AsyncClient(timeout=30.0)
+            should_close = True
+
+        try:
             for page in range(max_pages):
                 params = {
                     "status": "open",
@@ -89,6 +94,9 @@ class KalshiScanner:
                 except Exception as e:
                     print(f"Error fetching page {page}: {e}")
                     break
+        finally:
+            if should_close:
+                await client.aclose()
         return events
 
     def scan_event_arbitrage(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -464,11 +472,11 @@ class KalshiScanner:
 
         return opps
 
-    async def run_full_scan(self, max_pages: int = 5) -> Dict[str, Any]:
-        """Run complete scan pipeline across all strategies."""
+    async def run_full_scan(self, client: Optional[httpx.AsyncClient] = None, max_pages: int = 5) -> Dict[str, Any]:
+        """Run complete scan pipeline across all strategies, optionally reusing client."""
         self.is_scanning = True
         start_time = time.time()
-        events = await self.fetch_open_events(max_pages=max_pages, page_limit=200)
+        events = await self.fetch_open_events(client=client, max_pages=max_pages, page_limit=200)
 
         all_opps = []
         total_markets = 0

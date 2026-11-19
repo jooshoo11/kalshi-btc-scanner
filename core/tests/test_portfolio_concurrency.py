@@ -2,51 +2,34 @@
 core/tests/test_portfolio_concurrency.py — Integration & Concurrency Test Harness.
 
 Tests the PortfolioManager's asyncio.Lock() serialization under simultaneous
-signals from BTC, ETH, and SOL, confirming that:
-1. Capital reservation is atomic and serialized.
-2. Concurrent orders never exceed max portfolio allocation.
-3. Insufficient balance errors are cleanly avoided.
+signals from BTC, ETH, SOL, and XRP, confirming that:
+1. Capital reservation is atomic and serialized under simultaneous signals.
+2. Concurrent orders never exceed max portfolio allocation (40%) or max positions (2).
+3. Simultaneous BTC and SOL triggers cannot double-spend margin.
+4. Margin exhaustion cleanly rejects excess trades with structured error reasons.
+5. Capital recycling properly frees buying power for subsequent coin evaluations.
 """
 
 import asyncio
+import pytest
 from unittest.mock import MagicMock
 from core.portfolio_manager import PortfolioManager
 
-try:
-    import pytest
-    pytest_asyncio_marker = pytest.mark.asyncio
-except ImportError:
-    def pytest_asyncio_marker(func):
-        return func
 
-
-@pytest_asyncio_marker
-async def test_simultaneous_trade_reservation_lock():
-    """Verify that simultaneous signals from BTC and SOL are cleanly serialized."""
-    auth_mock = MagicMock()
-    auth_mock.is_configured = False
-    
-    # Portfolio of $100 with 30% max exposure cap and 15% single trade cap
-    pm = PortfolioManager(
-        auth=auth_mock,
-        rest_url="https://demo-api.kalshi.co/trade-api/v2",
-        initial_balance=100.0,
-        max_portfolio_allocation_pct=30.0,
-        max_single_trade_pct=15.0,
-        max_concurrent_positions=2
-    )
+@pytest.mark.asyncio
+async def test_simultaneous_trade_reservation_lock(portfolio_manager_fixture):
+    """Verify that simultaneous signals from BTC, SOL, and ETH are cleanly serialized."""
+    pm = portfolio_manager_fixture
 
     # Simulate 3 simultaneous triggers: BTC, SOL, and ETH
     async def place_simulated_trade(asset: str, price: float):
-        # 15% of $100 = $15.00 budget. Entry price 50¢ = 30 contracts ($15.00)
-        res = await pm.evaluate_and_reserve_capital(
+        return await pm.evaluate_and_reserve_capital(
             asset=asset,
             entry_price=price,
             fee_per_contract=0.005
         )
-        return res
 
-    # Trigger BTC and SOL at the exact same instant
+    # Trigger BTC, SOL, and ETH at the exact same instant
     results = await asyncio.gather(
         place_simulated_trade("BTC", 0.50),
         place_simulated_trade("SOL", 0.50),
@@ -59,27 +42,56 @@ async def test_simultaneous_trade_reservation_lock():
     # Exactly 2 should be approved (reaching max_concurrent_positions = 2)
     assert len(approved) == 2, f"Expected 2 approved, got {len(approved)}"
     assert len(rejected) == 1, f"Expected 1 rejected, got {len(rejected)}"
-    assert "Max concurrent positions reached" in rejected[0]["reason"] or "capacity" in rejected[0]["reason"]
-
-    # Total allocated capital should not exceed 30% ($30.00)
-    assert pm.allocated_capital <= 30.0, f"Allocated capital {pm.allocated_capital} exceeded $30.00!"
-    print(f"  ✓ Concurrency Lock Verified: 2 concurrent trades approved (${pm.allocated_capital:.2f}), 3rd rejected cleanly.")
-
-
-@pytest_asyncio_marker
-async def test_release_and_reallocation():
-    """Verify that releasing capital correctly restores buying power."""
-    auth_mock = MagicMock()
-    auth_mock.is_configured = False
-
-    pm = PortfolioManager(
-        auth=auth_mock,
-        rest_url="https://demo-api.kalshi.co/trade-api/v2",
-        initial_balance=100.0,
-        max_portfolio_allocation_pct=30.0,
-        max_single_trade_pct=15.0,
-        max_concurrent_positions=2
+    assert (
+        "Max concurrent positions reached" in rejected[0]["reason"]
+        or "capacity" in rejected[0]["reason"]
     )
+
+    # Total allocated capital must not exceed 40% ($40.00)
+    assert pm.allocated_capital <= 40.0, f"Allocated capital {pm.allocated_capital} exceeded $40.00!"
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_btc_and_sol_margin_exhaustion(portfolio_manager_fixture):
+    """
+    Simulate BTC and SOL contending for a limited margin pool.
+    Verify that if BTC takes 20% and SOL takes 20%, a subsequent XRP or ETH
+    trade is rejected with margin/portfolio capacity exhaustion.
+    """
+    pm = portfolio_manager_fixture
+
+    # Trigger BTC and SOL simultaneously with larger size requests
+    btc_task = asyncio.create_task(pm.evaluate_and_reserve_capital("BTC", 0.50, 0.01))
+    sol_task = asyncio.create_task(pm.evaluate_and_reserve_capital("SOL", 0.50, 0.01))
+
+    btc_res, sol_res = await asyncio.gather(btc_task, sol_task)
+
+    assert btc_res["approved"] is True
+    assert sol_res["approved"] is True
+
+    # Commit both fills
+    await pm.commit_fill("BTC", {"contracts": btc_res["target_contracts"], "cost_dollars": btc_res["total_reserve"], "fee_dollars": 0.20})
+    await pm.commit_fill("SOL", {"contracts": sol_res["target_contracts"], "cost_dollars": sol_res["total_reserve"], "fee_dollars": 0.20})
+
+    # Portfolio is at 40% capacity ($40.00)
+    assert pm.allocated_capital >= 38.0
+
+    # Simultaneous third-wave attempts (ETH and XRP) must both be rejected
+    eth_task = asyncio.create_task(pm.evaluate_and_reserve_capital("ETH", 0.50, 0.01))
+    xrp_task = asyncio.create_task(pm.evaluate_and_reserve_capital("XRP", 0.50, 0.01))
+
+    eth_res, xrp_res = await asyncio.gather(eth_task, xrp_task)
+
+    assert eth_res["approved"] is False
+    assert xrp_res["approved"] is False
+    assert "capacity" in eth_res["reason"].lower() or "positions" in eth_res["reason"].lower()
+    assert "capacity" in xrp_res["reason"].lower() or "positions" in xrp_res["reason"].lower()
+
+
+@pytest.mark.asyncio
+async def test_release_and_reallocation(portfolio_manager_fixture):
+    """Verify that releasing capital correctly restores buying power."""
+    pm = portfolio_manager_fixture
 
     # 1. Reserve for BTC
     btc_res = await pm.evaluate_and_reserve_capital("BTC", 0.50, 0.005)
@@ -96,17 +108,10 @@ async def test_release_and_reallocation():
     assert not eth_res["approved"]
 
     # 4. BTC takes profit and releases with $20 payout ($5.35 profit)
-    await pm.release_position("BTC", payout_dollars=20.00)
+    await pm.release_position("BTC", payout_dollars=20.00, exit_reason="TAKE_PROFIT")
     assert "BTC" not in pm.active_positions
     assert pm.total_cash > 100.0
 
     # 5. ETH can now be approved
     eth_res2 = await pm.evaluate_and_reserve_capital("ETH", 0.50, 0.005)
     assert eth_res2["approved"], f"ETH should be approved after BTC release, reason: {eth_res2.get('reason')}"
-    print(f"  ✓ Capital Recycling Verified: Released BTC, approved ETH successfully.")
-
-
-if __name__ == "__main__":
-    asyncio.run(test_simultaneous_trade_reservation_lock())
-    asyncio.run(test_release_and_reallocation())
-    print("\n✓ ALL PORTFOLIO CONCURRENCY TESTS PASSED!")

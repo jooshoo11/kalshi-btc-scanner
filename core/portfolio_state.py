@@ -48,7 +48,8 @@ def confirmed_equity_from_db(db_path: str, initial_balance: float) -> float:
     """initial_balance + SUM(pnl) over CLOSED trades with confirmed (non-estimated) settlement."""
     if not os.path.exists(db_path):
         return round(initial_balance, 2)
-    with sqlite3.connect(db_path) as conn:
+    from core.db_pool import get_db_pool
+    with get_db_pool(db_path).connection() as conn:
         cur = conn.cursor()
         cur.execute(
             "SELECT COALESCE(SUM(pnl_dollars), 0.0) FROM trades "
@@ -56,7 +57,22 @@ def confirmed_equity_from_db(db_path: str, initial_balance: float) -> float:
             "AND (exit_reason IS NULL OR (exit_reason NOT LIKE 'SETTLED_UNKNOWN%' AND exit_reason NOT LIKE 'SETTLED_ESTIMATED%'))"
         )
         row = cur.fetchone()
-        return round(initial_balance + float(row[0] or 0.0), 2)
+        pnl = float(row[0] or 0.0)
+
+    # Include cold Parquet archive PnL so cold storage pruning doesn't corrupt equity
+    try:
+        import glob
+        import pandas as _pd
+        for _f in glob.glob("archive/trades/*/*/*.parquet"):
+            try:
+                _df_arch = _pd.read_parquet(_f, columns=["pnl_dollars"])
+                pnl += float(_df_arch["pnl_dollars"].fillna(0.0).sum())
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return round(initial_balance + pnl, 2)
 
 
 def load_state() -> Dict[str, Any]:

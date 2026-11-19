@@ -24,3 +24,10 @@ settings_snapshot_baseline.json
 
 
 data/ticks/
+data/ticks_old/
+data/*.pkl
+archive/
+*.db-wal
+*.db-shm
+.freebuff/
+.gemini/

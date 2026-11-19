@@ -600,7 +600,7 @@ class MultiCoinPaperEngine:
                 from core.portfolio_state import check_portfolio_daily_loss, combined_equity
         except ImportError:
             return None
-        reason = check_portfolio_daily_loss(combined_equity())
+        reason = check_portfolio_daily_loss()
         if reason:
             return f"PORTFOLIO-WIDE {reason}"
         return None
@@ -1060,7 +1060,8 @@ class MultiCoinPaperEngine:
             self.last_candle_ids[coin] = candle_id
             self.trades_in_candle[coin] = 0
 
-        if self.trades_in_candle.get(coin, 0) >= 3:
+        max_trades_candle = int(getattr(self, "max_trades_per_candle", 3))
+        if self.trades_in_candle.get(coin, 0) >= max_trades_candle:
             return None
 
         # Cooldown
@@ -1088,13 +1089,14 @@ class MultiCoinPaperEngine:
         if not target_side or target_price <= 0.0:
             return None
 
-        # Entry price gate: reject contracts priced above max_entry_price (e.g. 35¢) or below 20¢.
+        # Entry price gate: reject contracts priced above max_entry_price (e.g. 35¢ or 48¢ in S5) or below 20¢.
         # Certainty arb bypasses the directional ceiling up to 78¢ (blocks >78¢ tail-risk entries).
         max_entry = 0.78 if is_certainty_arb else coin_cfg.get("max_entry_price", getattr(self, "max_entry_price", 0.35))
         if target_price > max_entry or target_price < 0.20:
             return None
-        if not is_certainty_arb and target_price >= 0.40 and (edge_pct < 8.0 or model_prob < 68.0):
-            return None
+        if not is_certainty_arb and not getattr(self, "cf_disloc_mode", False):
+            if target_price >= 0.40 and (edge_pct < 8.0 or model_prob < 68.0):
+                return None
 
         # Early spike breakout ceiling: if early in candle (>500s left) and spot is overextended,
         # cap entry price at 58¢ to avoid buying the top/bottom of 1-minute false wicks
@@ -1324,8 +1326,9 @@ class MultiCoinPaperEngine:
         current_time: Optional[float] = None,
         model_prob: Optional[float] = None,
         official_result: Optional[str] = None,
+        dir_z: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Update open position: checks +25% Take Profit, Dual-Confirmation Stop Loss, or Expiration."""
+        """Update open position: checks Take Profit, Structural/Dual-Confirmation Stop Loss, or Expiration."""
         pos = self.active_positions.get(coin)
         if not pos:
             return None
@@ -1347,7 +1350,7 @@ class MultiCoinPaperEngine:
             pnl = payout - (pos["cost_dollars"] + pos["fee_dollars"]) + float(pos.get("realized_partial_pnl", 0.0))
             return self._close_position(coin, exit_price=1.0 if won else 0.0, reason=reason, pnl=pnl, payout=payout, current_time=now)
 
-        # B. Take Profit Exit (+25% ROI) via Passive Maker Limit Order (0 taker exit fee)
+        # B. Take Profit Exit via Passive Maker Limit Order (0 taker exit fee)
         if roi_pct >= self.take_profit_roi_pct:
             use_maker_tp = getattr(self, "maker_take_profit", True)
             return self._execute_exit_with_l2(
@@ -1358,12 +1361,39 @@ class MultiCoinPaperEngine:
                 now=now,
             )
 
-        # C. Dynamic Dual-Confirmation Stop Loss
-        # Only stop out if BOTH the price has decayed (-25% ROI) AND model/spot confirms the thesis has failed.
-        # Microstructure protection: within the first 15s of entry, do not stop out on -25% bid noise unless spot
-        # crosses strike adversely OR hard catastrophe stop (-35% ROI) is hit.
         hold_secs = now - pos.get("entry_timestamp", now)
         is_spot_adverse = (settle_spot < strike) if pos["side"] == "YES" else (settle_spot > strike)
+
+        # C1. S5 Structural Stop-Loss Regime (avoids -25% bid-noise shakeouts and 120s forced time-exits)
+        if getattr(self, "structural_stop_enabled", False):
+            min_hold_struct = float(getattr(self, "structural_stop_min_hold_sec", 60.0))
+            struct_roi_thresh = float(getattr(self, "structural_stop_roi_pct", 45.0))
+            struct_z_thresh = float(getattr(self, "structural_stop_z", -1.8))
+            struct_prob_thresh = float(getattr(self, "structural_stop_max_prob_pct", 5.0))
+            is_z_broken = (
+                (dir_z <= struct_z_thresh)
+                if dir_z is not None
+                else (model_prob is not None and model_prob <= struct_prob_thresh)
+            )
+            if hold_secs >= min_hold_struct and roi_pct <= -struct_roi_thresh and is_z_broken:
+                candle_id = pos.get("candle_id", "")
+                if candle_id:
+                    self.candle_stopped_out[coin] = candle_id
+                logger.info(
+                    f"[MultiCoin] STRUCT_STOP {coin} triggered after {hold_secs:.0f}s: "
+                    f"ROI {roi_pct:+.1f}%, dir_z={dir_z}, model_prob={model_prob}"
+                )
+                return self._execute_exit_with_l2(
+                    coin=coin,
+                    reason="STOP_LOSS",
+                    fallback_bid=current_bid,
+                    is_maker=False,
+                    now=now,
+                    model_prob_at_stop=model_prob,
+                )
+            return None
+
+        # C2. Legacy Dynamic Dual-Confirmation Stop Loss
         is_hard_stop = (roi_pct <= -self.stop_loss_hard_roi_pct)  # Unconditional -35% catastrophe circuit breaker
 
         if hold_secs < 30 and not is_spot_adverse:

@@ -278,3 +278,75 @@ async def test_official_settlement_reconciliation():
         trades = engine.db.get_recent_trades(limit=1)
         assert trades[0]["exit_reason"] == "SETTLED_LOSS"
         assert trades[0]["exit_price"] == 0.0
+
+
+def test_s5_cf_disloc_and_structural_stop_no_noise_shakeout():
+    """
+    Verify S5_REC_LEADLAG_ENSEMBLE mode:
+    - Allows 40c-48c CF dislocation entries when cf_disloc_mode=True.
+    - Does NOT shake out on a -25% bid dip or 120s time-exit when structural_stop_enabled=True.
+    - Exits on +55% Maker Take-Profit or deep structural breakdown (hold >= 60s, roi <= -45%, dir_z <= -1.8).
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "test_s5.db")
+        engine = MultiCoinPaperEngine(initial_balance=100.0, db_path=db_path, ws_client=None)
+        engine.cf_disloc_mode = True
+        engine.max_entry_price = 0.48
+        engine.min_seconds_left_by_coin = {"BTC": 90, "ETH": 90}
+        engine.max_seconds_left = 660
+        engine.min_prob_by_coin = {"BTC": 52.0, "ETH": 52.0}
+        engine.min_edge_pct = 6.0
+        engine.take_profit_roi_pct = 55.0
+        engine.max_trades_per_candle = 1
+        engine.structural_stop_enabled = True
+        engine.structural_stop_min_hold_sec = 60.0
+        engine.structural_stop_roi_pct = 45.0
+        engine.structural_stop_z = -1.8
+
+        t0 = 1000.0
+        pos = engine.evaluate_entry(
+            coin="BTC",
+            ticker="KXBTC15M-S5",
+            series="KXBTC15M",
+            signal="BUY YES",
+            edge_pct=9.5,
+            model_prob=55.0,
+            yes_ask=0.44,
+            no_ask=0.58,
+            seconds_left=300,
+            delta=15.0,
+            candle_id="2026-11-19T15:00:00Z",
+            current_time=t0,
+        )
+        assert pos is not None
+        assert pos["entry_price"] == 0.44
+
+        # 1. A -27% bid dip (0.44 -> 0.32) after 150s with dir_z = -0.4 must NOT shake out the trade
+        res_noise = engine.update_position(
+            coin="BTC",
+            current_bid=0.32,
+            seconds_left=150,
+            settle_spot=62990.0,
+            strike=63000.0,
+            current_time=t0 + 150.0,
+            model_prob=42.0,
+            dir_z=-0.4,
+        )
+        assert res_noise is None
+        assert "BTC" in engine.active_positions
+
+        # 2. Rebound to +56.8% ROI (0.44 -> 0.69) triggers +55% Maker TAKE_PROFIT with 0 exit fee
+        res_tp = engine.update_position(
+            coin="BTC",
+            current_bid=0.69,
+            seconds_left=100,
+            settle_spot=63040.0,
+            strike=63000.0,
+            current_time=t0 + 200.0,
+            model_prob=75.0,
+            dir_z=1.1,
+        )
+        assert res_tp is not None
+        assert res_tp["reason"] == "TAKE_PROFIT"
+        assert res_tp["pnl"] > 0
+

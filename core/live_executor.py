@@ -203,8 +203,7 @@ class L2OrderBook:
         self.asks = new_asks
         self.last_update_ts = time.time()
         self.stale = False  # fresh full snapshot clears the stale flag
-        if seq is not None:
-            self.last_seq = int(seq)
+        self.last_seq = int(seq) if seq is not None else None
 
     def apply_delta(self, side: str, price_cents: int, delta_qty: int, seq: Optional[int] = None) -> bool:
         """
@@ -575,6 +574,12 @@ class KalshiWebSocketClient:
         if not overwrite_fresh and existing and not existing.stale and (existing.bids or existing.asks) and existing.last_seq is not None:
             # WS snapshot already arrived — do not overwrite live sequence-tracked book
             return True
+        last_ref = getattr(self, "_last_rest_refresh_ts", {}).get(ticker, 0.0)
+        if time.time() - last_ref < 5.0 and existing and (existing.bids or existing.asks):
+            return False
+        if not hasattr(self, "_last_rest_refresh_ts"):
+            self._last_rest_refresh_ts = {}
+        self._last_rest_refresh_ts[ticker] = time.time()
         base = self.ws_url.replace("wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2", "https://demo-api.kalshi.co/trade-api/v2")
         base = base.replace("wss://demo-api.kalshi.co/trade-api/ws/v2", "https://demo-api.kalshi.co/trade-api/v2")
         base = base.replace("wss://api.elections.kalshi.com/trade-api/ws/v2", "https://api.elections.kalshi.com/trade-api/v2")
@@ -646,10 +651,15 @@ class KalshiWebSocketClient:
             msg_type = data.get("type")
             msg_data = data.get("msg", {})
             seq = data.get("seq")
+            sid = data.get("sid")
+            if not hasattr(self, "_last_seq_by_sid"):
+                self._last_seq_by_sid = {}
 
             if msg_type == "orderbook_snapshot":
                 ticker = msg_data.get("market_ticker")
                 if ticker:
+                    if sid is not None and seq is not None:
+                        self._last_seq_by_sid[sid] = int(seq)
                     book = self.get_or_create_book(ticker)
                     raw_yes = msg_data.get("yes_dollars_fp") or msg_data.get("yes_dollars") or msg_data.get("yes") or msg_data.get("bids") or []
                     raw_no = msg_data.get("no_dollars_fp") or msg_data.get("no_dollars") or msg_data.get("no") or []
@@ -701,16 +711,28 @@ class KalshiWebSocketClient:
                         raw_delta = msg_data.get("delta_fp", msg_data.get("delta", 0))
                         delta = int(round(float(raw_delta)))
 
+                        # When sid is present, Kalshi increments seq per subscription (sid) across all tickers on that sid
+                        sid_ok = True
+                        per_book_seq = seq
+                        if sid is not None and seq is not None:
+                            seq_i = int(seq)
+                            prev_sid_seq = self._last_seq_by_sid.get(sid)
+                            if prev_sid_seq is not None and seq_i != prev_sid_seq + 1:
+                                sid_ok = False
+                            self._last_seq_by_sid[sid] = seq_i
+                            per_book_seq = None
+
                         if raw_side in ("yes", "bid", "yes_bid"):
-                            ok = book.apply_delta("yes_bid", price, delta, seq=seq)
+                            ok = book.apply_delta("yes_bid", price, delta, seq=per_book_seq) and sid_ok
                         elif raw_side in ("no", "no_bid"):
-                            ok = book.apply_delta("no", price, delta, seq=seq)
+                            ok = book.apply_delta("no", price, delta, seq=per_book_seq) and sid_ok
                         elif raw_side in ("ask", "yes_ask"):
-                            ok = book.apply_delta("yes_ask", price, delta, seq=seq)
+                            ok = book.apply_delta("yes_ask", price, delta, seq=per_book_seq) and sid_ok
                         else:
-                            ok = True
+                            ok = sid_ok
                         if not ok:
-                            logger.warning(f"[WS] Sequence gap on {ticker} (seq={seq}) — marking L2 book STALE and refreshing")
+                            book.stale = True
+                            logger.warning(f"[WS] Sequence gap on {ticker} (sid={sid}, seq={seq}) — marking L2 book STALE and refreshing")
                             asyncio.create_task(self.refresh_orderbook_rest(ticker, overwrite_fresh=True))
                         self._notify_book_update(ticker, book)
                     except Exception as e:

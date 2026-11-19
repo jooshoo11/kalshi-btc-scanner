@@ -29,7 +29,9 @@ def db_path():
 @pytest.fixture
 def audit_db(db_path):
     from core.bot_database import AuditDatabase
-    return AuditDatabase(db_path=db_path)
+    db = AuditDatabase(db_path=db_path)
+    yield db
+    db.close()
 
 
 def test_record_and_retrieve_trade(audit_db):
