@@ -66,25 +66,46 @@ class RtiAccumulator:
         """Return the number of samples recorded."""
         return len(self.samples)
 
-    def calculate_projected_settlement(self, current_spot: float, seconds_left: float) -> float:
+    def calculate_projected_settlement(
+        self,
+        current_spot: float,
+        seconds_left: float,
+        delta: float = 0.0,
+        eff_vol: float = 0.0,
+        drift: float = 0.0,
+    ) -> float:
         """
-        Calculate expected final settlement mean:
-        Projected = (accumulated_sum + remaining_seconds * current_spot) / total_window_seconds
+        Calculate expected final settlement mean for CF Benchmarks 60s window:
+        - When seconds_left > window_seconds (60s):
+          Project expected settlement over final 60s window [T-60, T] using
+          current spot, delta, eff_vol, and gated Hyperliquid lead-lag/OFI drift.
+        - When seconds_left <= window_seconds (60s):
+          Blend the already-elapsed portion of the 60s window from RtiAccumulator
+          (weighted by (window - seconds_left) / window) with the remaining expected
+          path (seconds_left / window) so mu_settle converges directly to the official
+          CF Benchmarks 60s settlement window as seconds_left -> 0.
         """
-        if seconds_left > self.window_seconds:
-            return current_spot
+        w = float(self.window_seconds)
+        s = float(seconds_left)
 
-        if not self.samples:
-            return current_spot
+        if s > w:
+            # Expected settlement over [T-60, T] incorporating projected drift
+            return float(current_spot + drift)
 
-        accum_sum = sum(s[1] if isinstance(s, (tuple, list)) else float(s) for s in self.samples)
-        accum_count = len(self.samples)
-        # Approximate 1 sample per second remaining
-        rem_seconds = max(0, int(seconds_left))
-        total_projected_count = accum_count + rem_seconds
-        if total_projected_count == 0:
-            return current_spot
-        return (accum_sum + (rem_seconds * current_spot)) / total_projected_count
+        s_clamped = max(0.0, min(w, s))
+        w_elapsed = (w - s_clamped) / w
+        w_remaining = s_clamped / w
+
+        if self.has_samples():
+            elapsed_mean = self.get_mean()
+        else:
+            elapsed_mean = float(current_spot)
+
+        # Remaining expected path over s seconds
+        remaining_expected = float(current_spot + drift * w_remaining)
+
+        mu_settle = (w_elapsed * elapsed_mean) + (w_remaining * remaining_expected)
+        return float(mu_settle)
 
     def evaluate_certainty_arb(
         self,

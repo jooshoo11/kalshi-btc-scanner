@@ -1,0 +1,636 @@
+{
+  "generated_at_utc": "2026-11-19T19:22:40.980007+00:00",
+  "total_candles": 253,
+  "coins": [
+    "BTC",
+    "ETH"
+  ],
+  "strategies": {
+    "S1_TRIAL3_RAW_IDEAL": {
+      "initial_balance": 100.0,
+      "final_equity": 30.5,
+      "peak_equity": 100.0,
+      "net_pnl": -69.5,
+      "return_pct": -69.5,
+      "total_trades": 61,
+      "wins": 20,
+      "losses": 41,
+      "win_rate_pct": 32.79,
+      "profit_factor": 0.34,
+      "expectancy_per_trade": -1.14,
+      "gross_win": 36.13,
+      "gross_loss": 105.63,
+      "max_dd_dollars": 69.5,
+      "max_dd_pct": 69.5,
+      "sharpe": -4.23,
+      "fees_paid": 25.83,
+      "by_coin": {
+        "BTC": {
+          "trades": 52,
+          "wins": 15,
+          "pnl": -67.34
+        },
+        "ETH": {
+          "trades": 9,
+          "wins": 5,
+          "pnl": -2.16
+        }
+      },
+      "by_reason": {
+        "STOP_LOSS": 41,
+        "TAKE_PROFIT": 20
+      }
+    },
+    "S2_TRIAL4_DEPLOYED_L2": {
+      "initial_balance": 100.0,
+      "final_equity": 30.45,
+      "peak_equity": 100.0,
+      "net_pnl": -69.55,
+      "return_pct": -69.55,
+      "total_trades": 59,
+      "wins": 18,
+      "losses": 41,
+      "win_rate_pct": 30.51,
+      "profit_factor": 0.29,
+      "expectancy_per_trade": -1.18,
+      "gross_win": 28.64,
+      "gross_loss": 98.19,
+      "max_dd_dollars": 69.55,
+      "max_dd_pct": 69.55,
+      "sharpe": -4.75,
+      "fees_paid": 24.33,
+      "by_coin": {
+        "BTC": {
+          "trades": 52,
+          "wins": 15,
+          "pnl": -72.67
+        },
+        "ETH": {
+          "trades": 7,
+          "wins": 3,
+          "pnl": 3.12
+        }
+      },
+      "by_reason": {
+        "STOP_LOSS": 41,
+        "TAKE_PROFIT": 18
+      }
+    },
+    "S3_REC_CF_DISLOC_NOSL": {
+      "initial_balance": 100.0,
+      "final_equity": 318.73,
+      "peak_equity": 331.02,
+      "net_pnl": 218.73,
+      "return_pct": 218.73,
+      "total_trades": 85,
+      "wins": 58,
+      "losses": 27,
+      "win_rate_pct": 68.24,
+      "profit_factor": 1.35,
+      "expectancy_per_trade": 2.57,
+      "gross_win": 846.78,
+      "gross_loss": 628.05,
+      "max_dd_dollars": 99.3,
+      "max_dd_pct": 34.42,
+      "sharpe": 1.72,
+      "fees_paid": 80.07,
+      "by_coin": {
+        "BTC": {
+          "trades": 82,
+          "wins": 56,
+          "pnl": 162.59
+        },
+        "ETH": {
+          "trades": 3,
+          "wins": 2,
+          "pnl": 56.14
+        }
+      },
+      "by_reason": {
+        "SETTLED_WIN": 3,
+        "SETTLED_LOSS": 27,
+        "TAKE_PROFIT": 55
+      }
+    },
+    "S4_REC_STRUCT_STOP_55TP": {
+      "initial_balance": 100.0,
+      "final_equity": 241.09,
+      "peak_equity": 302.69,
+      "net_pnl": 141.09,
+      "return_pct": 141.09,
+      "total_trades": 89,
+      "wins": 56,
+      "losses": 33,
+      "win_rate_pct": 62.92,
+      "profit_factor": 1.21,
+      "expectancy_per_trade": 1.59,
+      "gross_win": 799.49,
+      "gross_loss": 658.4,
+      "max_dd_dollars": 112.81,
+      "max_dd_pct": 37.27,
+      "sharpe": 1.43,
+      "fees_paid": 87.48,
+      "by_coin": {
+        "BTC": {
+          "trades": 85,
+          "wins": 53,
+          "pnl": 78.67
+        },
+        "ETH": {
+          "trades": 4,
+          "wins": 3,
+          "pnl": 62.42
+        }
+      },
+      "by_reason": {
+        "SETTLED_WIN": 3,
+        "TAKE_PROFIT": 53,
+        "SETTLED_LOSS": 5,
+        "STRUCT_STOP": 28
+      }
+    },
+    "S5_REC_LEADLAG_ENSEMBLE": {
+      "initial_balance": 100.0,
+      "final_equity": 272.12,
+      "peak_equity": 333.61,
+      "net_pnl": 172.12,
+      "return_pct": 172.12,
+      "total_trades": 42,
+      "wins": 30,
+      "losses": 12,
+      "win_rate_pct": 71.43,
+      "profit_factor": 1.63,
+      "expectancy_per_trade": 4.1,
+      "gross_win": 445.06,
+      "gross_loss": 272.94,
+      "max_dd_dollars": 76.77,
+      "max_dd_pct": 24.59,
+      "sharpe": 1.75,
+      "fees_paid": 39.44,
+      "by_coin": {
+        "BTC": {
+          "trades": 40,
+          "wins": 29,
+          "pnl": 141.5
+        },
+        "ETH": {
+          "trades": 2,
+          "wins": 1,
+          "pnl": 30.62
+        }
+      },
+      "by_reason": {
+        "SETTLED_WIN": 3,
+        "STRUCT_STOP": 8,
+        "SETTLED_LOSS": 4,
+        "TAKE_PROFIT": 27
+      }
+    }
+  },
+  "walk_forward": {
+    "folds": [
+      {
+        "fold": 1,
+        "train_markets": 58,
+        "test_markets": 42,
+        "selected_params": "WF_p48_e8c_z0.05_v0.0_ll-0.2_tp55_sl-1.8",
+        "in_sample": {
+          "initial_balance": 100.0,
+          "final_equity": 213.04,
+          "peak_equity": 213.04,
+          "net_pnl": 113.04,
+          "return_pct": 113.04,
+          "total_trades": 7,
+          "wins": 5,
+          "losses": 2,
+          "win_rate_pct": 71.43,
+          "profit_factor": 5.5,
+          "expectancy_per_trade": 16.15,
+          "gross_win": 138.15,
+          "gross_loss": 25.11,
+          "max_dd_dollars": 25.11,
+          "max_dd_pct": 12.69,
+          "sharpe": 1.69,
+          "fees_paid": 5.65,
+          "by_coin": {
+            "BTC": {
+              "trades": 5,
+              "wins": 4,
+              "pnl": 58.9
+            },
+            "ETH": {
+              "trades": 2,
+              "wins": 1,
+              "pnl": 54.14
+            }
+          },
+          "by_reason": {
+            "SETTLED_WIN": 2,
+            "STRUCT_STOP": 1,
+            "SETTLED_LOSS": 1,
+            "TAKE_PROFIT": 3
+          }
+        },
+        "out_of_sample": {
+          "initial_balance": 100.0,
+          "final_equity": 119.93,
+          "peak_equity": 119.93,
+          "net_pnl": 19.93,
+          "return_pct": 19.93,
+          "total_trades": 6,
+          "wins": 5,
+          "losses": 1,
+          "win_rate_pct": 83.33,
+          "profit_factor": 2.28,
+          "expectancy_per_trade": 3.32,
+          "gross_win": 35.56,
+          "gross_loss": 15.63,
+          "max_dd_dollars": 15.63,
+          "max_dd_pct": 14.53,
+          "sharpe": 0.9,
+          "fees_paid": 3.06,
+          "by_coin": {
+            "BTC": {
+              "trades": 6,
+              "wins": 5,
+              "pnl": 19.93
+            }
+          },
+          "by_reason": {
+            "TAKE_PROFIT": 4,
+            "STRUCT_STOP": 1,
+            "SETTLED_WIN": 1
+          }
+        }
+      },
+      {
+        "fold": 2,
+        "train_markets": 58,
+        "test_markets": 42,
+        "selected_params": "WF_p48_e9c_z0.05_v0.0_ll-0.2_tp55_slNone",
+        "in_sample": {
+          "initial_balance": 100.0,
+          "final_equity": 134.85,
+          "peak_equity": 134.85,
+          "net_pnl": 34.85,
+          "return_pct": 34.85,
+          "total_trades": 5,
+          "wins": 4,
+          "losses": 1,
+          "win_rate_pct": 80.0,
+          "profit_factor": 33.57,
+          "expectancy_per_trade": 6.97,
+          "gross_win": 35.92,
+          "gross_loss": 1.07,
+          "max_dd_dollars": 1.07,
+          "max_dd_pct": 1.07,
+          "sharpe": 3.38,
+          "fees_paid": 2.63,
+          "by_coin": {
+            "ETH": {
+              "trades": 1,
+              "wins": 0,
+              "pnl": -1.07
+            },
+            "BTC": {
+              "trades": 4,
+              "wins": 4,
+              "pnl": 35.92
+            }
+          },
+          "by_reason": {
+            "SETTLED_LOSS": 1,
+            "TAKE_PROFIT": 4
+          }
+        },
+        "out_of_sample": {
+          "initial_balance": 119.93,
+          "final_equity": 120.18,
+          "peak_equity": 141.16,
+          "net_pnl": 0.25,
+          "return_pct": 0.21,
+          "total_trades": 7,
+          "wins": 5,
+          "losses": 2,
+          "win_rate_pct": 71.43,
+          "profit_factor": 1.01,
+          "expectancy_per_trade": 0.04,
+          "gross_win": 40.9,
+          "gross_loss": 40.65,
+          "max_dd_dollars": 20.98,
+          "max_dd_pct": 14.86,
+          "sharpe": 0.14,
+          "fees_paid": 4.46,
+          "by_coin": {
+            "BTC": {
+              "trades": 7,
+              "wins": 5,
+              "pnl": 0.25
+            }
+          },
+          "by_reason": {
+            "TAKE_PROFIT": 4,
+            "SETTLED_WIN": 1,
+            "SETTLED_LOSS": 2
+          }
+        }
+      },
+      {
+        "fold": 3,
+        "train_markets": 58,
+        "test_markets": 42,
+        "selected_params": "WF_p45_e8c_z0.05_v0.0_ll-0.5_tp55_slNone",
+        "in_sample": {
+          "initial_balance": 100.0,
+          "final_equity": 140.01,
+          "peak_equity": 140.01,
+          "net_pnl": 40.01,
+          "return_pct": 40.01,
+          "total_trades": 5,
+          "wins": 5,
+          "losses": 0,
+          "win_rate_pct": 100.0,
+          "profit_factor": 99.9,
+          "expectancy_per_trade": 8.0,
+          "gross_win": 40.01,
+          "gross_loss": 0.0,
+          "max_dd_dollars": 0.0,
+          "max_dd_pct": 0.0,
+          "sharpe": 4.09,
+          "fees_paid": 2.89,
+          "by_coin": {
+            "BTC": {
+              "trades": 5,
+              "wins": 5,
+              "pnl": 40.01
+            }
+          },
+          "by_reason": {
+            "TAKE_PROFIT": 4,
+            "SETTLED_WIN": 1
+          }
+        },
+        "out_of_sample": {
+          "initial_balance": 120.18,
+          "final_equity": 140.72,
+          "peak_equity": 153.73,
+          "net_pnl": 20.54,
+          "return_pct": 17.09,
+          "total_trades": 8,
+          "wins": 6,
+          "losses": 2,
+          "win_rate_pct": 75.0,
+          "profit_factor": 1.46,
+          "expectancy_per_trade": 2.57,
+          "gross_win": 65.64,
+          "gross_loss": 45.1,
+          "max_dd_dollars": 22.81,
+          "max_dd_pct": 14.84,
+          "sharpe": 0.67,
+          "fees_paid": 6.24,
+          "by_coin": {
+            "BTC": {
+              "trades": 8,
+              "wins": 6,
+              "pnl": 20.54
+            }
+          },
+          "by_reason": {
+            "TAKE_PROFIT": 6,
+            "SETTLED_LOSS": 2
+          }
+        }
+      },
+      {
+        "fold": 4,
+        "train_markets": 58,
+        "test_markets": 42,
+        "selected_params": "WF_p45_e8c_z0.05_v0.0_ll-0.5_tp55_slNone",
+        "in_sample": {
+          "initial_balance": 100.0,
+          "final_equity": 152.85,
+          "peak_equity": 177.33,
+          "net_pnl": 52.85,
+          "return_pct": 52.85,
+          "total_trades": 9,
+          "wins": 8,
+          "losses": 1,
+          "win_rate_pct": 88.89,
+          "profit_factor": 3.16,
+          "expectancy_per_trade": 5.87,
+          "gross_win": 77.33,
+          "gross_loss": 24.48,
+          "max_dd_dollars": 24.48,
+          "max_dd_pct": 13.8,
+          "sharpe": 2.01,
+          "fees_paid": 6.41,
+          "by_coin": {
+            "BTC": {
+              "trades": 9,
+              "wins": 8,
+              "pnl": 52.85
+            }
+          },
+          "by_reason": {
+            "TAKE_PROFIT": 7,
+            "SETTLED_WIN": 1,
+            "SETTLED_LOSS": 1
+          }
+        },
+        "out_of_sample": {
+          "initial_balance": 140.72,
+          "final_equity": 191.6,
+          "peak_equity": 191.6,
+          "net_pnl": 50.88,
+          "return_pct": 36.16,
+          "total_trades": 7,
+          "wins": 6,
+          "losses": 1,
+          "win_rate_pct": 85.71,
+          "profit_factor": 3.07,
+          "expectancy_per_trade": 7.27,
+          "gross_win": 75.48,
+          "gross_loss": 24.6,
+          "max_dd_dollars": 24.6,
+          "max_dd_pct": 14.78,
+          "sharpe": 1.48,
+          "fees_paid": 6.13,
+          "by_coin": {
+            "BTC": {
+              "trades": 7,
+              "wins": 6,
+              "pnl": 50.88
+            }
+          },
+          "by_reason": {
+            "TAKE_PROFIT": 6,
+            "SETTLED_LOSS": 1
+          }
+        }
+      },
+      {
+        "fold": 5,
+        "train_markets": 58,
+        "test_markets": 111,
+        "selected_params": "WF_p48_e8c_z0.05_v0.0_ll-0.5_tp55_sl-1.8",
+        "in_sample": {
+          "initial_balance": 100.0,
+          "final_equity": 192.94,
+          "peak_equity": 192.94,
+          "net_pnl": 92.94,
+          "return_pct": 92.94,
+          "total_trades": 15,
+          "wins": 13,
+          "losses": 2,
+          "win_rate_pct": 86.67,
+          "profit_factor": 3.01,
+          "expectancy_per_trade": 6.2,
+          "gross_win": 139.15,
+          "gross_loss": 46.21,
+          "max_dd_dollars": 24.48,
+          "max_dd_pct": 14.04,
+          "sharpe": 2.43,
+          "fees_paid": 11.79,
+          "by_coin": {
+            "BTC": {
+              "trades": 15,
+              "wins": 13,
+              "pnl": 92.94
+            }
+          },
+          "by_reason": {
+            "TAKE_PROFIT": 12,
+            "SETTLED_WIN": 1,
+            "SETTLED_LOSS": 1,
+            "STRUCT_STOP": 1
+          }
+        },
+        "out_of_sample": {
+          "initial_balance": 191.6,
+          "final_equity": 205.03,
+          "peak_equity": 258.28,
+          "net_pnl": 13.43,
+          "return_pct": 7.01,
+          "total_trades": 23,
+          "wins": 15,
+          "losses": 8,
+          "win_rate_pct": 65.22,
+          "profit_factor": 1.08,
+          "expectancy_per_trade": 0.58,
+          "gross_win": 190.23,
+          "gross_loss": 176.8,
+          "max_dd_dollars": 100.17,
+          "max_dd_pct": 38.78,
+          "sharpe": 0.37,
+          "fees_paid": 22.05,
+          "by_coin": {
+            "BTC": {
+              "trades": 23,
+              "wins": 15,
+              "pnl": 13.43
+            }
+          },
+          "by_reason": {
+            "TAKE_PROFIT": 15,
+            "STRUCT_STOP": 7,
+            "SETTLED_LOSS": 1
+          }
+        }
+      }
+    ],
+    "cumulative_adaptive_oos": {
+      "initial_balance": 100.0,
+      "final_equity": 205.03,
+      "peak_equity": 258.28,
+      "net_pnl": 105.03,
+      "return_pct": 105.03,
+      "total_trades": 51,
+      "wins": 37,
+      "losses": 14,
+      "win_rate_pct": 72.55,
+      "profit_factor": 1.35,
+      "expectancy_per_trade": 2.06,
+      "gross_win": 407.81,
+      "gross_loss": 302.78,
+      "max_dd_dollars": 100.17,
+      "max_dd_pct": 38.78,
+      "sharpe": 1.45,
+      "fees_paid": 41.94,
+      "by_coin": {
+        "BTC": {
+          "trades": 51,
+          "wins": 37,
+          "pnl": 105.03
+        }
+      },
+      "by_reason": {
+        "TAKE_PROFIT": 35,
+        "STRUCT_STOP": 8,
+        "SETTLED_WIN": 2,
+        "SETTLED_LOSS": 6
+      }
+    },
+    "cumulative_recommended_s5_oos": {
+      "initial_balance": 100.0,
+      "final_equity": 273.59,
+      "peak_equity": 335.08,
+      "net_pnl": 173.59,
+      "return_pct": 173.59,
+      "total_trades": 56,
+      "wins": 42,
+      "losses": 14,
+      "win_rate_pct": 75.0,
+      "profit_factor": 1.56,
+      "expectancy_per_trade": 3.1,
+      "gross_win": 484.93,
+      "gross_loss": 311.34,
+      "max_dd_dollars": 76.77,
+      "max_dd_pct": 22.91,
+      "sharpe": 2.12,
+      "fees_paid": 48.8,
+      "by_coin": {
+        "BTC": {
+          "trades": 56,
+          "wins": 42,
+          "pnl": 173.59
+        }
+      },
+      "by_reason": {
+        "TAKE_PROFIT": 40,
+        "SETTLED_WIN": 2,
+        "SETTLED_LOSS": 5,
+        "STRUCT_STOP": 9
+      }
+    },
+    "cumulative_static_s2_oos": {
+      "initial_balance": 100.0,
+      "final_equity": 31.33,
+      "peak_equity": 102.52,
+      "net_pnl": -68.67,
+      "return_pct": -68.67,
+      "total_trades": 68,
+      "wins": 23,
+      "losses": 45,
+      "win_rate_pct": 33.82,
+      "profit_factor": 0.36,
+      "expectancy_per_trade": -1.01,
+      "gross_win": 39.24,
+      "gross_loss": 107.91,
+      "max_dd_dollars": 71.19,
+      "max_dd_pct": 69.44,
+      "sharpe": -3.67,
+      "fees_paid": 29.06,
+      "by_coin": {
+        "BTC": {
+          "trades": 68,
+          "wins": 23,
+          "pnl": -68.67
+        }
+      },
+      "by_reason": {
+        "TAKE_PROFIT": 23,
+        "STOP_LOSS": 45
+      }
+    }
+  }
+}

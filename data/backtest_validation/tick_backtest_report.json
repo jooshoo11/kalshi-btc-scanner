@@ -1,0 +1,100 @@
+{
+  "generated_at_utc": "2026-11-20T16:10:26.095917+00:00",
+  "data_root": "/home/jooshoo/kalshi-btc-scanner-clean/data/ticks",
+  "coins": [
+    "BTC",
+    "ETH"
+  ],
+  "total_candles": 196,
+  "initial_equity": 100.0,
+  "strategies": {
+    "S2_TRIAL4_DEPLOYED_L2": {
+      "config": {
+        "max_entry_price": 0.35,
+        "min_entry_price": 0.2,
+        "min_edge_pct": 4.0,
+        "min_prob_btc": 65.0,
+        "min_prob_eth": 60.0,
+        "min_sec_btc": 360,
+        "min_sec_eth": 240,
+        "max_sec_entry": 500,
+        "take_profit_roi_pct": 25.0,
+        "stop_loss_roi_pct": 25.0,
+        "max_hold_seconds": 120,
+        "signal_mode": "raw_hl_vs_cf_strike",
+        "min_cf_edge_dollars": 0.08,
+        "min_dir_z": 0.0,
+        "structural_stop_z": -1.8
+      },
+      "initial_balance": 100.0,
+      "final_equity": 219.49,
+      "net_pnl": 119.49,
+      "return_pct": 119.49,
+      "total_trades": 17,
+      "wins": 16,
+      "losses": 1,
+      "win_rate_pct": 94.12,
+      "profit_factor": 24.39,
+      "expectancy_per_trade": 7.03,
+      "gross_win": 115.35,
+      "gross_loss": 4.73,
+      "max_dd_dollars": 3.07,
+      "max_dd_pct": 3.07,
+      "sharpe": 41.39,
+      "fees_paid": 9.12,
+      "metrics": {
+        "initial_equity": 100.0,
+        "final_equity": 219.49,
+        "total_return_pct": 119.49,
+        "max_drawdown_pct": 4.3,
+        "sharpe_ratio": 41.39,
+        "win_rate_pct": 7.65,
+        "total_intervals": 196
+      }
+    },
+    "S5_REC_LEADLAG_ENSEMBLE": {
+      "config": {
+        "max_entry_price": 0.48,
+        "min_entry_price": 0.2,
+        "min_edge_pct": 4.0,
+        "min_prob_btc": 65.0,
+        "min_prob_eth": 60.0,
+        "min_sec_btc": 90,
+        "min_sec_eth": 90,
+        "max_sec_entry": 660,
+        "take_profit_roi_pct": 55.0,
+        "stop_loss_roi_pct": 25.0,
+        "max_hold_seconds": 120,
+        "signal_mode": "cf_disloc_structural",
+        "min_cf_edge_dollars": 0.09,
+        "min_dir_z": 0.05,
+        "structural_stop_z": -1.8
+      },
+      "initial_balance": 100.0,
+      "final_equity": 484.22,
+      "net_pnl": 384.22,
+      "return_pct": 384.22,
+      "total_trades": 120,
+      "wins": 84,
+      "losses": 36,
+      "win_rate_pct": 70.0,
+      "profit_factor": 1.71,
+      "expectancy_per_trade": 3.2,
+      "gross_win": 759.82,
+      "gross_loss": 443.93,
+      "max_dd_dollars": 8.61,
+      "max_dd_pct": 8.61,
+      "sharpe": 44.26,
+      "fees_paid": 74.51,
+      "metrics": {
+        "initial_equity": 100.0,
+        "final_equity": 484.22,
+        "total_return_pct": 384.22,
+        "max_drawdown_pct": 36.5,
+        "sharpe_ratio": 44.26,
+        "win_rate_pct": 42.86,
+        "total_intervals": 196
+      }
+    }
+  }
+}

@@ -26,6 +26,10 @@ def calculate_kalshi_taker_fee(contracts: int, price: float) -> float:
     return math.ceil(0.07 * float(contracts) * float(price) * (1.0 - float(price)) * 100.0) / 100.0
 
 
+from core.prediction_engine import lookup_fee_40c, KALSHI_40C_FEE_LUT  # noqa: E402
+
+
+
 class MultiCoinAuditDatabase:
     """SQLite storage for multi-coin paper portfolio with pooled connections and WAL mode."""
     def __init__(self, db_path: str = "multi_coin_paper.db", pool_size: int = 10):
@@ -460,7 +464,9 @@ class MultiCoinPaperEngine:
         self.max_trade_collateral_dollars = 25.0  # Max collateral per trade ($25 baseline)
         self.enable_dynamic_compounding = False  # If True, scales collateral cap safely with equity (12%, max $50)
         self.max_contracts_per_trade = 60   # Liquidity protection cap (overridden in app.py to 120 for compounding)
+        self.max_contracts_ramp_cap = None  # If set, overrides max_contracts_per_trade for contract-size ramp
         self.max_entry_price = 0.65         # Default max entry price (overridden by coin config e.g. 0.52)
+        self.min_entry_price = 0.20         # Default min entry price
         self.max_spike_entry_price = 0.58   # Early spike breakout ceiling: avoid buying >58¢ on overextended wicks
         self.early_spike_delta_threshold = 70.0  # Spot delta threshold defining an overextended early move
         self.take_profit_roi_pct = 25.0     # Lock in +25% ROI
@@ -474,6 +480,20 @@ class MultiCoinPaperEngine:
         self.min_prob_pct = 60.0            # 60.0% min model conviction
         self.min_seconds_left_by_coin: Dict[str, int] = {}
         self.min_prob_by_coin: Dict[str, float] = {}
+
+        # Adaptive strategy defaults (overridden per-cycle by StrategySelector)
+        self.stop_grace_seconds = 30
+        self.maker_take_profit = True
+        self.use_l2_vwap_fills = True
+        self.enforce_l2_depth_cap = True
+        self.max_spread_dollars = 0.10
+        self.signal_mode = "raw_hl_vs_cf_strike"
+        self.min_cf_edge_dollars = 0.08
+        self.min_dir_z = 0.0
+        self.min_vel10_bps = 0.0
+        self.min_leadlag_imp_bps = -99.0
+        self.structural_stop_z = -1.8
+        self.structural_stop_roi_pct = 45.0
 
         # Hybrid Trailing Peak Drawdown Guard (P1): -6% soft throttle (0.5x), -10% 15m pause
         self.intraday_peak_equity = max(float(self.total_equity), float(initial_balance))
@@ -493,9 +513,12 @@ class MultiCoinPaperEngine:
         # Recover historical balance, weights AND open positions from DB
         self._restore_from_db()
 
-        # State persistence
-        db_dir = os.path.dirname(db_path) if (db_path and db_path != ":memory:") else ""
-        self.state_file = os.path.join(db_dir, "multi_coin_state.json") if db_dir else "multi_coin_state.json"
+        # State persistence (in-memory DBs never touch disk state files so tests cannot pollute prod)
+        if not db_path or db_path == ":memory:":
+            self.state_file = ""
+        else:
+            db_dir = os.path.dirname(db_path)
+            self.state_file = os.path.join(db_dir, "multi_coin_state.json") if db_dir else "multi_coin_state.json"
         self.max_daily_loss_pct = 10.0
         self.max_daily_loss_usd = None
         self.max_open_exposure_pct = 50.0
@@ -511,14 +534,64 @@ class MultiCoinPaperEngine:
         self._api_error_window_start: float = time.time()
         self._load_state()
 
+    def apply_strategy_config(self, cfg: 'StrategyConfig') -> None:
+        """
+        Apply a StrategyConfig to this engine's tunable parameters.
+        Called each evaluation cycle by the adaptive strategy selector so the bot
+        can switch strategies based on the detected market regime.
+        """
+        self.max_entry_price = cfg.max_entry_price
+        self.min_entry_price = getattr(cfg, "min_entry_price", self.min_entry_price)
+        self.min_edge_pct = cfg.min_edge_pct
+        self.take_profit_roi_pct = cfg.take_profit_roi_pct
+        self.stop_loss_roi_pct = cfg.stop_loss_roi_pct
+        self.stop_loss_hard_roi_pct = cfg.stop_loss_hard_roi_pct
+        self.stop_grace_seconds = cfg.stop_grace_seconds
+        self.max_hold_seconds = cfg.max_hold_seconds
+        self.max_seconds_left = cfg.max_sec_entry
+        self.maker_take_profit = cfg.maker_take_profit
+        self.use_l2_vwap_fills = cfg.use_l2_vwap_fills
+        self.enforce_l2_depth_cap = cfg.enforce_depth_cap
+        self.max_spread_dollars = cfg.max_spread_dollars
+        self.max_trades_per_candle = cfg.max_trades_per_candle
+        self.signal_mode = cfg.signal_mode
+        self.min_cf_edge_dollars = cfg.min_cf_edge_dollars
+        self.min_dir_z = cfg.min_dir_z
+        self.min_vel10_bps = cfg.min_vel10_bps
+        self.min_leadlag_imp_bps = cfg.min_leadlag_imp_bps
+        self.structural_stop_z = cfg.structural_stop_z
+        self.structural_stop_roi_pct = cfg.structural_stop_roi_pct
+
+        # Per-coin min seconds / probability
+        self.min_seconds_left_by_coin = {"BTC": cfg.min_sec_btc, "ETH": cfg.min_sec_eth}
+        self.min_prob_by_coin = {"BTC": cfg.min_prob_btc, "ETH": cfg.min_prob_eth}
+
+        if getattr(self, "_last_applied_strategy_name", None) != cfg.name:
+            self._last_applied_strategy_name = cfg.name
+            logger.info(
+                f"[MultiCoin] Applied strategy {cfg.name}: "
+                f"entry<= {cfg.max_entry_price}, edge>= {cfg.min_edge_pct}%, "
+                f"prob>= {cfg.min_prob_btc}%/BTC {cfg.min_prob_eth}%/ETH, "
+                f"TP {cfg.take_profit_roi_pct}%, SL {cfg.stop_loss_roi_pct}%, "
+                f"mode={cfg.signal_mode}"
+            )
+
     def _load_state(self):
         """Load persisted state from JSON (order_group_id, day_start_equity, etc.)."""
+        if not self.state_file:
+            return
         try:
             if os.path.exists(self.state_file):
                 with open(self.state_file, "r") as f:
                     state = json.load(f)
                 self.order_group_id = state.get("order_group_id")
-                self._day_start_equity = float(state.get("day_start_equity", self.initial_balance))
+                loaded_start = float(state.get("day_start_equity", self.initial_balance))
+                # Guard against stale state from a different baseline when ledger has zero trades
+                if not self.active_positions and abs(self.total_equity - self.initial_balance) < 0.01 and abs(loaded_start - self.initial_balance) > 1.0:
+                    total_hist = sum(self.db.get_coin_stats(c).get("total_trades", 0) for c in self.coin_weights)
+                    if total_hist == 0:
+                        loaded_start = self.initial_balance
+                self._day_start_equity = loaded_start
                 self._day_start_date = state.get("day_start_date", time.strftime("%Y-%m-%d"))
                 self.consecutive_failures = int(state.get("consecutive_failures", 0))
                 logger.info(f"[MultiCoin] Loaded state: group_id={self.order_group_id}, day_start_equity={self._day_start_equity}")
@@ -527,6 +600,8 @@ class MultiCoinPaperEngine:
 
     def _save_state(self):
         """Persist state to JSON (atomic write)."""
+        if not self.state_file:
+            return
         try:
             state = {
                 "order_group_id": self.order_group_id,
@@ -1029,13 +1104,16 @@ class MultiCoinPaperEngine:
         is_certainty_arb: bool = False
     ) -> Optional[Dict[str, Any]]:
         """Evaluate paper entry for a specific coin under portfolio rules."""
+        self.last_reject_reason = ""
         now = current_time or time.time()
         if coin in self.active_positions:
+            self.last_reject_reason = "Already in active position"
             return None
 
         # ==================== PRE-TRADE RISK GATES ====================
         risk_reason = self._pre_trade_risk_checks()
         if risk_reason:
+            self.last_reject_reason = f"Risk gate: {risk_reason}"
             return None
 
         # Timing constraints: Avoid first 5 minutes of noise (>500s) and final 240s expiration trap (<240s)
@@ -1047,12 +1125,15 @@ class MultiCoinPaperEngine:
         max_sec = coin_cfg.get("max_seconds_left_for_entry", getattr(self, "max_seconds_left", 500))
         if is_certainty_arb:
             if seconds_left <= 3 or seconds_left > 45:
+                self.last_reject_reason = f"Certainty arb timing ({int(seconds_left)}s outside 3-45s)"
                 return None
         elif seconds_left < min_sec or seconds_left > max_sec:
+            self.last_reject_reason = f"Timing gate ({int(seconds_left)}s outside {min_sec}-{max_sec}s)"
             return None
 
         # Re-entry Lockout: Do not re-enter if coin stopped out in current candle
         if self.candle_stopped_out.get(coin) == candle_id:
+            self.last_reject_reason = "Candle lockout after stop-out"
             return None
 
         # Candle trade limit
@@ -1062,18 +1143,22 @@ class MultiCoinPaperEngine:
 
         max_trades_candle = int(getattr(self, "max_trades_per_candle", 3))
         if self.trades_in_candle.get(coin, 0) >= max_trades_candle:
+            self.last_reject_reason = f"Max trades per candle reached ({max_trades_candle})"
             return None
 
         # Cooldown
         if now - self.last_exit_ts.get(coin, 0.0) < 4.0:
+            self.last_reject_reason = "Post-exit 4s cooldown"
             return None
 
         # Conviction & edge requirements
         eff_min_prob = getattr(self, "min_prob_by_coin", {}).get(coin, self.min_prob_pct)
         if is_certainty_arb:
             if edge_pct < 3.0 or model_prob < 99.0:
+                self.last_reject_reason = f"Certainty arb edge/prob ({edge_pct:.1f}%/{model_prob:.1f}%)"
                 return None
         elif edge_pct < self.min_edge_pct or model_prob < eff_min_prob:
+            self.last_reject_reason = f"Engine prob/edge gate (prob {model_prob:.1f}% < {eff_min_prob:.1f}% or edge {edge_pct:.1f}% < {self.min_edge_pct:.1f}%)"
             return None
 
         target_side = None
@@ -1087,15 +1172,18 @@ class MultiCoinPaperEngine:
             target_price = no_ask
 
         if not target_side or target_price <= 0.0:
+            self.last_reject_reason = "Invalid target side/price"
             return None
 
         # Entry price gate: reject contracts priced above max_entry_price (e.g. 35¢ or 48¢ in S5) or below 20¢.
         # Certainty arb bypasses the directional ceiling up to 78¢ (blocks >78¢ tail-risk entries).
         max_entry = 0.78 if is_certainty_arb else coin_cfg.get("max_entry_price", getattr(self, "max_entry_price", 0.35))
         if target_price > max_entry or target_price < 0.20:
+            self.last_reject_reason = f"Price gate ({target_price:.2f} outside 0.20-{max_entry:.2f})"
             return None
         if not is_certainty_arb and not getattr(self, "cf_disloc_mode", False):
             if target_price >= 0.40 and (edge_pct < 8.0 or model_prob < 68.0):
+                self.last_reject_reason = f">=40¢ tier requires >=8% edge & >=68% prob"
                 return None
 
         # Early spike breakout ceiling: if early in candle (>500s left) and spot is overextended,
@@ -1104,9 +1192,11 @@ class MultiCoinPaperEngine:
         spike_thresh = getattr(self, "early_spike_delta_threshold", 70.0) if coin == "BTC" else 5.0
         if seconds_left > 500:
             if target_side == "YES" and delta > spike_thresh and target_price > spike_cap:
+                self.last_reject_reason = f"Early spike guard (delta {delta:+.1f} > +{spike_thresh}, ask {int(target_price*100)}¢ > {int(spike_cap*100)}¢)"
                 logger.info(f"[MultiCoin] Skipped {coin} YES: overextended early spike (delta {delta:+.1f} > +{spike_thresh}, price {target_price:.2f} > {spike_cap})")
                 return None
             elif target_side == "NO" and delta < -spike_thresh and target_price > spike_cap:
+                self.last_reject_reason = f"Early dump guard (delta {delta:+.1f} < -{spike_thresh}, ask {int(target_price*100)}¢ > {int(spike_cap*100)}¢)"
                 logger.info(f"[MultiCoin] Skipped {coin} NO: overextended early dump (delta {delta:+.1f} < -{spike_thresh}, price {target_price:.2f} > {spike_cap})")
                 return None
 
@@ -1136,8 +1226,16 @@ class MultiCoinPaperEngine:
         max_c = getattr(self, "max_contracts_per_trade", 60)
         if max_c > 0:
             contracts = min(contracts, max_c)
+        # Contract-size ramp cap (set externally by app.py during live canary)
+        ramp_cap = getattr(self, "max_contracts_ramp_cap", None)
+        if ramp_cap is not None and ramp_cap > 0:
+            contracts = min(contracts, ramp_cap)
         min_c = getattr(self, "min_contracts_per_trade", 1)
+        if ramp_cap is not None and ramp_cap > 0:
+            min_c = min(min_c, ramp_cap)
         if contracts < min_c:
+            self.last_reject_reason = f"Sized {contracts} < min {min_c} contracts (budget=${trade_budget:.2f})"
+            logger.info(f"[MultiCoin] Skipped {coin} {target_side}: {self.last_reject_reason}")
             return None
 
         cost = round(contracts * target_price, 2)
@@ -1146,6 +1244,7 @@ class MultiCoinPaperEngine:
         if cost + total_fee > self.total_cash:
             contracts = int((self.total_cash - total_fee) / target_price)
             if contracts < 1:
+                self.last_reject_reason = "Insufficient cash for 1 contract"
                 return None
             cost = round(contracts * target_price, 2)
             total_fee = calculate_kalshi_taker_fee(contracts, target_price)
@@ -1154,6 +1253,7 @@ class MultiCoinPaperEngine:
         # Validate against live L2 book for slippage/VWAP edge protection
         self._last_l2_telemetry = {}
         if not self._validate_l2_entry(ticker, target_side, target_price, contracts, model_prob, edge_pct):
+            self.last_reject_reason = "L2 orderbook VWAP/liquidity validation failed"
             return None
 
         l2_tel = getattr(self, "_last_l2_telemetry", {}) or {}
@@ -1163,6 +1263,7 @@ class MultiCoinPaperEngine:
         # Book entry at L2 sweep VWAP when available (or REST target_price when no L2 book attached)
         fill_price = float(l2_tel.get("entry_vwap") or target_price)
         if not is_certainty_arb and fill_price > max_entry:
+            self.last_reject_reason = f"L2 VWAP {fill_price*100:.1f}¢ > {max_entry*100:.0f}¢ cap"
             logger.warning(
                 f"[L2 Validation] {ticker} {target_side} L2 VWAP {fill_price*100:.1f}¢ exceeds max_entry_price {max_entry*100:.0f}¢ — aborting"
             )
@@ -1351,6 +1452,8 @@ class MultiCoinPaperEngine:
             return self._close_position(coin, exit_price=1.0 if won else 0.0, reason=reason, pnl=pnl, payout=payout, current_time=now)
 
         # B. Take Profit Exit via Passive Maker Limit Order (0 taker exit fee)
+        peak_roi = max(float(pos.get("peak_roi_pct", 0.0)), roi_pct)
+        pos["peak_roi_pct"] = peak_roi
         if roi_pct >= self.take_profit_roi_pct:
             use_maker_tp = getattr(self, "maker_take_profit", True)
             return self._execute_exit_with_l2(
@@ -1364,24 +1467,57 @@ class MultiCoinPaperEngine:
         hold_secs = now - pos.get("entry_timestamp", now)
         is_spot_adverse = (settle_spot < strike) if pos["side"] == "YES" else (settle_spot > strike)
 
-        # C1. S5 Structural Stop-Loss Regime (avoids -25% bid-noise shakeouts and 120s forced time-exits)
+        # B2. Peak-ROI Trailing Profit & Breakeven Lock (prevents +20%..+32% winners from round-tripping to -50% SL)
+        if getattr(self, "trailing_profit_lock_enabled", False) and hold_secs >= 20.0:
+            use_maker_tp = getattr(self, "maker_take_profit", True)
+            if peak_roi >= 20.0 and roi_pct <= (peak_roi - 8.0) and roi_pct >= 6.0:
+                logger.info(
+                    f"[MultiCoin] TRAILING_PROFIT_LOCK {coin}: peak ROI +{peak_roi:.1f}% -> locked at +{roi_pct:.1f}%"
+                )
+                return self._execute_exit_with_l2(
+                    coin=coin,
+                    reason="TAKE_PROFIT",
+                    fallback_bid=current_bid,
+                    is_maker=use_maker_tp,
+                    now=now,
+                )
+            if peak_roi >= 14.0 and roi_pct <= 2.5 and hold_secs >= 35.0:
+                logger.info(
+                    f"[MultiCoin] BREAKEVEN_LOCK {coin}: peak ROI +{peak_roi:.1f}% pulled back to {roi_pct:+.1f}% -> protecting capital"
+                )
+                return self._execute_exit_with_l2(
+                    coin=coin,
+                    reason="TAKE_PROFIT",
+                    fallback_bid=current_bid,
+                    is_maker=use_maker_tp,
+                    now=now,
+                )
+
+        # C1. S5 Structural Stop-Loss Regime (avoids -25% bid-noise shakeouts while capping deep adverse wipeouts)
         if getattr(self, "structural_stop_enabled", False):
             min_hold_struct = float(getattr(self, "structural_stop_min_hold_sec", 60.0))
             struct_roi_thresh = float(getattr(self, "structural_stop_roi_pct", 45.0))
             struct_z_thresh = float(getattr(self, "structural_stop_z", -1.8))
             struct_prob_thresh = float(getattr(self, "structural_stop_max_prob_pct", 5.0))
+            catastrophe_roi = getattr(self, "structural_catastrophe_roi_pct", None)
             is_z_broken = (
                 (dir_z <= struct_z_thresh)
                 if dir_z is not None
                 else (model_prob is not None and model_prob <= struct_prob_thresh)
             )
-            if hold_secs >= min_hold_struct and roi_pct <= -struct_roi_thresh and is_z_broken:
+            is_catastrophe_adverse = (
+                catastrophe_roi is not None
+                and hold_secs >= 45.0
+                and is_spot_adverse
+                and roi_pct <= -float(catastrophe_roi)
+            )
+            if (hold_secs >= min_hold_struct and roi_pct <= -struct_roi_thresh and is_z_broken) or is_catastrophe_adverse:
                 candle_id = pos.get("candle_id", "")
                 if candle_id:
                     self.candle_stopped_out[coin] = candle_id
                 logger.info(
                     f"[MultiCoin] STRUCT_STOP {coin} triggered after {hold_secs:.0f}s: "
-                    f"ROI {roi_pct:+.1f}%, dir_z={dir_z}, model_prob={model_prob}"
+                    f"ROI {roi_pct:+.1f}%, dir_z={dir_z}, model_prob={model_prob}, cat={is_catastrophe_adverse}"
                 )
                 return self._execute_exit_with_l2(
                     coin=coin,

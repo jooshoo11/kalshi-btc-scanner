@@ -269,3 +269,26 @@ def test_trial3_win_rate_gates(tmp_path):
         is_certainty_arb=True,
     ) is None
 
+
+def test_contract_ramp_cap_never_deadlocks_min_contracts(tmp_path):
+    """Regression test: max_contracts_ramp_cap < min_contracts_per_trade must not deadlock entries."""
+    db_path = str(tmp_path / "test_ramp_deadlock.db")
+    engine = MultiCoinPaperEngine(
+        initial_balance=100.0,
+        db_path=db_path,
+        disabled_coins={"SOL", "XRP"},
+    )
+    engine.max_entry_price = 0.72
+    engine.min_edge_pct = 3.0
+    engine.min_contracts_per_trade = 5
+    engine.max_contracts_ramp_cap = 1  # Even if set below min_contracts_per_trade, must allow 1 contract
+
+    pos = engine.evaluate_entry(
+        coin="BTC", ticker="KXBTC15M-RAMP", series="KXBTC15M",
+        signal="BUY NO", edge_pct=15.0, model_prob=80.0,
+        yes_ask=0.50, no_ask=0.50, seconds_left=350, delta=-45.0, candle_id="c_ramp",
+    )
+    assert pos is not None
+    assert pos["contracts"] == 1
+
+

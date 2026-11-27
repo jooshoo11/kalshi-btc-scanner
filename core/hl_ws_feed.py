@@ -36,7 +36,17 @@ class HyperliquidWSFeed:
         self.connected: bool = False
         self._running: bool = False
 
-    def is_fresh(self, coin: str, max_age: float = 3.0) -> bool:
+    def get_age_ms(self, coin: str) -> float:
+        """Return age of latest Hyperliquid update in milliseconds."""
+        c = coin.upper()
+        ts = self.last_update_ts.get(c, 0.0)
+        if ts <= 0:
+            return float("inf")
+        return (time.time() - ts) * 1000.0
+
+    def is_fresh(self, coin: str, max_age: float = 3.0, max_age_ms: Optional[float] = None) -> bool:
+        if max_age_ms is not None:
+            max_age = max_age_ms / 1000.0
         ts = self.last_update_ts.get(coin.upper(), 0.0)
         return (time.time() - ts) <= max_age and self.mids.get(coin.upper(), 0.0) > 0.0
 

@@ -1,6 +1,6 @@
 import math
 import time
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple, Optional, Sequence
 import numpy as np
 import contextlib
 
@@ -28,6 +28,18 @@ def normal_pdf(x: float) -> float:
     """Standard normal probability density function (PDF)."""
     return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
 
+def inverse_normal_cdf(p: float) -> float:
+    """Standard normal inverse CDF (probit) via binary search."""
+    p_clamped = max(0.005, min(0.995, float(p)))
+    lo, hi = -4.0, 4.0
+    for _ in range(30):
+        mid = 0.5 * (lo + hi)
+        if normal_cdf(mid) < p_clamped:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
 def calculate_kalshi_fee(contracts: int, price: float) -> float:
     """
     Official Kalshi Taker Fee Schedule:
@@ -38,6 +50,230 @@ def calculate_kalshi_fee(contracts: int, price: float) -> float:
     if contracts <= 0 or price <= 0.0 or price >= 1.0:
         return 0.0
     return math.ceil(0.07 * float(contracts) * float(price) * (1.0 - float(price)) * 100.0) / 100.0
+
+
+# Precomputed 1-cent lookup table (1..99 cents) for 40-contract batch average non-linear taker fee
+# Formula: ceil(0.07 * contracts * price * (1 - price) * 100) / 100 averaged over 40 contracts
+KALSHI_40C_FEE_LUT: List[float] = [0.0] * 100
+
+for _c in range(1, 100):
+    _p = _c / 100.0
+    _raw_cents = 0.07 * 40.0 * _p * (1.0 - _p) * 100.0
+    _total_fee = math.ceil(_raw_cents) / 100.0
+    KALSHI_40C_FEE_LUT[_c] = _total_fee / 40.0
+
+
+def lookup_fee_40c(price: float) -> float:
+    """
+    Precomputed 1-cent lookup table (1..99 cents) at startup for the 40-contract
+    batch average non-linear taker fee:
+      ceil(0.07 * contracts * price * (1 - price) * 100) / 100 averaged over 40 contracts
+    Provides O(1) fee lookups inside high-frequency scanner loops.
+    """
+    if price <= 0.0 or price >= 1.0:
+        return 0.0
+    cents = int(round(price * 100.0))
+    if 1 <= cents <= 99:
+        return KALSHI_40C_FEE_LUT[cents]
+    return 0.0
+
+
+def compute_microstructure_clean_vol(
+    tick_history: Sequence[Tuple[float, float]],
+    base_vol: float,
+    bucket_seconds: float = 3.0,
+    clamp_min_mult: float = 0.6,
+    clamp_max_mult: float = 2.2,
+    blend_weight: float = 0.5,
+) -> Tuple[float, float]:
+    """
+    Reduce 1s tick-to-tick bid-ask bounce and cadence jitter when computing
+    realized_15m from tick history using sub-sampled buckets (3s-5s).
+    Blends realized_15m with base_vol from config, clamped to [clamp_min_mult * base, clamp_max_mult * base].
+    Returns: (eff_vol, realized_15m)
+    """
+    if not tick_history or len(tick_history) < 2:
+        return base_vol, base_vol
+
+    # Sub-sample tick history into buckets separated by at least bucket_seconds
+    bucketed: List[Tuple[float, float]] = [tick_history[0]]
+    for t, p in tick_history[1:]:
+        if (t - bucketed[-1][0]) >= bucket_seconds:
+            bucketed.append((t, p))
+
+    # Also capture the most recent tick if at least 1s after the last bucketed tick
+    if (tick_history[-1][0] - bucketed[-1][0]) >= 1.0:
+        bucketed.append(tick_history[-1])
+
+    if len(bucketed) < 3:
+        return base_vol, base_vol
+
+    # Compute variance rate across sub-sampled buckets
+    variances = []
+    for i in range(1, len(bucketed)):
+        dt = max(1.0, bucketed[i][0] - bucketed[i - 1][0])
+        dp = bucketed[i][1] - bucketed[i - 1][1]
+        variances.append((dp ** 2) / dt)
+
+    if not variances:
+        return base_vol, base_vol
+
+    sigma_1s = math.sqrt(sum(variances) / len(variances))
+    realized_15m = sigma_1s * 30.0  # sqrt(900s) = 30.0
+
+    eff_vol = blend_weight * base_vol + (1.0 - blend_weight) * realized_15m
+    eff_vol = max(base_vol * clamp_min_mult, min(base_vol * clamp_max_mult, eff_vol))
+    return eff_vol, realized_15m
+
+
+def compute_clamped_z_shift(
+    lead_imp_bps: float,
+    ofi_z: float,
+    is_hl_fresh: bool,
+    lead_z_scale: float = 0.02,
+    ofi_z_scale: float = 0.05,
+    max_z_shift: float = 0.35,
+    spot_tfi: float = 0.0,
+    book_imb: float = 0.0,
+    momentum_z: float = 0.0,
+    spot_tfi_scale: float = 0.14,
+    book_imb_scale: float = 0.06,
+    momentum_scale: float = 0.10,
+) -> float:
+    """
+    Combine gated Hyperliquid lead-lag + OFI with US-accessible spot alpha
+    (Coinbase/Kraken/Bitstamp aggressive TFI, Coinbase L1 book imbalance, and
+    multi-horizon spot momentum) and clamp to [-max_z_shift, +max_z_shift].
+    """
+    hl_shift = (lead_imp_bps * lead_z_scale + ofi_z * ofi_z_scale) if is_hl_fresh else 0.0
+    spot_shift = (
+        max(-1.0, min(1.0, spot_tfi)) * spot_tfi_scale
+        + max(-1.0, min(1.0, book_imb)) * book_imb_scale
+        + max(-1.5, min(1.5, momentum_z)) * momentum_scale
+    )
+    raw_shift = hl_shift + spot_shift
+    return max(-max_z_shift, min(max_z_shift, raw_shift))
+
+
+def detect_stale_quote_impulse(
+    spot_5s_delta: float,
+    kalshi_5s_delta_cents: float,
+    spot_tfi: float,
+    spot_thresh: float = 40.0,
+    max_kalshi_move_cents: float = 1.0,
+) -> Dict[str, Any]:
+    """
+    Empirical 5s Stale-Quote Impulse Detector (calibrated on recorded tick data):
+    Detects when spot moves >= `spot_thresh` in 5s while Kalshi mid moved < `max_kalshi_move_cents`,
+    and checks whether aggressive Spot TFI confirms the impulse direction.
+    """
+    is_stale = abs(kalshi_5s_delta_cents) < max_kalshi_move_cents
+    if not is_stale or abs(spot_5s_delta) < spot_thresh:
+        return {
+            "stale_impulse": "NONE",
+            "d_spot_5s": round(spot_5s_delta, 2),
+            "d_kalshi_5s_cents": round(kalshi_5s_delta_cents, 2),
+            "tfi_confirmed": False,
+            "z_boost": 0.0,
+        }
+
+    is_up = spot_5s_delta > 0
+    tfi_confirmed = (spot_tfi > 0.05) if is_up else (spot_tfi < -0.05)
+    direction = "BULLISH_YES" if is_up else "BEARISH_NO"
+    z_boost = (0.12 if is_up else -0.12) if tfi_confirmed else 0.0
+    return {
+        "stale_impulse": direction,
+        "d_spot_5s": round(spot_5s_delta, 2),
+        "d_kalshi_5s_cents": round(kalshi_5s_delta_cents, 2),
+        "tfi_confirmed": tfi_confirmed,
+        "z_boost": z_boost,
+    }
+
+
+class SignalHysteresisManager:
+    """
+    Signal hysteresis/hold rules to ensure marginal BTC/ETH signals near
+    60% probability or 4.0% net edge do not flicker between
+    BULLISH_YES/BEARISH_NO and NEUTRAL_HOLD every second.
+    """
+
+    def __init__(
+        self,
+        min_prob_high: float = 60.0,
+        min_edge_high: float = 4.0,
+        hysteresis_prob_pct: float = 2.0,
+        hysteresis_edge_pct: float = 0.5,
+    ):
+        self.min_prob_high = min_prob_high
+        self.min_edge_high = min_edge_high
+        self.hysteresis_prob_pct = hysteresis_prob_pct
+        self.hysteresis_edge_pct = hysteresis_edge_pct
+        self._states: Dict[str, str] = {}
+        self._hold_counts: Dict[str, int] = {}
+
+    def get_hypothesis(
+        self,
+        coin: str,
+        prob_yes_pct: float,
+        prob_no_pct: float,
+        edge_y: float,
+        edge_n: float,
+    ) -> str:
+        c = coin.upper()
+        current = self._states.get(c, "NEUTRAL_HOLD")
+
+        prob_low = self.min_prob_high - self.hysteresis_prob_pct  # e.g., 58.0%
+        edge_low = self.min_edge_high - self.hysteresis_edge_pct  # e.g., 3.5%
+
+        if current == "BULLISH_YES":
+            # Maintain BULLISH_YES within hysteresis band unless opposite side triggers cleanly
+            if prob_no_pct >= self.min_prob_high and edge_n >= self.min_edge_high:
+                self._states[c] = "BEARISH_NO"
+                self._hold_counts[c] = 1
+                return "BEARISH_NO"
+            if prob_yes_pct >= prob_low and edge_y >= edge_low:
+                self._hold_counts[c] = self._hold_counts.get(c, 0) + 1
+                return "BULLISH_YES"
+            self._states[c] = "NEUTRAL_HOLD"
+            self._hold_counts[c] = 1
+            return "NEUTRAL_HOLD"
+
+        elif current == "BEARISH_NO":
+            # Maintain BEARISH_NO within hysteresis band unless opposite side triggers cleanly
+            if prob_yes_pct >= self.min_prob_high and edge_y >= self.min_edge_high:
+                self._states[c] = "BULLISH_YES"
+                self._hold_counts[c] = 1
+                return "BULLISH_YES"
+            if prob_no_pct >= prob_low and edge_n >= edge_low:
+                self._hold_counts[c] = self._hold_counts.get(c, 0) + 1
+                return "BEARISH_NO"
+            self._states[c] = "NEUTRAL_HOLD"
+            self._hold_counts[c] = 1
+            return "NEUTRAL_HOLD"
+
+        else:
+            # NEUTRAL_HOLD requires meeting full upper thresholds
+            if prob_yes_pct >= self.min_prob_high and edge_y >= self.min_edge_high and prob_yes_pct >= prob_no_pct:
+                self._states[c] = "BULLISH_YES"
+                self._hold_counts[c] = 1
+                return "BULLISH_YES"
+            elif prob_no_pct >= self.min_prob_high and edge_n >= self.min_edge_high and prob_no_pct > prob_yes_pct:
+                self._states[c] = "BEARISH_NO"
+                self._hold_counts[c] = 1
+                return "BEARISH_NO"
+            else:
+                self._states[c] = "NEUTRAL_HOLD"
+                self._hold_counts[c] = self._hold_counts.get(c, 0) + 1
+                return "NEUTRAL_HOLD"
+
+    def reset(self, coin: Optional[str] = None) -> None:
+        if coin:
+            self._states.pop(coin.upper(), None)
+            self._hold_counts.pop(coin.upper(), None)
+        else:
+            self._states.clear()
+            self._hold_counts.clear()
+
 
 class QuantPredictionEngine:
     """

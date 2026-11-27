@@ -16,7 +16,22 @@ import uvicorn
 import httpx
 
 from btc_metrics import BitcoinMetricsProvider
-from core.prediction_engine import QuantPredictionEngine
+from core.prediction_engine import (
+    QuantPredictionEngine,
+    normal_cdf,
+    inverse_normal_cdf,
+    lookup_fee_40c,
+    compute_microstructure_clean_vol,
+    compute_clamped_z_shift,
+    detect_stale_quote_impulse,
+    SignalHysteresisManager,
+)
+from core.bracket_order_manager import (
+    BracketOrderManager,
+    BracketTicket,
+    calculate_bracket_ticket,
+    validate_bracket_ticket,
+)
 from kalshi_btc_scanner import KalshiBitcoinScanner
 from core.bot_database import AuditDatabase
 from core.db_pool import get_db_pool
@@ -150,7 +165,7 @@ KALSHI_WS_URL = KALSHI_PROD_WS_URL if _kalshi_env == "prod" else KALSHI_DEMO_WS_
 watchdog = StaleTickWatchdog(max_allowed_delta_ms=5000.0, recovery_threshold_ms=800.0, recovery_ticks=3)
 metrics_provider = BitcoinMetricsProvider(watchdog=watchdog)
 prediction_engine = QuantPredictionEngine(risk_free_rate=0.045, taker_fee_cents=0.5)
-scanner = KalshiBitcoinScanner(metrics_provider, prediction_engine)
+scanner = KalshiBitcoinScanner(metrics_provider, prediction_engine, demo=(_kalshi_env != "prod"))
 db = AuditDatabase("kalshi_audit.db")
 live_db = AuditDatabase("kalshi_live_demo.db")
 paper_bot = PaperTradingBot(db, initial_balance=50.0, watchdog=watchdog)
@@ -168,6 +183,13 @@ live_oms = KalshiOrderManagementSystem(
 )
 kill_switch.register_cancel_callback(live_oms.cancel_all_orders)
 
+# One-Click Manual Trading Execution Layer & Exit Watcher (Auto TP/SL)
+bracket_manager = BracketOrderManager(
+    dry_run=(os.environ.get("KALSHI_DRY_RUN", "1") == "1"),
+    kalshi_client=live_oms.client if hasattr(live_oms, "client") else None,
+    live_oms=live_oms,
+)
+
 multicoin_engine = MultiCoinPaperEngine(
     initial_balance=100.0,
     db_path="multi_coin_paper.db",
@@ -175,19 +197,52 @@ multicoin_engine = MultiCoinPaperEngine(
     disabled_coins={"SOL", "XRP"},
     ws_client=live_ws  # Pass WebSocket client for L2 book access
 )
-multicoin_engine.max_entry_price = 0.48
+multicoin_engine.max_entry_price = 0.35
 multicoin_engine.max_seconds_left = 660
-multicoin_engine.min_seconds_left_by_coin = {"BTC": 90, "ETH": 90}
-multicoin_engine.min_prob_by_coin = {"BTC": 52.0, "ETH": 52.0}
-multicoin_engine.min_edge_pct = 6.0
-multicoin_engine.take_profit_roi_pct = 55.0
-multicoin_engine.max_trades_per_candle = 1
+multicoin_engine.min_seconds_left_by_coin = {"BTC": 360, "ETH": 240}
+multicoin_engine.min_prob_by_coin = {"BTC": 65.0, "ETH": 60.0}
+multicoin_engine.min_edge_pct = 4.0
+multicoin_engine.take_profit_roi_pct = 25.0
+multicoin_engine.max_trades_per_candle = 3
 multicoin_engine.min_contracts_per_trade = 5
 multicoin_engine.max_contracts_per_trade = 120
+multicoin_engine.max_hold_seconds = 120.0
+# Contract-size ramp: starts at 5 contracts (matches min_contracts_per_trade & avoids 1c fee rounding trap)
+multicoin_engine.max_contracts_ramp_cap = 5
+_contract_ramp = {
+    "trades_entered": 0,
+    "stage": 1,  # 1=5c, 2=15c, 3=full
+}
+
+
+def _update_contract_ramp() -> None:
+    """Advance contract-size ramp based on clean trades entered AND positive realized PnL."""
+    n = _contract_ramp["trades_entered"]
+    stage = _contract_ramp["stage"]
+    net_pnl = float(multicoin_engine.total_equity - multicoin_engine.initial_balance)
+    if net_pnl <= 0.0:
+        new_cap = 5
+        new_stage = 1
+    elif stage == 1 and n >= 10:
+        new_cap = 8
+        new_stage = 2
+    elif stage == 2 and n >= 25 and net_pnl >= 8.0:
+        new_cap = 15
+        new_stage = 3
+    else:
+        new_cap = multicoin_engine.max_contracts_ramp_cap
+        new_stage = stage
+    if new_cap != multicoin_engine.max_contracts_ramp_cap:
+        multicoin_engine.max_contracts_ramp_cap = new_cap
+        _contract_ramp["stage"] = new_stage
+        print(
+            f"[ContractRamp] Stage {new_stage}: max_contracts_ramp_cap -> {new_cap} "
+            f"({n} clean trades entered, net_pnl=${net_pnl:+.2f})"
+        )
 multicoin_engine.stop_loss_hard_roi_pct = 45.0
 multicoin_engine.maker_take_profit = True
 multicoin_engine.enable_dynamic_compounding = True
-multicoin_engine.max_hold_seconds = 600.0
+multicoin_engine.max_hold_seconds = 120.0
 multicoin_engine.enforce_rest_ws_consistency = False
 multicoin_engine.max_rest_ws_divergence_cents = 3
 multicoin_engine.allow_partial_l2_fills = True
@@ -195,9 +250,12 @@ multicoin_engine.enforce_l2_depth_cap = True
 multicoin_engine.l2_depth_cap_pct = 0.15
 multicoin_engine.cf_disloc_mode = True
 multicoin_engine.structural_stop_enabled = True
-multicoin_engine.structural_stop_min_hold_sec = 60.0
-multicoin_engine.structural_stop_roi_pct = 45.0
-multicoin_engine.structural_stop_z = -1.8
+multicoin_engine.structural_stop_min_hold_sec = 45.0
+multicoin_engine.structural_stop_roi_pct = 35.0
+multicoin_engine.structural_stop_z = -0.65
+multicoin_engine.structural_catastrophe_roi_pct = 48.0
+multicoin_engine.trailing_profit_lock_enabled = True
+multicoin_engine.intraday_peak_equity = max(1.0, float(multicoin_engine.total_equity))
 
 hl_ws = HyperliquidWSFeed(coins=["BTC", "ETH"])
 
@@ -222,8 +280,39 @@ live_bridge = LiveMultiCoinBridge(
 # Initialize DI singletons and WebSocket streaming manager
 set_portfolio_manager_singleton(portfolio_manager)
 set_multicoin_engine_singleton(multicoin_engine)
+from collections import deque as _module_deque
 ws_manager = WebSocketConnectionManager()
 multicoin_live_matrix: Dict[str, Dict[str, Any]] = {}
+_chart_tick_history: Dict[str, Any] = {c: _module_deque(maxlen=360) for c in ("BTC", "ETH")}
+
+# =====================================================================
+# LOW-LATENCY INFRASTRUCTURE
+# Shared httpx connection pool (reuse TCP/TLS across all loops) and
+# unified spot feed (Coinbase/Kraken/Hyperliquid WS instead of REST polling).
+# =====================================================================
+_shared_http_client: Optional[httpx.AsyncClient] = None
+spot_feed: Optional[SpotFeedManager] = None
+
+
+def get_http_client() -> httpx.AsyncClient:
+    global _shared_http_client
+    if _shared_http_client is None:
+        _shared_http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=2.0, read=3.0, write=2.0, pool=5.0),
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100, keepalive_expiry=30.0),
+        )
+    return _shared_http_client
+
+
+async def close_http_client():
+    global _shared_http_client
+    if _shared_http_client is not None:
+        await _shared_http_client.aclose()
+        _shared_http_client = None
+
+
+# Import spot feed manager lazily to avoid circular import at module load
+from core.spot_feed_manager import get_spot_feed, reset_spot_feed  # noqa: E402
 # FIX (crash): this was initialized as a dict {} but used with .append()/.pop(0),
 # raising AttributeError on every heartbeat and every trade log line.
 multicoin_brain_logs: List[Dict[str, Any]] = []
@@ -249,87 +338,134 @@ live_execution_mode: str = "PAPER"  # "PAPER" or "LIVE_DEMO"
 live_demo_balance: Dict[str, Any] = {"balance": 5254, "balance_dollars": 52.54}
 startup_reconciliation_report: Dict[str, Any] = {}
 
-async def fast_spot_loop():
-    """High-frequency sub-second loop: updates live spot, refreshes KXBTC15M quotes, and evaluates paper trading bot."""
-    print("Starting high-frequency spot & paper bot loop...")
-    async with httpx.AsyncClient() as client:
-        while True:
-            try:
-                await metrics_provider.update_subsecond_spot(client)
-                scalp_data = await scanner.scan_kxbtc15m_fast(client)
-                if scalp_data:
-                    # Keep live WebSocket subscribed to current KXBTC15M ticker
-                    cur_ticker = scalp_data.get("ticker")
-                    if cur_ticker and cur_ticker not in live_ws.subscribed_tickers:
-                        asyncio.create_task(live_ws.subscribe_ticker(cur_ticker))
+# ---------------------------------------------------------------------------
+# SSE / tick-payload change detection cache.
+# Prevents redundant JSON serialization + SQLite hits when nothing changed.
+# ---------------------------------------------------------------------------
+_tick_payload_cache: Dict[str, Any] = {}
+_tick_payload_hash: str = ""
+_trades_cache: List[Dict[str, Any]] = []
+_trades_cache_ts: float = 0.0
+_TRADES_CACHE_TTL = 3.0  # seconds — refresh trade list at most every 3s
 
-                    if LEGACY_PAPER_BOT_TRADING:
-                        # Legacy single-coin bot — disabled under the unified-engine
-                        # architecture; MultiCoinPaperEngine handles all entries/exits.
-                        paper_bot.update_tick(
-                            scalp_data=scalp_data,
-                            spot_price=metrics_provider.spot_price,
-                            metrics=metrics_provider.get_summary_dict()
-                        )
-            except Exception as e:
-                print(f"[FastSpotLoop] Warning: {e}")
-            await asyncio.sleep(1.0)
+
+def _trades_cache_get() -> List[Dict[str, Any]]:
+    """Return cached recent trades, refreshing from SQLite at most every _TRADES_CACHE_TTL."""
+    global _trades_cache, _trades_cache_ts
+    now = time.time()
+    if now - _trades_cache_ts < _TRADES_CACHE_TTL and _trades_cache:
+        return _trades_cache
+    try:
+        rows = live_db.get_recent_trades(limit=20)
+        _trades_cache = [dict(r) for r in rows]
+        _trades_cache_ts = now
+    except Exception:
+        pass
+    return _trades_cache
+
+
+def _payload_hash(payload: Dict[str, Any]) -> str:
+    """Stable hash of the payload for change detection (ignores timestamp)."""
+    import hashlib
+    # Remove volatile timestamp before hashing
+    p = {k: v for k, v in payload.items() if k != "timestamp"}
+    return hashlib.sha256(json.dumps(p, sort_keys=True, default=str).encode()).hexdigest()
+
+async def fast_spot_loop():
+    """
+    High-frequency sub-second loop: updates live spot from WebSocket feeds,
+    refreshes KXBTC15M quotes, and evaluates paper trading bot.
+    Runs at 0.25s interval with shared HTTP connection pool and WS spot prices.
+    """
+    print("Starting high-frequency spot & paper bot loop (0.25s interval, WS spot feeds)...")
+    while True:
+        try:
+            # Sub-second spot from WS feeds (Coinbase/Kraken/Hyperliquid) — no REST polling
+            spots = spot_feed.get_all_spots() if spot_feed else {}
+            btc_spot = spots.get("BTC", 0.0)
+            eth_spot = spots.get("ETH", 0.0)
+
+            # Update metrics provider spot from WS feed
+            if btc_spot > 0:
+                metrics_provider.spot_price = btc_spot
+                watchdog.record_tick()  # Keep watchdog heartbeat alive with fresh WS ticks
+
+            # Use shared HTTP client for Kalshi market data (connection pooled)
+            client = get_http_client()
+            scalp_data = await scanner.scan_kxbtc15m_fast(client)
+            if scalp_data:
+                # Keep live WebSocket subscribed to current KXBTC15M ticker
+                cur_ticker = scalp_data.get("ticker")
+                if cur_ticker and cur_ticker not in live_ws.subscribed_tickers:
+                    asyncio.create_task(live_ws.subscribe_ticker(cur_ticker))
+
+                if LEGACY_PAPER_BOT_TRADING:
+                    # Legacy single-coin bot — disabled under the unified-engine
+                    # architecture; MultiCoinPaperEngine handles all entries/exits.
+                    paper_bot.update_tick(
+                        scalp_data=scalp_data,
+                        spot_price=metrics_provider.spot_price,
+                        metrics=metrics_provider.get_summary_dict()
+                    )
+        except Exception as e:
+            print(f"[FastSpotLoop] Warning: {e}")
+        await asyncio.sleep(0.25)
 
 async def full_scan_loop():
     """Medium-frequency loop (every 15s): scans all 600+ Kalshi BTC contracts, recalculates models, and syncs Demo balance."""
     print("Starting full Kalshi BTC market scan loop...")
-    async with httpx.AsyncClient() as client:
-        while True:
-            try:
-                await scanner.scan_all_btc_markets(client)
-                if live_auth.is_configured:
-                    headers = live_auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
-                    resp = await client.get(f"{KALSHI_REST_URL}/portfolio/balance", headers=headers, timeout=3.0)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        live_demo_balance["balance"] = data.get("balance", 5254)
-                        live_demo_balance["balance_dollars"] = float(data.get("balance", 5254)) / 100.0
-            except Exception as e:
-                print(f"[Loop] Error: {e}")
-            await asyncio.sleep(15.0)
+    client = get_http_client()
+    while True:
+        try:
+            await scanner.scan_all_btc_markets(client)
+            if live_auth.is_configured:
+                headers = live_auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
+                resp = await client.get(f"{KALSHI_REST_URL}/portfolio/balance", headers=headers, timeout=3.0)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    live_demo_balance["balance"] = data.get("balance", 5254)
+                    live_demo_balance["balance_dollars"] = float(data.get("balance", 5254)) / 100.0
+        except Exception as e:
+            print(f"[Loop] Error: {e}")
+        await asyncio.sleep(15.0)
 
 async def technicals_loop():
     """Low-frequency loop (every 60s): refreshes 720+ candles, realized volatilities, records audit logs."""
     print("Starting technicals & audit persistence loop...")
-    async with httpx.AsyncClient() as client:
-        # Initial run
-        await metrics_provider.update_candles_and_technicals(client)
-        await metrics_provider.update_derivatives_context(client)
-        while True:
-            await asyncio.sleep(60.0)
-            try:
-                await metrics_provider.update_candles_and_technicals(client)
-                await metrics_provider.update_derivatives_context(client)
+    client = get_http_client()
+    # Initial run
+    await metrics_provider.update_candles_and_technicals(client)
+    await metrics_provider.update_derivatives_context(client)
+    while True:
+        await asyncio.sleep(60.0)
+        try:
+            await metrics_provider.update_candles_and_technicals(client)
+            await metrics_provider.update_derivatives_context(client)
 
-                # Record metrics audit snapshot
-                m = metrics_provider.get_summary_dict()
-                db.log_metrics_snapshot(
-                    spot=m["spot_price"],
-                    open_p=m["candle_15m_open"],
-                    delta=m["candle_15m_delta"],
-                    vol_24h=m["vol_24h_ann_pct"],
-                    rsi=m["rsi_14"],
-                    funding=m["funding_rate_ann_pct"],
-                    prob_15m=scanner.cache.get("kxbtc15m", {}).get("model_prob_yes_pct", 50.0)
-                )
+            # Record metrics audit snapshot
+            m = metrics_provider.get_summary_dict()
+            db.log_metrics_snapshot(
+                spot=m["spot_price"],
+                open_p=m["candle_15m_open"],
+                delta=m["candle_15m_delta"],
+                vol_24h=m["vol_24h_ann_pct"],
+                rsi=m["rsi_14"],
+                funding=m["funding_rate_ann_pct"],
+                prob_15m=scanner.cache.get("kxbtc15m", {}).get("model_prob_yes_pct", 50.0)
+            )
 
-                # Record portfolio snapshot
-                b_stat = paper_bot.get_status_dict()
-                db.log_portfolio_snapshot(
-                    cash=b_stat["cash"],
-                    pos_val=round(b_stat["total_equity"] - b_stat["cash"], 2),
-                    equity=b_stat["total_equity"],
-                    realized=b_stat["realized_pnl"],
-                    unrealized=b_stat["unrealized_pnl"],
-                    win_rate=b_stat["win_rate_pct"],
-                    trades_count=b_stat["total_trades"]
-                )
-            except Exception as e:
+            # Record portfolio snapshot
+            b_stat = paper_bot.get_status_dict()
+            db.log_portfolio_snapshot(
+                cash=b_stat["cash"],
+                pos_val=round(b_stat["total_equity"] - b_stat["cash"], 2),
+                equity=b_stat["total_equity"],
+                realized=b_stat["realized_pnl"],
+                unrealized=b_stat["unrealized_pnl"],
+                win_rate=b_stat["win_rate_pct"],
+                trades_count=b_stat["total_trades"]
+            )
+        except Exception as e:
                 print(f"[Loop] Error: {e}")
 
 def normal_cdf(x: float) -> float:
@@ -342,32 +478,35 @@ async def periodic_reconciliation_loop():
     2. Sweeps and auto-cancels orphaned ghost orders older than max_hold_seconds (120s).
     3. Reconciles exchange state with local SQLite audit database.
     """
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        while True:
-            await asyncio.sleep(30.0)
-            try:
-                # 1. 30s Portfolio State Exchange Sync
-                sync_rep = await live_oms.sync_portfolio_state_30s(client=client)
-                if sync_rep.get("discrepancies"):
-                    print(f"[Reconcile 30s] Portfolio sync notice: {sync_rep['discrepancies']}")
+    client = get_http_client()
+    while True:
+        await asyncio.sleep(30.0)
+        try:
+            if live_oms.dry_run:
+                # In paper mode, do not overwrite shared portfolio_state.json with real exchange balance
+                continue
+            # 1. 30s Portfolio State Exchange Sync
+            sync_rep = await live_oms.sync_portfolio_state_30s(client=client)
+            if sync_rep.get("discrepancies"):
+                print(f"[Reconcile 30s] Portfolio sync notice: {sync_rep['discrepancies']}")
 
-                # 2. Orphan Ghost Order Auto-Cancellation (> 120s)
-                cancelled_orphans = await live_oms.sweep_and_cancel_orphaned_orders(max_hold_seconds=120.0)
-                if cancelled_orphans:
-                    print(f"[Reconcile 30s] Auto-cancelled {len(cancelled_orphans)} ghost order(s) (>120s old): {cancelled_orphans}")
+            # 2. Orphan Ghost Order Auto-Cancellation (> 120s)
+            cancelled_orphans = await live_oms.sweep_and_cancel_orphaned_orders(max_hold_seconds=120.0)
+            if cancelled_orphans:
+                print(f"[Reconcile 30s] Auto-cancelled {len(cancelled_orphans)} ghost order(s) (>120s old): {cancelled_orphans}")
 
-                # 3. Exchange state cross-check with local DB
-                if live_auth.is_configured:
-                    report = await live_oms.reconcile_exchange_state(
-                        db_path_or_db=live_db,
-                        cancel_orphaned_orders=False
-                    )
-                    if report.get("discrepancies_found"):
-                        print(f"[Reconcile 30s] {len(report['discrepancies_found'])} discrepancy(ies) resolved:")
-                        for d in report["discrepancies_found"]:
-                            print(f"  - {d}")
-            except Exception as e:
-                print(f"[Reconcile 30s] Error: {e}")
+            # 3. Exchange state cross-check with local DB
+            if live_auth.is_configured:
+                report = await live_oms.reconcile_exchange_state(
+                    db_path_or_db=live_db,
+                    cancel_orphaned_orders=False
+                )
+                if report.get("discrepancies_found"):
+                    print(f"[Reconcile 30s] {len(report['discrepancies_found'])} discrepancy(ies) resolved:")
+                    for d in report["discrepancies_found"]:
+                        print(f"  - {d}")
+        except Exception as e:
+            print(f"[Reconcile 30s] Error: {e}")
 
 async def paper_reconcile_loop():
     """
@@ -442,6 +581,7 @@ async def multi_coin_production_loop():
             with open(_cfg_path, "r") as _f:
                 _cfg = _json.load(_f)
             _coin_configs_loaded[_asset] = {
+                **_cfg,
                 "series": _cfg.get("kalshi_series", f"KX{_asset}15M"),
                 "vol_15m": float(_cfg.get("vol_15m_dollar", _default_vol_15m.get(_asset, 1.0))),
                 "enabled": _cfg.get("enabled", False),
@@ -492,6 +632,12 @@ async def multi_coin_production_loop():
     _ws_subscribed_tickers: set = set()
     from collections import deque as _deque
     from core.rti_accumulator import RtiAccumulator
+    from core.strategy_selector import StrategySelector
+    from core.regime_detector import RegimeDetector
+    _strategy_selectors = {
+        c: StrategySelector(detector=RegimeDetector())
+        for c in ("BTC", "ETH", "SOL", "XRP")
+    }
     _spot_tick_history: Dict[str, _deque] = {c: _deque(maxlen=45) for c in ("BTC", "ETH", "SOL", "XRP")}
     _cf_spot_cache: Dict[str, float] = {}
     _perp_basis_ema: Dict[str, float] = {}
@@ -502,15 +648,12 @@ async def multi_coin_production_loop():
         "SOL": RtiAccumulator(index_name="SOLUSD_RTI", window_seconds=60),
         "XRP": RtiAccumulator(index_name="XRPUSD_RTI", window_seconds=60),
     }
+    _signal_hysteresis_mgr = SignalHysteresisManager()
 
     async with httpx.AsyncClient(timeout=4.0) as client:
         while True:
             try:
-                # KILL file check - halt all new trades if file exists
-                if os.path.exists("KILL"):
-                    print("[MultiCoinProd] KILL file detected, sleeping...")
-                    await asyncio.sleep(5.0)
-                    continue
+                kill_file_active = os.path.exists("KILL")
 
                 now = time.time()
                 now_ms = int(now * 1000)
@@ -543,32 +686,43 @@ async def multi_coin_production_loop():
                 stale_coins = []
                 for coin in coin_configs:
                     ws_spot = hl_ws.get_spot(coin)
-                    if ws_spot is not None and hl_ws.is_fresh(coin, max_age=5.0):
+                    if ws_spot is not None and ws_spot > 0 and hl_ws.is_fresh(coin, max_age=5.0):
                         hl_lead_prices[coin] = ws_spot
                     else:
                         stale_coins.append(coin)
 
-                if stale_coins:
-                    hl_resp = await client.post("https://api.hyperliquid.xyz/info", json={"type": "allMids"})
-                    if hl_resp.status_code == 200:
-                        mids = hl_resp.json()
-                        for coin in stale_coins:
-                            val = mids.get(coin)
-                            if val is not None:
-                                hl_lead_prices[coin] = float(val)
-                    else:
-                        print(f"[MultiCoinProd] Hyperliquid allMids fallback returned {hl_resp.status_code}")
+                # Query REST allMids only if coins are actually stale AND at least 5s elapsed
+                if stale_coins and (now - _last_cf_fetch >= 5.0 or not hl_lead_prices):
+                    try:
+                        hl_resp = await client.post("https://api.hyperliquid.xyz/info", json={"type": "allMids"}, timeout=1.0)
+                        if hl_resp.status_code == 200:
+                            mids = hl_resp.json()
+                            for coin in stale_coins:
+                                val = mids.get(coin)
+                                if val is not None:
+                                    hl_lead_prices[coin] = float(val)
+                    except Exception as e:
+                        logger.debug(f"[MultiCoinProd] HL allMids fallback: {e}")
 
-                # 1B. Refresh Coinbase + Kraken CF Benchmarks spot reference (BRTI / ETHUSD_RTI) every 1.5s
-                if now - _last_cf_fetch >= 1.5 or not _cf_spot_cache:
+                # 1B. Refresh Coinbase + Kraken CF Benchmarks spot reference directly from real-time WS spot feeds (0ms)
+                _active_spot_feed = spot_feed or get_spot_feed()
+                for coin in coin_configs:
+                    if _active_spot_feed:
+                        _ws_p = _active_spot_feed.get_spot(coin)
+                        if _ws_p > 0:
+                            _cf_spot_cache[coin] = _ws_p
+
+                # Slow REST fallback only if a coin has NO valid spot price at all
+                _missing_cf = [c for c in coin_configs if _cf_spot_cache.get(c, 0.0) <= 0]
+                if _missing_cf and (now - _last_cf_fetch >= 5.0):
                     _last_cf_fetch = now
                     _cb_prices: Dict[str, float] = {}
                     _kr_prices: Dict[str, float] = {}
-                    for coin in coin_configs:
+                    for coin in _missing_cf:
                         try:
                             cb_r = await client.get(
                                 f"https://api.exchange.coinbase.com/products/{coin}-USD/ticker",
-                                timeout=1.5,
+                                timeout=1.0,
                             )
                             if cb_r.status_code == 200:
                                 _p = float(cb_r.json().get("price") or 0.0)
@@ -579,7 +733,7 @@ async def multi_coin_production_loop():
                     try:
                         kr_r = await client.get(
                             "https://api.kraken.com/0/public/Ticker?pair=XBTUSD,ETHUSD",
-                            timeout=1.5,
+                            timeout=1.0,
                         )
                         if kr_r.status_code == 200:
                             kr_res = kr_r.json().get("result", {})
@@ -595,7 +749,7 @@ async def multi_coin_production_loop():
                     except Exception:
                         pass
 
-                    for coin in coin_configs:
+                    for coin in _missing_cf:
                         samples = [p for p in (_cb_prices.get(coin), _kr_prices.get(coin)) if p and p > 0]
                         if samples:
                             _cf_spot_cache[coin] = sum(samples) / len(samples)
@@ -647,31 +801,40 @@ async def multi_coin_production_loop():
                             print(f"[MultiCoinProd] Candle fetch error for {coin}: {e}")
                     last_candle_fetch = now
 
-                # 3. Refresh active production markets every 10s
-                if now - last_mkt_fetch > 10.0 or not cached_markets:
+                # 3. Refresh active production markets every 10s (or immediately on candle rollover)
+                _any_expired = any(
+                    c not in cached_markets
+                    or ((_parse_iso_close_time(cached_markets[c].get("close_time", "")) or 0.0) <= now)
+                    for c in coin_configs
+                )
+                if (_any_expired and (now - last_mkt_fetch > 2.0)) or (now - last_mkt_fetch > 10.0) or not cached_markets:
                     for coin, cfg in coin_configs.items():
                         try:
-                            m_resp = await client.get(f"{KALSHI_REST_URL}/markets?series_ticker={cfg['series']}&status=open")
-                            if m_resp.status_code == 200:
-                                mkts = m_resp.json().get("markets", [])
-                                if mkts:
-                                    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                                    active = [m for m in mkts if (m.get("close_time") or "") >= now_iso]
-                                    cached_markets[coin] = active[0] if active else mkts[0]
-                                    _mkt_ticker = cached_markets[coin].get("ticker", "")
-                                    print(f"[MultiCoinProd] Found market for {coin}: {_mkt_ticker or '?'}")
-                                    # Subscribe every enabled coin's ticker (L2/quote
-                                    # streaming), not just BTC. Track locally so a ticker
-                                    # is subscribed once even if the cache refreshes.
-                                    if _mkt_ticker and _mkt_ticker not in _ws_subscribed_tickers:
-                                        _ws_subscribed_tickers.add(_mkt_ticker)
-                                        if _mkt_ticker not in live_ws.subscribed_tickers:
-                                            asyncio.create_task(live_ws.subscribe_ticker(_mkt_ticker))
-                                            print(f"[MultiCoinProd] Subscribed WebSocket ticker {_mkt_ticker} ({coin})")
-                                else:
-                                    print(f"[MultiCoinProd] No markets for {coin} series {cfg['series']}")
+                            active_mkts = []
+                            for base_url in (KALSHI_REST_URL, "https://api.elections.kalshi.com/trade-api/v2"):
+                                m_resp = await client.get(f"{base_url}/markets?series_ticker={cfg['series']}&status=open")
+                                if m_resp.status_code == 200:
+                                    mkts = m_resp.json().get("markets", [])
+                                    active_mkts = [
+                                        m for m in mkts
+                                        if (_parse_iso_close_time(m.get("close_time", "")) or 0.0) > now
+                                    ]
+                                    if active_mkts:
+                                        active_mkts.sort(key=lambda m: m.get("close_time") or "")
+                                        break
+                                if base_url == KALSHI_REST_URL and active_mkts:
+                                    break
+                            if active_mkts:
+                                cached_markets[coin] = active_mkts[0]
+                                _mkt_ticker = cached_markets[coin].get("ticker", "")
+                                if _mkt_ticker and _mkt_ticker not in _ws_subscribed_tickers:
+                                    _ws_subscribed_tickers.add(_mkt_ticker)
+                                    if _mkt_ticker not in live_ws.subscribed_tickers:
+                                        asyncio.create_task(live_ws.subscribe_ticker(_mkt_ticker))
+                                        print(f"[MultiCoinProd] Subscribed WebSocket ticker {_mkt_ticker} ({coin})")
                             else:
-                                print(f"[MultiCoinProd] Market fetch for {coin} returned {m_resp.status_code}")
+                                cached_markets.pop(coin, None)
+                                print(f"[MultiCoinProd] No active markets yet for {coin} series {cfg['series']}")
                         except Exception as e:
                             print(f"[MultiCoinProd] Market fetch error for {coin}: {e}")
                     last_mkt_fetch = now
@@ -679,22 +842,69 @@ async def multi_coin_production_loop():
                 # 4. Evaluate each coin
                 for coin, cfg in coin_configs.items():
                     spot = spot_prices.get(coin, 0.0)
-                    mkt = cached_markets.get(coin)
-                    if not spot or not mkt:
+                    if not spot:
                         continue
+                    mkt = cached_markets.get(coin)
+                    ticker = mkt.get("ticker", f"KX{coin}15M-ROLLOVER") if mkt else f"KX{coin}15M-ROLLOVER"
+                    close_time = mkt.get("close_time", "") if mkt else ""
+                    close_ts = _parse_iso_close_time(close_time) if close_time else None
 
-                    ticker = mkt.get("ticker", "")
-                    close_time = mkt.get("close_time", "")
-                    close_ts = _parse_iso_close_time(close_time)
-
-                    # Expired-market guard: markets are cached for 10s and can go
-                    # stale at the candle boundary. Never evaluate entries or exits
-                    # against an already-expired market.
-                    if close_ts is not None and close_ts <= now:
-                        print(
-                            f"[MultiCoinProd] Skipping {coin}: market expired "
-                            f"({ticker} close_time {close_time} <= now)"
-                        )
+                    # Expired-market / rollover guard: keep spot/charts/alpha streaming live
+                    # while gating trading execution until the new 15m contract is active.
+                    market_is_expired = (mkt is None) or (close_ts is not None and close_ts <= now)
+                    if market_is_expired:
+                        seconds_left = max(0.0, grid_seconds_left)
+                        open_p = candle_opens.get(coin, spot)
+                        y_ask, y_bid, n_ask, n_bid = 0.0, 0.0, 0.0, 0.0
+                        # Publish live spot & chart tick so dashboard never freezes during rollover
+                        _delta_roll = spot - open_p
+                        _roll_snap = {
+                            "coin": coin,
+                            "ticker": ticker,
+                            "spot": spot,
+                            "hl_spot": round(hl_lead_prices.get(coin, 0.0), 2),
+                            "kalshi_implied": None,
+                            "kalshi_diff": None,
+                            "open": open_p,
+                            "delta": round(_delta_roll, 4),
+                            "seconds_left": int(seconds_left),
+                            "z_cf": 0.0,
+                            "z_eff": 0.0,
+                            "z_score": 0.0,
+                            "z_shift": 0.0,
+                            "ofi_z": 0.0,
+                            "spot_tfi": round(_active_spot_feed.get_spot_tfi(coin, 30.0), 3) if _active_spot_feed else 0.0,
+                            "book_imb": round(_active_spot_feed.get_book_imbalance(coin), 3) if _active_spot_feed else 0.0,
+                            "momentum_z": 0.0,
+                            "eff_vol_15m": round(float(cfg.get("vol_15m_dollar", 200.0)), 2),
+                            "ts": round(now, 2),
+                            "prob_yes_pct": 50.0,
+                            "prob_no_pct": 50.0,
+                            "mu_settle": round(spot, 2),
+                            "hypothesis": "NEUTRAL_HOLD",
+                            "yes_ask": 0.0,
+                            "yes_bid": 0.0,
+                            "no_ask": 0.0,
+                            "no_bid": 0.0,
+                            "spread_cents": 0,
+                            "fee_y": 0.0,
+                            "fee_n": 0.0,
+                            "edge_y": 0.0,
+                            "edge_n": 0.0,
+                            "action": "ROLLOVER",
+                            "action_reason": "Waiting for next 15m Kalshi contract...",
+                            "active_position": multicoin_engine.active_positions.get(coin),
+                            "equity": multicoin_engine.coin_equities.get(coin, 25.0),
+                            "weight": multicoin_engine.coin_weights.get(coin, 0.25),
+                        }
+                        multicoin_live_matrix[coin] = _roll_snap
+                        if coin in _chart_tick_history and spot > 0:
+                            _chart_tick_history[coin].append([
+                                round(now, 2),
+                                round(spot, 2),
+                                round(hl_lead_prices.get(coin, 0.0), 2),
+                                None,
+                            ])
                         continue
 
                     # Expiry comes from the market's own close_time, not the
@@ -729,7 +939,10 @@ async def multi_coin_production_loop():
                         if not getattr(_l2_book, "stale", False):
                             ws_bid_c, _ = _l2_book.get_best_bid()
                             ws_ask_c, _ = _l2_book.get_best_ask()
-                            if 1 <= ws_bid_c < ws_ask_c <= 99:
+                            if ws_bid_c > 0 and ws_ask_c < 100 and ws_bid_c >= ws_ask_c:
+                                _l2_book.stale = True
+                                asyncio.create_task(live_ws.refresh_orderbook_rest(ticker, overwrite_fresh=True))
+                            elif 0 <= ws_bid_c < ws_ask_c <= 100 and (ws_bid_c > 0 or ws_ask_c < 100):
                                 y_bid = ws_bid_c / 100.0
                                 y_ask = ws_ask_c / 100.0
                                 n_bid = (100 - ws_ask_c) / 100.0
@@ -740,59 +953,174 @@ async def multi_coin_production_loop():
                     if acc is not None:
                         acc.add_sample(spot, seconds_left, candle_id=close_time)
 
-                    # Dynamic volatility scaling from recent spot ticks blended with base 15m vol
-                    base_vol = float(cfg["vol_15m"])
-                    eff_vol = base_vol
-                    tick_hist = _spot_tick_history.get(coin)
-                    if tick_hist and len(tick_hist) >= 12:
-                        diffs = [
-                            abs(tick_hist[i][1] - tick_hist[i - 1][1]) / math.sqrt(max(0.2, tick_hist[i][0] - tick_hist[i - 1][0]))
-                            for i in range(1, len(tick_hist))
-                        ]
-                        if diffs:
-                            realized_1s = sum(diffs) / len(diffs)
-                            realized_15m = realized_1s * 30.0
-                            eff_vol = max(base_vol * 0.6, min(base_vol * 2.2, 0.5 * base_vol + 0.5 * realized_15m))
+                    # Evaluate active one-click bracket orders against real-time book (Auto TP/SL with OCO)
+                    if bracket_manager and bracket_manager.active_tickets:
+                        bkt_events_y = bracket_manager.on_tick(ticker=ticker, current_bid=y_bid, current_ask=y_ask, current_time=now)
+                        bkt_events_n = bracket_manager.on_tick(ticker=ticker, current_bid=n_bid, current_ask=n_ask, current_time=now)
+                        for ev in bkt_events_y + bkt_events_n:
+                            multicoin_brain_logs.append({
+                                "time": time.strftime("%H:%M:%S", time.localtime(now)),
+                                "coin": coin,
+                                "type": "BRACKET_EXIT",
+                                "text": f"🎯 BRACKET {ev['event']} on {ev['ticker']} | Exit: {int(ev['exit_price']*100)}¢ | Net PnL: ${ev['net_pnl']:+.2f} ({ev['contracts']}x)"
+                            })
 
-                    # S5 De-Biased CF Spot Z-Score & Probability
-                    delta = spot - open_p
+                    # Dynamic volatility scaling from recent spot ticks blended with base 15m vol
+                    # with microstructure noise reduction (3s-5s sub-sampled buckets, avoiding 1s bounce)
+                    base_vol = float(cfg.get("vol_15m_dollar", cfg.get("vol_15m", 95.0)))
+                    subsample_s = float(cfg.get("vol_subsample_seconds", 3.0))
+                    clamp_min_m = float(cfg.get("vol_clamp_min_mult", 0.6))
+                    clamp_max_m = float(cfg.get("vol_clamp_max_mult", 2.2))
+                    tick_hist = _spot_tick_history.get(coin)
+                    eff_vol, realized_15m = compute_microstructure_clean_vol(
+                        tick_history=list(tick_hist) if tick_hist else [],
+                        base_vol=base_vol,
+                        bucket_seconds=subsample_s,
+                        clamp_min_mult=clamp_min_m,
+                        clamp_max_mult=clamp_max_m,
+                    )
+
+                    # Feed freshness and gated lead-lag / OFI drift
+                    hl_age_ms = hl_ws.get_age_ms(coin)
+                    max_feed_age_ms = float(cfg.get("max_feed_age_ms", 3000.0))
+                    is_hl_fresh = hl_ws.is_fresh(coin, max_age_ms=max_feed_age_ms) and hl_age_ms <= max_feed_age_ms
+                    ofi_z = hl_ws.get_ofi_z(coin) if is_hl_fresh else 0.0
+                    lead_imp_bps = leadlag_impulse_bps.get(coin, 0.0) if is_hl_fresh else 0.0
+
+                    # US Spot TFI, L1 Book Imbalance & Multi-Horizon Spot Momentum
+                    spot_tfi = _active_spot_feed.get_spot_tfi(coin, window_s=30.0) if _active_spot_feed else 0.0
+                    book_imb = _active_spot_feed.get_book_imbalance(coin) if _active_spot_feed else 0.0
+                    momentum_z = 0.0
+                    _ch_pts = list(_chart_tick_history.get(coin, ()))
+                    if len(_ch_pts) >= 15:
+                        _p_short = [pt[1] for pt in _ch_pts if pt[0] >= (now - 15.0) and pt[1] > 0]
+                        _p_long = [pt[1] for pt in _ch_pts if pt[0] >= (now - 180.0) and pt[1] > 0]
+                        if _p_short and _p_long:
+                            _ema_s = sum(_p_short) / len(_p_short)
+                            _ema_l = sum(_p_long) / len(_p_long)
+                            _vol_3m = max(1e-6, eff_vol * math.sqrt(180.0 / 900.0))
+                            momentum_z = max(-1.5, min(1.5, (_ema_s - _ema_l) / _vol_3m))
+
+                    # Empirical 5s Stale-Quote Impulse Detector + 60s Anti-Chase Window
+                    _kal_mid_now = (y_bid + y_ask) / 2.0 if (y_bid > 0 and y_ask > 0) else 0.0
+                    if "_kalshi_mid_hist" not in locals():
+                        _kalshi_mid_hist = {}
+                    _km_dq = _kalshi_mid_hist.setdefault(coin, _deque(maxlen=260))
+                    if _kal_mid_now > 0:
+                        _km_dq.append((now, _kal_mid_now))
+                    _d_spot_5s = 0.0
+                    for _pts_ts, _pts_px, *_ in _ch_pts:
+                        if _pts_ts >= (now - 5.5) and _pts_px > 0:
+                            _d_spot_5s = spot - _pts_px
+                            break
+                    _d_kal_5s_c = 0.0
+                    _chase_y_60s_c = 0.0
+                    _chase_n_60s_c = 0.0
+                    if _kal_mid_now > 0:
+                        for _kts, _kmid in _km_dq:
+                            if _kts >= (now - 5.5) and _kmid > 0:
+                                _d_kal_5s_c = (_kal_mid_now - _kmid) * 100.0
+                                break
+                        _mids_60s = [_kmid for _kts, _kmid in _km_dq if _kts >= (now - 60.0) and _kmid > 0]
+                        if _mids_60s:
+                            _chase_y_60s_c = (_kal_mid_now - min(_mids_60s)) * 100.0
+                            _chase_n_60s_c = (max(_mids_60s) - _kal_mid_now) * 100.0
+                    _spot_imp_thresh = 40.0 if coin == "BTC" else 2.50
+                    _stale_info = detect_stale_quote_impulse(
+                        spot_5s_delta=_d_spot_5s,
+                        kalshi_5s_delta_cents=_d_kal_5s_c,
+                        spot_tfi=spot_tfi,
+                        spot_thresh=_spot_imp_thresh,
+                        max_kalshi_move_cents=1.0,
+                    )
+
+                    leadlag_z_clamp = float(cfg.get("leadlag_z_clamp", 0.35))
+                    z_shift = compute_clamped_z_shift(
+                        lead_imp_bps=lead_imp_bps,
+                        ofi_z=ofi_z,
+                        is_hl_fresh=is_hl_fresh,
+                        max_z_shift=leadlag_z_clamp,
+                        spot_tfi=spot_tfi,
+                        book_imb=book_imb,
+                        momentum_z=momentum_z,
+                    )
+                    if _stale_info["z_boost"] != 0.0:
+                        z_shift = max(-leadlag_z_clamp, min(leadlag_z_clamp, z_shift + _stale_info["z_boost"]))
+
+                    # 60s RTI settlement projection:
+                    # When seconds_left > 60: project expected settlement over final 60s window [T-60, T]
+                    # using current spot, delta, eff_vol, and gated Hyperliquid lead-lag/OFI drift.
+                    # When seconds_left <= 60: blend already-elapsed portion of 60s window from
+                    # RtiAccumulator (weighted by (60 - seconds_left) / 60) with remaining expected path
+                    # (seconds_left / 60) converging directly to CF Benchmarks 60s settlement window as seconds_left -> 0.
                     sigma_base = base_vol * math.sqrt(max(1.0, seconds_left) / 900.0)
-                    sigma = eff_vol * math.sqrt(max(1.0, seconds_left) / 900.0)
+                    sigma_eff = eff_vol * math.sqrt(max(1.0, seconds_left) / 900.0)
+                    drift_dollar = z_shift * sigma_eff
+
+                    delta = spot - open_p
+                    if acc is not None:
+                        mu_settle = acc.calculate_projected_settlement(
+                            current_spot=spot,
+                            seconds_left=seconds_left,
+                            delta=delta,
+                            eff_vol=eff_vol,
+                            drift=drift_dollar,
+                        )
+                    else:
+                        mu_settle = spot + drift_dollar
+
+                    # Retain z_cf as diagnostic field, compute regime-aware z_eff
                     z_cf = delta / max(0.0001, sigma_base)
-                    z = delta / max(0.0001, sigma)
-                    ofi_z = hl_ws.get_ofi_z(coin) if hl_ws.is_fresh(coin, max_age=5.0) else 0.0
-                    lead_imp_bps = leadlag_impulse_bps.get(coin, 0.0)
-                    prob_yes = normal_cdf(z_cf)
+                    z_eff = (mu_settle - open_p) / max(0.0001, sigma_eff)
+                    z = z_eff
+
+                    prob_yes = normal_cdf(z_eff)
                     prob_no = 1.0 - prob_yes
                     prob_yes_pct = prob_yes * 100.0
                     prob_no_pct = prob_no * 100.0
 
-                    # Calculate net post-fee edges using realistic 40-contract batch (avoids 1-contract ceil() distortion)
-                    fee_y = (calculate_kalshi_taker_fee(40, y_ask) / 40.0) if 0.0 < y_ask < 1.0 else 0.0
-                    fee_n = (calculate_kalshi_taker_fee(40, n_ask) / 40.0) if 0.0 < n_ask < 1.0 else 0.0
+                    # Calculate net post-fee edges using precomputed 40-contract batch LUT
+                    fee_y = lookup_fee_40c(y_ask)
+                    fee_n = lookup_fee_40c(n_ask)
                     edge_y = (prob_yes - (y_ask + fee_y)) * 100.0 if y_ask > 0 else -100.0
                     edge_n = (prob_no - (n_ask + fee_n)) * 100.0 if n_ask > 0 else -100.0
+                    prob_yes_base = normal_cdf(z_cf)
+                    prob_no_base = 1.0 - prob_yes_base
+                    base_edge_y = (prob_yes_base - (y_ask + fee_y)) * 100.0 if y_ask > 0 else -100.0
+                    base_edge_n = (prob_no_base - (n_ask + fee_n)) * 100.0 if n_ask > 0 else -100.0
                     raw_disloc_y = (prob_yes - y_ask) if y_ask > 0 else -1.0
                     raw_disloc_n = (prob_no - n_ask) if n_ask > 0 else -1.0
 
                     # Evaluate open positions
+                    gate_block_status = ""
+                    gate_block_reason = ""
                     if coin in multicoin_engine.active_positions:
                         pos = multicoin_engine.active_positions[coin]
+                        pos_expired_rollover = bool(pos.get("ticker") and ticker and pos["ticker"] != ticker)
                         cur_bid = y_bid if pos["side"] == "YES" else n_bid
-                        if cur_bid <= 0.01:
+                        if cur_bid <= 0.01 or pos_expired_rollover:
                             cur_bid = pos.get("current_bid", pos["entry_price"])
                         pos["current_bid"] = cur_bid
                         curr_prob = prob_yes_pct if pos["side"] == "YES" else prob_no_pct
-                        dir_z = z_cf if pos["side"] == "YES" else -z_cf
+                        dir_z = z_eff if pos["side"] == "YES" else -z_eff
+                        eff_pos_sec_left = 0.0 if pos_expired_rollover else seconds_left
                         closed_trade = multicoin_engine.update_position(
                             coin=coin,
                             current_bid=cur_bid,
-                            seconds_left=seconds_left,
+                            seconds_left=eff_pos_sec_left,
                             settle_spot=spot,
                             strike=open_p,
                             model_prob=curr_prob,
                             dir_z=dir_z,
                         )
+                        if closed_trade and pos_expired_rollover:
+                            try:
+                                await multicoin_engine.reconcile_official_settlements(
+                                    rest_base_url=KALSHI_REST_URL,
+                                    http_client=client,
+                                )
+                            except Exception as _reconcile_err:
+                                logger.debug(f"[MultiCoinProd] Immediate rollover settlement reconcile: {_reconcile_err}")
                         if closed_trade:
                             if live_bridge.is_live_armed:
                                 await live_bridge.on_exit(
@@ -809,7 +1137,10 @@ async def multi_coin_production_loop():
                                 "text": f"{icon} EXITED {closed_trade['coin']} ({closed_trade['reason']}): PnL {closed_trade['pnl']:+.2f} ({closed_trade['roi']:+.1f}%) | Equity: ${closed_trade['equity']:.2f}"
                             })
 
-                    # Evaluate new entry (S5_REC_LEADLAG_ENSEMBLE rules)
+                    # Evaluate new entry (S5_REC_LEADLAG_ENSEMBLE rules with quote staleness, spread & depth guards)
+                    elif kill_file_active:
+                        gate_block_status = "HALT_KILL_SWITCH"
+                        gate_block_reason = "Emergency KILL switch active — new entries paused"
                     else:
                         signal = ""
                         edge_pct = 0.0
@@ -817,11 +1148,51 @@ async def multi_coin_production_loop():
 
                         spread_y = (y_ask - y_bid) if (y_ask > 0 and y_bid > 0) else 1.0
                         spread_n = (n_ask - n_bid) if (n_ask > 0 and n_bid > 0) else 1.0
-                        max_allowed_spread = 0.05  # Max 5¢ spread per S5
+                        max_allowed_spread = float(cfg.get("max_spread_dollars", 0.05))  # Max 5¢ spread per S5
                         max_rel_spread = 0.35      # Max 35% relative spread
 
-                        is_liquid_y = (y_bid >= 0.05) and (spread_y <= max_allowed_spread) and (spread_y / max(0.01, y_ask) <= max_rel_spread)
-                        is_liquid_n = (n_bid >= 0.05) and (spread_n <= max_allowed_spread) and (spread_n / max(0.01, n_ask) <= max_rel_spread)
+                        max_quote_age_s = float(cfg.get("max_quote_age_seconds", 3.0))
+                        ws_live_seq = bool(getattr(live_ws, "is_ws_connected", False)) and not getattr(_l2_book, "stale", False)
+                        eff_max_quote_age_s = max(max_quote_age_s, 30.0) if ws_live_seq else max_quote_age_s
+                        is_quote_stale = (
+                            (_l2_book is None)
+                            or getattr(_l2_book, "stale", False)
+                            or (getattr(_l2_book, "last_update_ts", 0.0) <= 0.0)
+                            or ((now - getattr(_l2_book, "last_update_ts", 0.0)) > eff_max_quote_age_s)
+                        )
+
+                        min_book_depth = int(cfg.get("min_book_depth", 10))
+                        if _l2_book is not None:
+                            _ba_p, _ = _l2_book.get_best_ask()
+                            _bb_p, _ = _l2_book.get_best_bid()
+                            depth_y = sum(q for p, q in _l2_book.asks.items() if p <= _ba_p + 2) if _l2_book.asks else 0
+                            depth_n = sum(q for p, q in _l2_book.bids.items() if p >= _bb_p - 2) if _l2_book.bids else 0
+                        else:
+                            depth_y = 0
+                            depth_n = 0
+                        has_depth_y = depth_y >= min_book_depth
+                        has_depth_n = depth_n >= min_book_depth
+
+                        spread_ok_y = (y_bid >= 0.05) and (spread_y <= max_allowed_spread) and ((spread_y / max(0.01, y_ask)) <= max_rel_spread)
+                        spread_ok_n = (n_bid >= 0.05) and (spread_n <= max_allowed_spread) and ((spread_n / max(0.01, n_ask)) <= max_rel_spread)
+
+                        is_liquid_y = (not is_quote_stale) and spread_ok_y and has_depth_y
+                        is_liquid_n = (not is_quote_stale) and spread_ok_n and has_depth_n
+
+                        # ---- Adaptive strategy selection per coin BEFORE evaluating gates ----
+                        _coin_selector = _strategy_selectors.get(coin)
+                        if _coin_selector is not None:
+                            _cfg, _regime = _coin_selector.select_from_ticks(
+                                ts=now,
+                                spot=spot,
+                                strike=open_p,
+                                yes_bid=y_bid,
+                                yes_ask=y_ask,
+                                yes_bid_sz=float(depth_n),
+                                yes_ask_sz=float(depth_y),
+                                signed_flow_usd=0.0,
+                            )
+                            multicoin_engine.apply_strategy_config(_cfg)
 
                         # Calculate 10-second and 20-second CF spot velocity
                         hist = _spot_tick_history.get(coin, _deque())
@@ -835,45 +1206,75 @@ async def multi_coin_production_loop():
                             oldest_10 = next((p for t, p in hist if t >= cutoff_10), hist[0][1])
                             vel_10s_bps = ((spot - oldest_10) / max(1e-6, spot)) * 10000.0
 
-                        max_entry_cap = float(getattr(multicoin_engine, "max_entry_price", 0.48))
+                        max_entry_cap = float(getattr(multicoin_engine, "max_entry_price", cfg.get("max_entry_price", 0.72)))
+                        min_entry_cap = float(getattr(multicoin_engine, "min_entry_price", cfg.get("min_entry_price", 0.20)))
+                        min_sec_left = int(getattr(multicoin_engine, "min_seconds_left_by_coin", {}).get(coin, cfg.get("min_seconds_left_for_entry", 90)))
+                        max_sec_left = int(getattr(multicoin_engine, "max_seconds_left", cfg.get("max_seconds_left_for_entry", 660)))
+                        time_gate_ok = (min_sec_left <= seconds_left <= max_sec_left)
+                        min_prob_threshold = float(getattr(multicoin_engine, "min_prob_by_coin", {}).get(coin, cfg.get("min_model_prob", 60.0)))
+                        min_edge_threshold = float(getattr(multicoin_engine, "min_edge_pct", cfg.get("min_edge_pct", 3.0)))
 
-                        if z_cf >= 0.05 and 0.20 <= y_ask <= max_entry_cap and raw_disloc_y >= 0.09 and edge_y >= 6.0:
-                            if not is_liquid_y:
-                                action_status = "HOLD_WIDE_SPREAD"
-                                action_reason = f"Illiquid book: bid {int(y_bid*100)}¢ / ask {int(y_ask*100)}¢ (spread {int(spread_y*100)}¢ > 5¢)"
+                        if time_gate_ok and prob_yes_pct >= min_prob_threshold and edge_y >= min_edge_threshold and min_entry_cap <= y_ask <= max_entry_cap:
+                            if is_quote_stale:
+                                gate_block_status = "HOLD_STALE_QUOTE"
+                                gate_block_reason = f"Stale quote on {coin}: L2 book age > {eff_max_quote_age_s:.1f}s or marked stale"
+                            elif not spread_ok_y:
+                                gate_block_status = "HOLD_WIDE_SPREAD"
+                                gate_block_reason = f"Illiquid book: bid {int(y_bid*100)}¢ / ask {int(y_ask*100)}¢ (spread {int(spread_y*100)}¢ > {int(max_allowed_spread*100)}¢)"
+                            elif not has_depth_y:
+                                gate_block_status = "HOLD_THIN_BOOK"
+                                gate_block_reason = f"Thin book: top-of-book depth {depth_y} < {min_book_depth} contracts"
                             elif vel_10s_bps < 0.0:
-                                action_status = "HOLD_ADVERSE_MOMENTUM"
-                                action_reason = f"10s CF velocity negative ({vel_10s_bps:+.2f} bps < 0)"
+                                gate_block_status = "HOLD_ADVERSE_MOMENTUM"
+                                gate_block_reason = f"10s CF velocity negative ({vel_10s_bps:+.2f} bps < 0)"
                             elif lead_imp_bps < -0.50:
-                                action_status = "HOLD_ADVERSE_LEADLAG"
-                                action_reason = f"Adverse de-biased lead-lag impulse ({lead_imp_bps:+.2f} bps < -0.50)"
+                                gate_block_status = "HOLD_ADVERSE_LEADLAG"
+                                gate_block_reason = f"Adverse de-biased lead-lag impulse ({lead_imp_bps:+.2f} bps < -0.50)"
                             elif ofi_z <= -2.5:
-                                action_status = "HOLD_ADVERSE_OFI"
-                                action_reason = f"Extreme counter-OFI on {coin}: Z_OFI={ofi_z:+.2f} <= -2.50"
+                                gate_block_status = "HOLD_ADVERSE_OFI"
+                                gate_block_reason = f"Extreme counter-OFI on {coin}: Z_OFI={ofi_z:+.2f} <= -2.50"
+                            elif base_edge_y < 2.5:
+                                gate_block_status = "HOLD_LOW_BASE_EDGE"
+                                gate_block_reason = f"Un-inflated spot vs strike edge too small ({base_edge_y:+.1f}% < +2.5%)"
+                            elif _chase_y_60s_c > 16.0:
+                                gate_block_status = "HOLD_CHASE_GUARD"
+                                gate_block_reason = f"Anti-chase: YES already jumped +{_chase_y_60s_c:.0f}¢ in last 60s (> 16¢)"
                             else:
                                 signal = "BUY YES"
                                 edge_pct = edge_y
                                 prob_val = prob_yes_pct
-                        elif (-z_cf) >= 0.05 and 0.20 <= n_ask <= max_entry_cap and raw_disloc_n >= 0.09 and edge_n >= 6.0:
-                            if not is_liquid_n:
-                                action_status = "HOLD_WIDE_SPREAD"
-                                action_reason = f"Illiquid book: bid {int(n_bid*100)}¢ / ask {int(n_ask*100)}¢ (spread {int(spread_n*100)}¢ > 5¢)"
+                        elif time_gate_ok and prob_no_pct >= min_prob_threshold and edge_n >= min_edge_threshold and min_entry_cap <= n_ask <= max_entry_cap:
+                            if is_quote_stale:
+                                gate_block_status = "HOLD_STALE_QUOTE"
+                                gate_block_reason = f"Stale quote on {coin}: L2 book age > {eff_max_quote_age_s:.1f}s or marked stale"
+                            elif not spread_ok_n:
+                                gate_block_status = "HOLD_WIDE_SPREAD"
+                                gate_block_reason = f"Illiquid book: bid {int(n_bid*100)}¢ / ask {int(n_ask*100)}¢ (spread {int(spread_n*100)}¢ > {int(max_allowed_spread*100)}¢)"
+                            elif not has_depth_n:
+                                gate_block_status = "HOLD_THIN_BOOK"
+                                gate_block_reason = f"Thin book: top-of-book depth {depth_n} < {min_book_depth} contracts"
                             elif (-vel_10s_bps) < 0.0:
-                                action_status = "HOLD_ADVERSE_MOMENTUM"
-                                action_reason = f"10s CF velocity positive against NO ({vel_10s_bps:+.2f} bps > 0)"
+                                gate_block_status = "HOLD_ADVERSE_MOMENTUM"
+                                gate_block_reason = f"10s CF velocity positive against NO ({vel_10s_bps:+.2f} bps > 0)"
                             elif (-lead_imp_bps) < -0.50:
-                                action_status = "HOLD_ADVERSE_LEADLAG"
-                                action_reason = f"Adverse de-biased lead-lag impulse ({lead_imp_bps:+.2f} bps > +0.50)"
+                                gate_block_status = "HOLD_ADVERSE_LEADLAG"
+                                gate_block_reason = f"Adverse de-biased lead-lag impulse ({lead_imp_bps:+.2f} bps > +0.50)"
                             elif ofi_z >= 2.5:
-                                action_status = "HOLD_ADVERSE_OFI"
-                                action_reason = f"Extreme counter-OFI on {coin}: Z_OFI={ofi_z:+.2f} >= +2.50"
+                                gate_block_status = "HOLD_ADVERSE_OFI"
+                                gate_block_reason = f"Extreme counter-OFI on {coin}: Z_OFI={ofi_z:+.2f} >= +2.50"
+                            elif base_edge_n < 2.5:
+                                gate_block_status = "HOLD_LOW_BASE_EDGE"
+                                gate_block_reason = f"Un-inflated spot vs strike edge too small ({base_edge_n:+.1f}% < +2.5%)"
+                            elif _chase_n_60s_c > 16.0:
+                                gate_block_status = "HOLD_CHASE_GUARD"
+                                gate_block_reason = f"Anti-chase: NO already jumped +{_chase_n_60s_c:.0f}¢ in last 60s (> 16¢)"
                             else:
                                 signal = "BUY NO"
                                 edge_pct = edge_n
                                 prob_val = prob_no_pct
 
                         is_certainty_arb = False
-                        if not signal and acc is not None and 3 < seconds_left <= 45:
+                        if not signal and acc is not None and 5 < seconds_left <= 25 and acc.sample_count() >= 35:
                             cert_res = acc.evaluate_certainty_arb(
                                 strike=open_p,
                                 current_spot=spot,
@@ -883,10 +1284,11 @@ async def multi_coin_production_loop():
                             if cert_res.get("is_certainty_arb") and cert_res.get("side"):
                                 c_side = cert_res["side"]
                                 c_ask = y_ask if c_side == "YES" else n_ask
-                                c_fee = (calculate_kalshi_taker_fee(40, c_ask) / 40.0) if 0.0 < c_ask < 1.0 else 0.0
+                                c_fee = lookup_fee_40c(c_ask)
                                 c_edge = (cert_res["prob"] - (c_ask + c_fee)) * 100.0 if c_ask > 0 else -100.0
                                 c_liquid = is_liquid_y if c_side == "YES" else is_liquid_n
-                                if c_liquid and 0.20 <= c_ask <= 0.78 and c_edge >= 3.0:
+                                # Market sanity guard: never buy <55¢ claiming 100% certainty when book strongly disagrees
+                                if c_liquid and 0.55 <= c_ask <= 0.78 and c_edge >= 4.0:
                                     signal = f"BUY {c_side}"
                                     edge_pct = c_edge
                                     prob_val = cert_res["prob"] * 100.0
@@ -908,6 +1310,9 @@ async def multi_coin_production_loop():
                                 is_certainty_arb=is_certainty_arb
                             )
                             if trade_pos:
+                                # Contract-size ramp: count clean entries and scale up
+                                _contract_ramp["trades_entered"] += 1
+                                _update_contract_ramp()
                                 if live_bridge.is_live_armed:
                                     await live_bridge.on_entry(
                                         coin=coin,
@@ -925,66 +1330,96 @@ async def multi_coin_production_loop():
                                     "type": "ENTRY",
                                     "text": f"🚀 ENTERED {trade_pos.get('side')} ({trade_pos.get('contracts')}x @ {int(trade_pos.get('entry_price',0)*100)}¢) on {ticker} | Edge: +{edge_pct:.1f}% | Prob: {prob_val:.1f}%"
                                 })
+                            else:
+                                gate_block_status = "HOLD_ENGINE_GATE"
+                                gate_block_reason = getattr(multicoin_engine, "last_reject_reason", "") or "Rejected by engine risk/L2 gate"
 
                     # Update live cockpit matrix for frontend
                     pos = multicoin_engine.active_positions.get(coin)
                     action_status = "HOLD"
                     action_reason = ""
+                    min_sec_entry = int(getattr(multicoin_engine, "min_seconds_left_by_coin", {}).get(coin, cfg.get("min_seconds_left_for_entry", 90)))
+                    max_sec_entry = int(getattr(multicoin_engine, "max_seconds_left", cfg.get("max_seconds_left_for_entry", 660)))
+                    max_entry_price = float(getattr(multicoin_engine, "max_entry_price", cfg.get("max_entry_price", 0.72)))
+                    eff_min_prob_ui = float(getattr(multicoin_engine, "min_prob_by_coin", {}).get(coin, cfg.get("min_model_prob", 60.0)))
+                    eff_min_edge_ui = float(getattr(multicoin_engine, "min_edge_pct", cfg.get("min_edge_pct", 3.0)))
 
                     if pos:
                         cur_bid = y_bid if pos["side"] == "YES" else n_bid
                         roi_unrealized = ((cur_bid - pos["entry_price"]) / max(0.01, pos["entry_price"])) * 100.0
                         action_status = f"IN_POSITION_{pos['side']}"
                         action_reason = f"Holding {pos['contracts']}x {pos['side']} @ {int(pos['entry_price']*100)}¢ (Now: {int(cur_bid*100)}¢ | ROI: {roi_unrealized:+.1f}%)"
-                    elif seconds_left < 240:
+                    elif gate_block_status:
+                        action_status = gate_block_status
+                        action_reason = gate_block_reason
+                    elif seconds_left < min_sec_entry:
                         action_status = "HOLD_EXPIRE"
-                        action_reason = f"Expiration gate active ({int(seconds_left)}s < 240s cutoff)"
-                    elif seconds_left > 660:
+                        action_reason = f"Expiration gate active ({int(seconds_left)}s < {min_sec_entry}s cutoff)"
+                    elif seconds_left > max_sec_entry:
                         action_status = "HOLD_EARLY"
-                        action_reason = f"Early candle noise filter ({int(seconds_left)}s > 660s)"
+                        action_reason = f"Early candle noise filter ({int(seconds_left)}s > {max_sec_entry}s)"
                     elif multicoin_engine.candle_stopped_out.get(coin) == close_time:
                         action_status = "HOLD_STOPPED_OUT"
                         action_reason = "Candle lockout: stopped out in this 15m candle"
-                    # Displayed BUY uses the engine's actual entry-price cap
-                    # (0.68 today), not the broader 0.20-0.80 prefilter, so the UI
-                    # never advertises a setup evaluate_entry will reject.
-                    elif prob_yes_pct >= 60.0 and edge_y >= 4.0 and 0.20 <= y_ask <= max_entry_price:
-                        if is_liquid_y:
-                            action_status = "BUY_YES"
-                            action_reason = f"Conviction {prob_yes_pct:.1f}% & Edge +{edge_y:.1f}% meets criteria"
-                        else:
-                            action_status = "HOLD_WIDE_SPREAD"
-                            action_reason = f"Illiquid book: bid {int(y_bid*100)}¢ / ask {int(y_ask*100)}¢ (spread {int(spread_y*100)}¢ > 10¢)"
-                    elif prob_no_pct >= 60.0 and edge_n >= 4.0 and 0.20 <= n_ask <= max_entry_price:
-                        if is_liquid_n:
-                            action_status = "BUY_NO"
-                            action_reason = f"Conviction {prob_no_pct:.1f}% & Edge +{edge_n:.1f}% meets criteria"
-                        else:
-                            action_status = "HOLD_WIDE_SPREAD"
-                            action_reason = f"Illiquid book: bid {int(n_bid*100)}¢ / ask {int(n_ask*100)}¢ (spread {int(spread_n*100)}¢ > 10¢)"
                     else:
                         best_p = max(prob_yes_pct, prob_no_pct)
                         best_e = max(edge_y, edge_n)
                         best_ask = y_ask if prob_yes_pct >= prob_no_pct else n_ask
-                        if best_p < 60.0:
-                            action_reason = f"Low Conviction ({best_p:.1f}% < 60%)"
+                        if best_p < eff_min_prob_ui:
+                            action_reason = f"Low Conviction ({best_p:.1f}% < {eff_min_prob_ui:.0f}%)"
                         elif best_ask > max_entry_price:
                             action_reason = f"Price above {int(round(max_entry_price*100))}¢ cap ({int(best_ask*100)}¢ > {int(round(max_entry_price*100))}¢)"
                         elif best_ask < 0.20:
                             action_reason = f"Price below 20¢ floor ({int(best_ask*100)}¢ < 20¢)"
                         else:
-                            action_reason = f"Negative Edge ({best_e:+.1f}% < +4.0%)"
+                            action_reason = f"Insufficient Edge ({best_e:+.1f}% < +{eff_min_edge_ui:.1f}%)"
 
-                    multicoin_live_matrix[coin] = {
+                    # Signal hysteresis to prevent 1-second boundary flickering
+                    hypothesis = _signal_hysteresis_mgr.get_hypothesis(
+                        coin=coin,
+                        prob_yes_pct=prob_yes_pct,
+                        prob_no_pct=prob_no_pct,
+                        edge_y=edge_y,
+                        edge_n=edge_n,
+                    )
+
+                    # Kalshi Orderbook Implied Spot Price (K + sigma_eff * Phi^-1(P_mid))
+                    kalshi_mid_y = (y_bid + y_ask) / 2.0 if (y_bid > 0 and y_ask > 0) else (y_ask if y_ask > 0 else 0.0)
+                    kalshi_implied = None
+                    kalshi_diff = None
+                    if 0.02 <= kalshi_mid_y <= 0.98 and sigma_eff > 0 and open_p > 0:
+                        kalshi_implied = round(open_p + inverse_normal_cdf(kalshi_mid_y) * sigma_eff, 2)
+                        kalshi_diff = round(kalshi_implied - spot, 2)
+
+                    # Atomic, immutable snapshot per coin published each cycle
+                    coin_snapshot = {
                         "coin": coin,
                         "ticker": ticker,
                         "spot": spot,
+                        "hl_spot": round(hl_lead_prices.get(coin, 0.0), 2),
+                        "kalshi_implied": kalshi_implied,
+                        "kalshi_diff": kalshi_diff,
                         "open": open_p,
                         "delta": round(delta, 4),
                         "seconds_left": int(seconds_left),
-                        "z_score": round(z, 2),
+                        "z_cf": round(z_cf, 2),
+                        "z_eff": round(z_eff, 2),
+                        "z_score": round(z_eff, 2),
+                        "z_shift": round(z_shift, 4),
+                        "ofi_z": round(ofi_z, 2),
+                        "spot_tfi": round(spot_tfi, 3),
+                        "book_imb": round(book_imb, 3),
+                        "momentum_z": round(momentum_z, 3),
+                        "stale_impulse": _stale_info["stale_impulse"],
+                        "d_spot_5s": _stale_info["d_spot_5s"],
+                        "d_kalshi_5s_cents": _stale_info["d_kalshi_5s_cents"],
+                        "stale_tfi_confirmed": _stale_info["tfi_confirmed"],
+                        "eff_vol_15m": round(eff_vol, 2),
+                        "ts": round(now, 2),
                         "prob_yes_pct": round(prob_yes_pct, 1),
                         "prob_no_pct": round(prob_no_pct, 1),
+                        "mu_settle": round(mu_settle, 2),
+                        "hypothesis": hypothesis,
                         "yes_ask": y_ask,
                         "yes_bid": y_bid,
                         "no_ask": n_ask,
@@ -1000,6 +1435,14 @@ async def multi_coin_production_loop():
                         "equity": multicoin_engine.coin_equities.get(coin, 25.0),
                         "weight": multicoin_engine.coin_weights.get(coin, 0.25)
                     }
+                    multicoin_live_matrix[coin] = dict(coin_snapshot)
+                    if coin in _chart_tick_history and spot > 0:
+                        _chart_tick_history[coin].append([
+                            round(now, 2),
+                            round(spot, 2),
+                            round(hl_lead_prices.get(coin, 0.0), 2),
+                            kalshi_implied,
+                        ])
 
                 # Periodic brain scan log
                 if now - last_heartbeat > 15.0:
@@ -1040,11 +1483,11 @@ async def multi_coin_production_loop():
                 import traceback
                 print(f"[MultiCoinProd] Exception: {e}\n{traceback.format_exc()}")
 
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.25)
 
 @asynccontextmanager
 async def lifespan(app):
-    global startup_reconciliation_report, live_demo_balance
+    global startup_reconciliation_report, live_demo_balance, _shared_http_client, spot_feed
     # Phase 3: Cold-Boot State Reconciliation with Kalshi (prod or demo)
     try:
         startup_reconciliation_report = await live_oms.reconcile_state_on_startup(
@@ -1055,33 +1498,39 @@ async def lifespan(app):
     except Exception as e:
         print(f"[Lifespan] Reconciliation notice: {e}")
 
-    # PORTFOLIO-WIDE baseline (condition 5: confirmed settlements only, never raw OPEN rows)
+    # Start low-latency spot feed (Coinbase/Kraken/Hyperliquid WS)
     try:
-        pstate = init_portfolio_baseline(_portfolio_engine_dbs())
-        print(f"[Lifespan] Portfolio day-start baseline ${pstate.get('day_start_equity')} across {len(pstate.get('per_engine', {}))} engine ledger(s)")
+        spot_feed = get_spot_feed(hl_feed=hl_ws)
+        await spot_feed.start()
+        print(f"[Lifespan] Spot feed started: {spot_feed.get_all_spots()}")
     except Exception as e:
-        print(f"[Lifespan] Portfolio baseline init error: {e}")
+        print(f"[Lifespan] Spot feed start error: {e}")
+
+    # Initialize shared HTTP connection pool
+    _shared_http_client = get_http_client()
+    print("[Lifespan] Shared HTTP connection pool initialized")
 
     # Fetch live balance
-    async with httpx.AsyncClient(timeout=4.0) as client:
-        try:
-            if live_auth.is_configured:
-                headers = live_auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
-                resp = await client.get(f"{KALSHI_REST_URL}/portfolio/balance", headers=headers)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    live_demo_balance["balance"] = data.get("balance", 5000)
-                    live_demo_balance["balance_dollars"] = float(data.get("balance", 5000)) / 100.0
-                    print(f"[Lifespan] Confirmed Live Balance: ${live_demo_balance['balance_dollars']:.2f}")
-        except Exception as e:
-            print(f"[Lifespan] Balance fetch error: {e}")
+    try:
+        if live_auth.is_configured:
+            headers = live_auth.sign_request("GET", "/trade-api/v2/portfolio/balance")
+            resp = await _shared_http_client.get(f"{KALSHI_REST_URL}/portfolio/balance", headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                live_demo_balance["balance"] = data.get("balance", 5000)
+                live_demo_balance["balance_dollars"] = float(data.get("balance", 5000)) / 100.0
+                print(f"[Lifespan] Confirmed Live Balance: ${live_demo_balance['balance_dollars']:.2f}")
+    except Exception as e:
+        print(f"[Lifespan] Balance fetch error: {e}")
 
-    # Initial bootstrap
-    async with httpx.AsyncClient() as client:
-        await metrics_provider.update_subsecond_spot(client)
-        await metrics_provider.update_candles_and_technicals(client)
-        await metrics_provider.update_derivatives_context(client)
-        await scanner.scan_all_btc_markets(client)
+    # Initial bootstrap (reuse shared client)
+    try:
+        await metrics_provider.update_subsecond_spot(_shared_http_client)
+        await metrics_provider.update_candles_and_technicals(_shared_http_client)
+        await metrics_provider.update_derivatives_context(_shared_http_client)
+        await scanner.scan_all_btc_markets(_shared_http_client)
+    except Exception as e:
+        print(f"[Lifespan] Bootstrap error: {e}")
 
     # Initialize Async SQLAlchemy 2.0 models
     try:
@@ -1090,18 +1539,22 @@ async def lifespan(app):
     except Exception as e:
         print(f"[Lifespan] Async DB notice: {e}")
 
-    # Real-time WebSocket broadcast loop (streams every 1s to active UI clients)
+    # Real-time WebSocket broadcast loop (streams at 4 Hz to active UI clients)
     async def ws_tick_broadcast_loop():
+        last_ws_hash = None
         while True:
             try:
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.25)
                 if ws_manager.connection_count > 0:
-                    payload = assemble_portfolio_payload()
-                    await ws_manager.broadcast_json({
-                        "type": "tick_stream",
-                        "timestamp": time.time(),
-                        "data": payload
-                    })
+                    payload = assemble_tick_payload(force=True)
+                    h = _payload_hash(payload)
+                    if h != last_ws_hash:
+                        last_ws_hash = h
+                        await ws_manager.broadcast_json({
+                            "type": "tick_stream",
+                            "timestamp": time.time(),
+                            "data": payload
+                        })
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1140,6 +1593,7 @@ async def lifespan(app):
 
     task_ws = asyncio.create_task(live_ws.connect_and_listen())
     task_hl_ws = asyncio.create_task(hl_ws.connect_and_listen())
+    task_spot_feed = asyncio.create_task(spot_feed.start()) if spot_feed else None
     task1 = asyncio.create_task(fast_spot_loop())
     task2 = asyncio.create_task(full_scan_loop())
     task3 = asyncio.create_task(technicals_loop())
@@ -1155,6 +1609,15 @@ async def lifespan(app):
         hl_ws.stop()
     except Exception:
         pass
+    try:
+        if spot_feed:
+            await spot_feed.stop()
+    except Exception:
+        pass
+    try:
+        await close_http_client()
+    except Exception:
+        pass
     print("[Lifespan] Shutdown initiated: cancelling resting orders (positions left open)...")
     # Cancel all resting orders via OMS, trigger order group for emergency safety.
     # SAFETY GATE (agreed plan, condition 1): NEVER issue real exchange cancels while
@@ -1165,18 +1628,18 @@ async def lifespan(app):
         else:
             group_id = getattr(multicoin_engine, "order_group_id", None)
             cancel_headers = live_auth.sign_request("DELETE", "/trade-api/v2/portfolio/events/orders")
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                await client.delete(f"{KALSHI_REST_URL}/portfolio/events/orders", headers=cancel_headers, params={"exchange_index": 2})
-                print("[Lifespan] Batch cancel-all sent to Kalshi.")
-                if group_id:
-                    trigger_headers = live_auth.sign_request("PUT", f"/trade-api/v2/portfolio/order_groups/{group_id}/trigger")
-                    await client.put(f"{KALSHI_REST_URL}/portfolio/order_groups/{group_id}/trigger", headers=trigger_headers)
-                    print(f"[Lifespan] Order group {group_id} TRIGGERED (blocks new orders until manual reset).")
+            await _shared_http_client.delete(f"{KALSHI_REST_URL}/portfolio/events/orders", headers=cancel_headers, params={"exchange_index": 2})
+            print("[Lifespan] Batch cancel-all sent to Kalshi.")
+            if group_id:
+                trigger_headers = live_auth.sign_request("PUT", f"/trade-api/v2/portfolio/order_groups/{group_id}/trigger")
+                await _shared_http_client.put(f"{KALSHI_REST_URL}/portfolio/order_groups/{group_id}/trigger", headers=trigger_headers)
+                print(f"[Lifespan] Order group {group_id} TRIGGERED (blocks new orders until manual reset).")
     except Exception as e:
         print(f"[Lifespan] Shutdown cancel error: {e}")
     live_ws.stop()
-    for t in (task_ws, task1, task2, task3, task_multicoin, task_reconcile, task_paper_reconcile, task_killwatch, task_ws_broadcast):
-        t.cancel()
+    for t in (task_ws, task_hl_ws, task_spot_feed, task1, task2, task3, task_multicoin, task_reconcile, task_paper_reconcile, task_killwatch, task_ws_broadcast):
+        if t:
+            t.cancel()
         try:
             await asyncio.wait_for(t, timeout=2.0)
         except asyncio.CancelledError:
@@ -1291,22 +1754,28 @@ def assemble_full_payload() -> Dict[str, Any]:
         "timestamp": int(time.time()),
         "metrics": metrics_data,
         "kxbtc15m": scan_data.get("kxbtc15m", {}),
-        "top_ev_opportunities": scan_data.get("top_ev_opportunities", []),
+        "top_ev_opportunities": scan_data.get("top_ev_opportunities", [])[:25],
         "strike_ladders_by_expiry": scan_data.get("strike_ladders_by_expiry", {}),
         "range_brackets": scan_data.get("range_brackets", []),
         "barrier_targets": scan_data.get("barrier_targets", []),
-        "arbitrage_alerts": scan_data.get("arbitrage_alerts", []),
+        "arbitrage_alerts": scan_data.get("arbitrage_alerts", [])[:15],
         "stats": scan_data.get("stats", {}),
         "bot": bot_data,
         "portfolio": assemble_portfolio_payload(),
         "multicoin": multicoin_engine.get_status_dict(),
         "multicoin_matrix": multicoin_live_matrix,
+        "active_brackets": bracket_manager.get_active_tickets() if bracket_manager else [],
+        "bracket_history": bracket_manager.get_history_tickets(limit=15) if bracket_manager else [],
         "multicoin_brain_logs": (multicoin_brain_logs[-20:] if multicoin_brain_logs else []),
         "live_kalshi": live_kalshi_payload
     }
 
-def assemble_tick_payload() -> Dict[str, Any]:
-    """Lightweight 1-second tick payload (~5KB) preventing DOM thrashing and client memory churn."""
+def assemble_tick_payload(force: bool = False) -> Optional[Dict[str, Any]]:
+    """
+    Lightweight 1-second tick payload (~5KB) preventing DOM thrashing and client memory churn.
+    Returns None when nothing changed since last call (change detection via hash).
+    Set force=True to bypass cache (used on first SSE frame).
+    """
     scan_data = scanner.cache
     metrics_data = metrics_provider.get_summary_dict()
     bot_data = paper_bot.get_status_dict()
@@ -1317,7 +1786,7 @@ def assemble_tick_payload() -> Dict[str, Any]:
     sweep_10 = book.calculate_sweep_vwap("YES", 10) if book and book.asks else None
     sweep_25 = book.calculate_sweep_vwap("YES", 25) if book and book.asks else None
 
-    recent_live = live_db.get_recent_trades(limit=20)
+    recent_live = _trades_cache_get()
 
     live_kalshi_payload = {
         "mode": "LIVE_DEMO" if live_auth.is_configured else live_execution_mode,
@@ -1344,42 +1813,101 @@ def assemble_tick_payload() -> Dict[str, Any]:
         "recent_trades": recent_live
     }
 
-    return {
+    # Overlay instantaneous Kalshi WS L2 top-of-book on each 4 Hz tick
+    live_matrix_view = {}
+    for coin_k, snap in multicoin_live_matrix.items():
+        snap_copy = dict(snap)
+        c_ticker = snap_copy.get("ticker", "")
+        c_book = live_ws.get_book(c_ticker) if (live_ws and c_ticker) else None
+        if c_book and not getattr(c_book, "stale", False):
+            wb, _ = c_book.get_best_bid()
+            wa, _ = c_book.get_best_ask()
+            if 0 <= wb < wa <= 100 and (wb > 0 or wa < 100):
+                snap_copy["yes_bid"] = wb / 100.0
+                snap_copy["yes_ask"] = wa / 100.0
+                snap_copy["no_bid"] = (100 - wa) / 100.0
+                snap_copy["no_ask"] = (100 - wb) / 100.0
+                snap_copy["spread_cents"] = int(wa - wb)
+        live_matrix_view[coin_k] = snap_copy
+
+    payload = {
         "timestamp": int(time.time()),
         "metrics": metrics_data,
         "kxbtc15m": scan_data.get("kxbtc15m", {}),
-        "top_ev_opportunities": scan_data.get("top_ev_opportunities", []),
-        "arbitrage_alerts": scan_data.get("arbitrage_alerts", []),
+        "top_ev_opportunities": scan_data.get("top_ev_opportunities", [])[:5],
+        "arbitrage_alerts": scan_data.get("arbitrage_alerts", [])[:5],
         "stats": scan_data.get("stats", {}),
         "bot": bot_data,
+        "portfolio": assemble_portfolio_payload(),
         "multicoin": multicoin_engine.get_status_dict(),
-        "multicoin_matrix": multicoin_live_matrix,
+        "multicoin_matrix": live_matrix_view,
+        "active_brackets": bracket_manager.get_active_tickets() if bracket_manager else [],
+        "bracket_history": bracket_manager.get_history_tickets(limit=15) if bracket_manager else [],
         "multicoin_brain_logs": (multicoin_brain_logs[-20:] if multicoin_brain_logs else []),
         "live_kalshi": live_kalshi_payload
     }
+
+    if not force:
+        h = _payload_hash(payload)
+        if h == _tick_payload_hash:
+            return None  # nothing changed
+        _tick_payload_hash = h
+        _tick_payload_cache.clear()
+        _tick_payload_cache.update(payload)
+
+    return payload
 
 async def get_live_scan(request):
     """Return full instantaneous state as JSON."""
     return JSONResponse(assemble_full_payload())
 
+async def get_chart_history(request):
+    """Return rolling 5-minute tick history [ts, spot, hl_spot] for BTC and ETH."""
+    cutoff = time.time() - 305.0
+    out = {}
+    for coin, dq in _chart_tick_history.items():
+        out[coin] = [pt for pt in list(dq) if pt[0] >= cutoff]
+    return JSONResponse(out)
+
 async def live_stream_sse(request):
     """
     Server-Sent Events (SSE) streaming endpoint.
-    Streams live ticks, probability updates, bot state, and radar changes every 1.0 second.
+    Streams live ticks when data changes. Sends a lightweight data heartbeat
+    every 5s when idle so browsers don't drop the connection.
+    The heavy election/market opportunity data is excluded from the SSE stream
+    (available via /api/scan) to keep the initial payload small.
     """
     async def event_generator():
-        first_tick = True
         try:
+            # First frame: lightweight initial snapshot (no heavy opportunity data)
+            full = assemble_full_payload()
+            # Strip heavy arrays from initial SSE payload
+            full["top_ev_opportunities"] = []
+            full["arbitrage_alerts"] = []
+            yield f"data: {json.dumps(full)}\n\n"
+            last_sse_hash = _payload_hash(full)
+
+            idle_count = 0
             while True:
                 if await request.is_disconnected():
                     break
-                if first_tick:
-                    payload = json.dumps(assemble_full_payload())
-                    first_tick = False
+                payload = assemble_tick_payload(force=True)
+                h = _payload_hash(payload)
+                if h != last_sse_hash:
+                    last_sse_hash = h
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    idle_count = 0
                 else:
-                    payload = json.dumps(assemble_tick_payload())
-                yield f"data: {payload}\n\n"
-                await asyncio.sleep(1.0)
+                    idle_count += 1
+                    if idle_count >= 20:  # Send heartbeat every ~2s if idle
+                        heartbeat = {
+                            "timestamp": int(time.time()),
+                            "heartbeat": True,
+                            "ws_connected": live_ws.is_ws_connected if live_ws else False,
+                        }
+                        yield f"data: {json.dumps(heartbeat)}\n\n"
+                        idle_count = 0
+                await asyncio.sleep(0.1)
         except (asyncio.CancelledError, GeneratorExit, Exception):
             pass
 
@@ -1389,7 +1917,7 @@ async def live_stream_sse(request):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
+            "X-Accel-Buffering": "no",
         }
     )
 
@@ -1495,6 +2023,15 @@ async def serve_dashboard(request):
         return HTMLResponse(content)
     return HTMLResponse("<h1>Loading Bitcoin Kalshi Engine...</h1>")
 
+async def serve_terminal(request):
+    """Serve advanced pro trading terminal HTML interface for BTC & ETH."""
+    template_path = os.path.join(os.path.dirname(__file__), "templates", "terminal.html")
+    if os.path.exists(template_path):
+        with open(template_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        return HTMLResponse(content)
+    return HTMLResponse("<h1>Pro Trading Terminal loading...</h1>")
+
 async def get_safety_status(request):
     """Get Stale-Tick Watchdog and Startup Reconciliation telemetry."""
     return JSONResponse({
@@ -1583,6 +2120,133 @@ async def post_live_cancel_all(request):
             await live_oms.reconciler.cancel_order(oid)
             canceled_ids.append(oid)
     return JSONResponse({"status": "success", "canceled_orders": canceled_ids})
+
+# ------------------------------------------------------------------------------
+# One-Click Manual Trading Execution Layer (Auto TP / SL with OCO)
+# ------------------------------------------------------------------------------
+async def post_trade_bracket(request):
+    """
+    One-click manual trading execution endpoint with precomputed auto TP and SL.
+    Hit Buy -> automatically computes & attaches TP/SL with strict bounds validation,
+    partial fill scaling, and OCO exit management.
+    """
+    try:
+        body = await request.json()
+        ticker = body.get("ticker")
+        if not ticker:
+            return JSONResponse({"status": "error", "message": "ticker is required"}, status_code=400)
+
+        side = body.get("side", "YES").upper()
+        coin = body.get("coin", "BTC").upper()
+        contracts = int(body.get("contracts", 10))
+        entry_price = body.get("entry_price")
+
+        # Resolve entry price from active book if not specified
+        if entry_price is None or float(entry_price) <= 0:
+            book = live_ws.get_book(ticker) if (live_ws and ticker) else None
+            if book:
+                ask_c, _ = book.get_best_ask()
+                if side == "YES":
+                    entry_price = ask_c / 100.0 if ask_c > 0 else 0.35
+                else:
+                    entry_price = (100 - ask_c) / 100.0 if ask_c > 0 else 0.65
+            else:
+                entry_price = 0.35
+
+        tp_pct = body.get("tp_pct")
+        sl_pct = body.get("sl_pct")
+        tp_ticks = body.get("tp_ticks")
+        sl_ticks = body.get("sl_ticks")
+        tp_bps = body.get("tp_bps")
+        sl_bps = body.get("sl_bps")
+        tp_price = body.get("tp_price")
+        sl_price = body.get("sl_price")
+        dry_run = body.get("dry_run", bracket_manager.dry_run)
+
+        ticket = calculate_bracket_ticket(
+            ticker=ticker,
+            side=side,
+            entry_price=float(entry_price),
+            contracts=contracts,
+            coin=coin,
+            tp_pct=float(tp_pct) if tp_pct is not None else None,
+            sl_pct=float(sl_pct) if sl_pct is not None else None,
+            tp_ticks=int(tp_ticks) if tp_ticks is not None else None,
+            sl_ticks=int(sl_ticks) if sl_ticks is not None else None,
+            tp_bps=float(tp_bps) if tp_bps is not None else None,
+            sl_bps=float(sl_bps) if sl_bps is not None else None,
+            tp_price=float(tp_price) if tp_price is not None else None,
+            sl_price=float(sl_price) if sl_price is not None else None,
+            dry_run=bool(dry_run),
+        )
+
+        res_ticket = await bracket_manager.execute_one_click_buy(ticket)
+        multicoin_brain_logs.append({
+            "time": time.strftime("%H:%M:%S", time.localtime()),
+            "coin": coin,
+            "type": "ONE_CLICK_BUY",
+            "text": f"⚡ ONE-CLICK BUY: {ticket.requested_contracts}x {ticket.side} @ {ticket.entry_cents}¢ on {ticket.ticker} | Status: {res_ticket.status} | TP: {res_ticket.tp_cents}¢ | SL: {res_ticket.sl_cents}¢"
+        })
+
+        status_code = 200 if res_ticket.status in ("ACTIVE", "SUBMITTED") else (400 if res_ticket.status == "REJECTED" else 200)
+        return JSONResponse({
+            "status": "success" if res_ticket.status in ("ACTIVE", "SUBMITTED") else res_ticket.status.lower(),
+            "ticket": res_ticket.to_dict()
+        }, status_code=status_code)
+    except Exception as e:
+        logger.error(f"[post_trade_bracket] Error: {e}", exc_info=True)
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+async def get_trade_brackets(request):
+    """Retrieve active and recent bracket order tickets."""
+    return JSONResponse({
+        "active": bracket_manager.get_active_tickets() if bracket_manager else [],
+        "history": bracket_manager.get_history_tickets(limit=50) if bracket_manager else []
+    })
+
+async def post_trade_bracket_cancel(request):
+    """Cancel or manually flatten active bracket order(s)."""
+    try:
+        body = await request.json()
+        ticket_id = body.get("ticket_id")
+        cancel_all = body.get("all", False)
+        if cancel_all:
+            res = bracket_manager.cancel_all_brackets()
+            return JSONResponse({"status": "success", "cancelled_count": len(res)})
+        elif ticket_id:
+            res = bracket_manager.cancel_or_flatten_ticket(ticket_id)
+            if res:
+                return JSONResponse({"status": "success", "ticket": res.to_dict()})
+            return JSONResponse({"status": "not_found", "message": f"Ticket {ticket_id} not active"}, status_code=404)
+        return JSONResponse({"status": "error", "message": "ticket_id or all=true required"}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+async def get_trade_ticket_preview(request):
+    """Calculate and preview precomputed bracket ticket without executing."""
+    params = request.query_params
+    ticker = params.get("ticker", "KXBTC15M-PREVIEW")
+    side = params.get("side", "YES").upper()
+    coin = params.get("coin", "BTC").upper()
+    entry_price = float(params.get("entry_price", 0.35))
+    contracts = int(params.get("contracts", 10))
+    tp_pct = float(params.get("tp_pct", 25.0))
+    sl_pct = float(params.get("sl_pct", 25.0))
+
+    ticket = calculate_bracket_ticket(
+        ticker=ticker,
+        side=side,
+        entry_price=entry_price,
+        contracts=contracts,
+        coin=coin,
+        tp_pct=tp_pct,
+        sl_pct=sl_pct,
+    )
+    is_valid, reason = validate_bracket_ticket(ticket)
+    d = ticket.to_dict()
+    d["is_valid"] = is_valid
+    d["validation_reason"] = reason
+    return JSONResponse(d)
 
 def _is_browser_navigation(request) -> bool:
     accept = request.headers.get("accept", "")
@@ -1735,11 +2399,20 @@ async def post_partition_archive(request):
     )
     return JSONResponse({"status": "success", "archived": res})
 
+async def health_check(request):
+    """Docker healthcheck endpoint."""
+    return JSONResponse({"status": "healthy", "service": "kalshi-bot"})
+
+
 routes = [
+    Route("/health", health_check, methods=["GET"]),
     Route("/", serve_dashboard, methods=["GET"]),
     Route("/dashboard", serve_dashboard, methods=["GET"]),
     Route("/cockpit", serve_dashboard, methods=["GET"]),
+    Route("/terminal", serve_terminal, methods=["GET"]),
+    Route("/pro", serve_terminal, methods=["GET"]),
     Route("/api/scan", get_live_scan, methods=["GET"]),
+    Route("/api/chart/history", get_chart_history, methods=["GET"]),
     Route("/api/stream", live_stream_sse, methods=["GET"]),
     Route("/api/simulate", post_simulate_monte_carlo, methods=["POST"]),
     Route("/api/trigger", trigger_rescan, methods=["POST"]),
@@ -1759,6 +2432,12 @@ routes = [
     Route("/api/live/reconcile", post_live_reconcile, methods=["POST"]),
     Route("/api/live/refresh_balance", post_live_refresh_balance, methods=["POST"]),
     Route("/api/live/cancel_all", post_live_cancel_all, methods=["POST"]),
+
+    # One-Click Manual Trading Execution Layer (Auto TP / SL)
+    Route("/api/trade/bracket", post_trade_bracket, methods=["POST"]),
+    Route("/api/trade/brackets", get_trade_brackets, methods=["GET"]),
+    Route("/api/trade/bracket/cancel", post_trade_bracket_cancel, methods=["POST"]),
+    Route("/api/trade/ticket/preview", get_trade_ticket_preview, methods=["GET"]),
 
     # Multi-Coin Portfolio & Block Audit Synchronization routes
     Route("/api/multicoin/status", get_multicoin_status, methods=["GET"]),
@@ -1797,8 +2476,8 @@ async def websocket_tick_stream(websocket: WebSocket):
     """
     await ws_manager.connect(websocket)
     try:
-        # Send immediate initial portfolio and market snapshot
-        snapshot = assemble_portfolio_payload()
+        # Send immediate initial lightweight tick snapshot (~6KB)
+        snapshot = assemble_tick_payload(force=True)
         await websocket.send_json({"type": "snapshot", "timestamp": time.time(), "data": snapshot})
         while True:
             msg = await websocket.receive_text()

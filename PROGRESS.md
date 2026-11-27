@@ -202,3 +202,11 @@ High-frequency, quantitative 15-minute binary options trading system on Kalshi a
 
 
 
+
+### Phase 9: Entry Gate & Position Sizing Deadlock Forensic Audit (2026-11-23) — COMPLETED
+- [x] Forensic Root Cause Audit across 8,351 recorded Kalshi/Coinbase ticks (`16:39–17:48 EST`) and `MultiCoinPaperEngine`:
+  1. **Position Sizing Deadlock (`app.py:207,211` + `core/multi_coin_trader.py:1200-1205`)**: `max_contracts_ramp_cap = 1` clamped every position size to `1`, which was then unconditionally rejected by `min_contracts_per_trade = 5` (`1 < 5`), silently killing 38 valid signals across 4 consecutive 15m candles (`17:00`, `17:15`, `17:30`, `17:45`) without logging.
+  2. **Event-Driven WS L2 False Quote Staleness (`app.py:1117-1122`)**: `max_quote_age_seconds = 3.0` treated unchanged resting Kalshi `orderbook_delta` books as stale even when `live_ws.is_ws_connected` was `True` and `last_seq` was valid, blocking 967 valid snapshots during quiet orderbook intervals.
+  3. **Truncated Coin Config Loader (`app.py:572`)**: `_coin_configs_loaded` discarded 25 of 28 keys from `coins/*/config.json`.
+  4. **Shared `RegimeDetector` & UI Status Overwrite (`app.py:625, 1281`)**: Isolated `StrategySelector`/`RegimeDetector` per coin, suppressed 20k/hr duplicate `apply_strategy_config` log spam, preserved `gate_block_status` / `last_reject_reason` in cockpit telemetry, and gated 30s live exchange reconciliation on `not live_oms.dry_run`.
+- [x] Verification: `pytest -q core/tests/` — **134 passed, 0 failures** (including `test_contract_ramp_cap_never_deadlocks_min_contracts`). Restarted live server on port `8088`.

@@ -1,0 +1,2049 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kalshi Pro Trading Terminal • BTC & ETH 15M</title>
+    <style>
+        :root {
+            --bg-base: #080c10;
+            --bg-card: #0f141c;
+            --bg-card-hover: #151c27;
+            --border-dim: #1e2633;
+            --border-highlight: #2f3b4f;
+            --text-main: #f1f5f9;
+            --text-dim: #94a3b8;
+            --text-muted: #64748b;
+            --green: #10b981;
+            --green-glow: rgba(16, 185, 129, 0.25);
+            --red: #ef4444;
+            --red-glow: rgba(239, 68, 68, 0.25);
+            --cyan: #06b6d4;
+            --amber: #f59e0b;
+            --purple: #8b5cf6;
+            --mono-font: 'JetBrains Mono', 'SF Mono', Monaco, 'Courier New', monospace;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            font-size: 13px;
+            line-height: 1.4;
+            overflow-x: hidden;
+            padding: 14px 18px;
+        }
+
+        .mono { font-family: var(--mono-font); }
+        .up { color: var(--green) !important; }
+        .down { color: var(--red) !important; }
+        .highlight { color: var(--cyan); }
+        .dim { color: var(--text-muted); }
+
+        /* ── Header Bar ─────────────────────────────────────────── */
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--border-dim);
+            margin-bottom: 14px;
+        }
+        .header-title {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .header-title h1 {
+            font-size: 17px;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+            text-transform: uppercase;
+        }
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+        .badge.mode { background: #1e293b; color: #94a3b8; border: 1px solid #334155; }
+        .badge.armed { background: rgba(16, 185, 129, 0.15); color: var(--green); border: 1px solid var(--green); }
+        .badge.tripped { background: rgba(239, 68, 68, 0.25); color: var(--red); border: 1px solid var(--red); }
+        .badge.ws-ok { background: rgba(16, 185, 129, 0.1); color: var(--green); }
+        .badge.ws-down { background: rgba(239, 68, 68, 0.1); color: var(--red); }
+
+        .header-stats {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+        .stat-item {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+        }
+        .stat-item .label {
+            font-size: 10px;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            letter-spacing: 0.5px;
+        }
+        .stat-item .val {
+            font-size: 14px;
+            font-weight: 700;
+            font-family: var(--mono-font);
+        }
+
+        .header-actions {
+            display: flex;
+            gap: 8px;
+        }
+        button.btn {
+            background: #17202e;
+            border: 1px solid var(--border-dim);
+            color: var(--text-main);
+            padding: 6px 12px;
+            border-radius: 5px;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            font-family: inherit;
+        }
+        button.btn:hover { background: #222f42; border-color: var(--border-highlight); }
+        button.btn-danger { background: rgba(239, 68, 68, 0.2); border-color: #b91c1c; color: #fca5a5; }
+        button.btn-danger:hover { background: rgba(239, 68, 68, 0.35); color: #fff; }
+        button.btn-success { background: rgba(16, 185, 129, 0.2); border-color: #047857; color: #6ee7b7; }
+        button.btn-success:hover { background: rgba(16, 185, 129, 0.35); color: #fff; }
+
+        /* ── Grid Layout ─────────────────────────────────────────── */
+        .cockpit-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-dim);
+            border-radius: 8px;
+            padding: 16px;
+            position: relative;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-dim);
+            padding-bottom: 10px;
+            margin-bottom: 12px;
+        }
+        .card-title {
+            font-size: 15px;
+            font-weight: 800;
+            letter-spacing: -0.2px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .expiry-badge {
+            font-family: var(--mono-font);
+            font-size: 12px;
+            background: #182232;
+            padding: 2px 7px;
+            border-radius: 4px;
+            border: 1px solid var(--border-dim);
+        }
+
+        /* ── Metric Rows ─────────────────────────────────────────── */
+        .metric-row {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+        .metric-cell {
+            background: #141b24;
+            border: 1px solid #1c2635;
+            border-radius: 6px;
+            padding: 9px 10px;
+            display: flex;
+            flex-direction: column;
+        }
+        .metric-cell .lbl {
+            font-size: 10px;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+        .metric-cell .val {
+            font-size: 15px;
+            font-weight: 700;
+            font-family: var(--mono-font);
+        }
+
+        /* ── 60s RTI Settlement Meter ────────────────────────────── */
+        .rti-box {
+            background: #111722;
+            border: 1px solid #1e2838;
+            border-radius: 6px;
+            padding: 12px;
+            margin-bottom: 14px;
+        }
+        .rti-header {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            text-transform: uppercase;
+            font-weight: 700;
+            color: var(--cyan);
+            margin-bottom: 8px;
+        }
+        .rti-progress-track {
+            height: 8px;
+            background: #1b2433;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 8px;
+            position: relative;
+        }
+        .rti-progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #06b6d4, #10b981);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        .rti-stats {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            font-family: var(--mono-font);
+            color: var(--text-dim);
+        }
+
+        /* ── Z-Score & Prob Matrix ───────────────────────────────── */
+        .z-prob-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+        .prob-bar-container {
+            display: flex;
+            height: 24px;
+            border-radius: 4px;
+            overflow: hidden;
+            font-family: var(--mono-font);
+            font-weight: 700;
+            font-size: 11px;
+            line-height: 24px;
+            text-align: center;
+            margin-top: 4px;
+        }
+        .prob-yes-fill { background: rgba(16, 185, 129, 0.8); color: #fff; }
+        .prob-no-fill { background: rgba(239, 68, 68, 0.8); color: #fff; }
+
+        /* ── Book & Sanity Guards ────────────────────────────────── */
+        .book-guards-box {
+            background: #131922;
+            border: 1px solid #1c2635;
+            border-radius: 6px;
+            padding: 10px;
+            font-size: 11px;
+        }
+        .guards-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 6px;
+        }
+        .pill {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+        .pill-pass { background: rgba(16, 185, 129, 0.2); color: var(--green); border: 1px solid var(--green); }
+        .pill-fail { background: rgba(239, 68, 68, 0.2); color: var(--red); border: 1px solid var(--red); }
+        .pill-hold { background: rgba(245, 158, 11, 0.2); color: var(--amber); border: 1px solid var(--amber); }
+
+        /* ── Bottom Section: Positions & Logs ─────────────────────── */
+        .bottom-grid {
+            display: grid;
+            grid-template-columns: 1.2fr 1fr;
+            gap: 16px;
+        }
+        table.tbl {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+        table.tbl th {
+            text-align: left;
+            padding: 7px 8px;
+            font-size: 10px;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border-dim);
+        }
+        table.tbl td {
+            padding: 7px 8px;
+            border-bottom: 1px solid #161d28;
+            font-family: var(--mono-font);
+        }
+        table.tbl tr:hover { background: var(--bg-card-hover); }
+
+        .log-box {
+            background: #090c10;
+            border: 1px solid var(--border-dim);
+            border-radius: 6px;
+            height: 160px;
+            overflow-y: auto;
+            padding: 8px 10px;
+            font-family: var(--mono-font);
+            font-size: 11px;
+            line-height: 1.6;
+        }
+        .log-line {
+            display: flex;
+            gap: 8px;
+            border-bottom: 1px solid #131822;
+            padding: 2px 0;
+        }
+        .log-time { color: var(--text-muted); }
+        .log-text { color: var(--text-main); }
+
+        /* ── Real-Time Live Tick Pulses ────────────────────────────── */
+        @keyframes tickPulseGreen { 0% { background: rgba(52, 211, 153, 0.45); } 100% { background: transparent; } }
+        @keyframes tickPulseRed { 0% { background: rgba(248, 113, 113, 0.45); } 100% { background: transparent; } }
+        .pulse-up { animation: tickPulseGreen 0.6s ease-out; border-radius: 4px; }
+        .pulse-down { animation: tickPulseRed 0.6s ease-out; border-radius: 4px; }
+
+        /* ── One-Click Manual Trading Execution Panel ─────────────── */
+        .manual-trade-box {
+            background: #0d131d;
+            border: 1px solid #1f2b3e;
+            border-radius: 6px;
+            padding: 8px 10px;
+            margin-top: 10px;
+        }
+        .trade-controls-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 11px;
+            margin-bottom: 6px;
+        }
+        .trade-inputs {
+            display: flex;
+            gap: 8px;
+            font-size: 11px;
+            color: var(--text-dim);
+        }
+        .trade-inputs input {
+            width: 44px;
+            background: #161e2c;
+            border: 1px solid var(--border-dim);
+            color: var(--text-main);
+            border-radius: 4px;
+            padding: 2px 4px;
+            font-size: 11px;
+            text-align: center;
+            font-family: var(--mono-font);
+        }
+        .trade-buttons-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+        /* ── Live 10M Trajectory & 5M Forecast Charts ─────────────── */
+        .chart-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 14px;
+            margin-bottom: 14px;
+        }
+        @media (max-width: 1100px) {
+            .chart-grid { grid-template-columns: 1fr; }
+        }
+        .chart-card {
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px 14px;
+            position: relative;
+        }
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+            font-size: 12px;
+        }
+        .chart-legend {
+            display: flex;
+            gap: 10px;
+            font-size: 10px;
+            color: var(--text-dim);
+            flex-wrap: wrap;
+        }
+        .legend-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 4px;
+            vertical-align: middle;
+        }
+        .chart-canvas-wrap {
+            position: relative;
+            width: 100%;
+            height: 210px;
+        }
+        .chart-canvas-wrap canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            cursor: crosshair;
+        }
+        .btn-trade-yes {
+            background: rgba(16, 185, 129, 0.18);
+            border: 1px solid #059669;
+            color: #6ee7b7;
+            padding: 7px 10px;
+            border-radius: 5px;
+            font-weight: 700;
+            font-size: 12px;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 2px;
+            transition: all 0.15s ease;
+        }
+        .btn-trade-yes:hover {
+            background: rgba(16, 185, 129, 0.35);
+            border-color: #10b981;
+        }
+        .btn-trade-no {
+            background: rgba(239, 68, 68, 0.18);
+            border: 1px solid #dc2626;
+            color: #fca5a5;
+            padding: 7px 10px;
+            border-radius: 5px;
+            font-weight: 700;
+            font-size: 12px;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 2px;
+            transition: all 0.15s ease;
+        }
+        .btn-trade-no:hover {
+            background: rgba(239, 68, 68, 0.35);
+            border-color: #ef4444;
+        }
+        .trade-preview {
+            font-size: 10px;
+            font-weight: 500;
+            opacity: 0.9;
+            font-family: var(--mono-font);
+        }
+
+        /* ── View Mode Tabs & Zero-Scroll Focus Mode ──────────────── */
+        .view-tabs {
+            display: inline-flex;
+            background: #0d131d;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 2px;
+            gap: 2px;
+            margin-right: 6px;
+        }
+        .view-tab {
+            background: transparent;
+            border: none;
+            color: var(--text-dim);
+            font-size: 11px;
+            font-weight: 700;
+            padding: 4px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        .view-tab.active {
+            background: rgba(56, 189, 248, 0.2);
+            color: #38bdf8;
+        }
+        body.focus-btc .workspace-grid,
+        body.focus-eth .workspace-grid {
+            display: grid;
+            grid-template-columns: 1.3fr 1fr;
+            gap: 14px;
+            align-items: start;
+        }
+        body.focus-btc .chart-grid,
+        body.focus-eth .chart-grid,
+        body.focus-btc .cockpit-grid,
+        body.focus-eth .cockpit-grid {
+            grid-template-columns: 1fr;
+            margin-bottom: 0;
+        }
+        body.focus-btc #chart-card-eth,
+        body.focus-btc #card-eth,
+        body.focus-eth #chart-card-btc,
+        body.focus-eth #card-btc {
+            display: none;
+        }
+        body.focus-btc .chart-canvas-wrap,
+        body.focus-eth .chart-canvas-wrap {
+            height: 360px;
+        }
+
+        /* ── Hero Dislocation Banner ──────────────────────────────── */
+        .hero-banner {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #0d131d;
+            border: 1px solid #1f2b3e;
+            border-radius: 6px;
+            padding: 8px 12px;
+            margin-bottom: 10px;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .hero-delta {
+            font-family: var(--mono-font);
+            font-size: 15px;
+            font-weight: 800;
+        }
+        .hero-lag-pill {
+            font-family: var(--mono-font);
+            font-size: 11px;
+            font-weight: 700;
+            padding: 3px 8px;
+            border-radius: 4px;
+            background: rgba(244, 114, 182, 0.14);
+            border: 1px solid rgba(244, 114, 182, 0.35);
+            color: #f472b6;
+        }
+        .hero-lag-pill.lag-hot {
+            background: rgba(16, 185, 129, 0.18);
+            border-color: #10b981;
+            color: #6ee7b7;
+        }
+
+        /* ── 15M Candle Window Timeline Bar ───────────────────────── */
+        .candle-timeline {
+            margin-bottom: 10px;
+        }
+        .timeline-meta {
+            display: flex;
+            justify-content: space-between;
+            font-size: 10px;
+            color: var(--text-dim);
+            margin-bottom: 4px;
+            font-family: var(--mono-font);
+        }
+        .timeline-track {
+            position: relative;
+            height: 8px;
+            border-radius: 4px;
+            background: #161e2c;
+            overflow: hidden;
+            display: flex;
+        }
+        .tl-zone-early { width: 26.7%; background: rgba(139, 155, 180, 0.2); }
+        .tl-zone-entry { width: 63.3%; background: rgba(16, 185, 129, 0.28); }
+        .tl-zone-lock  { width: 3.3%;  background: rgba(245, 158, 11, 0.35); }
+        .tl-zone-rti   { width: 6.7%;  background: rgba(56, 189, 248, 0.45); }
+        .tl-cursor {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background: #ffffff;
+            box-shadow: 0 0 6px #ffffff;
+            transition: left 0.25s linear;
+        }
+
+        /* ── Compact Alpha Summary & Collapsible Details ──────────── */
+        .alpha-summary-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(22, 30, 44, 0.75);
+            border: 1px solid var(--border-dim);
+            border-radius: 6px;
+            padding: 6px 10px;
+            margin-bottom: 8px;
+            font-size: 11px;
+            font-family: var(--mono-font);
+        }
+        .btn-details-toggle {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            font-size: 10px;
+            padding: 2px 7px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .btn-details-toggle:hover {
+            color: var(--text-main);
+            border-color: #38bdf8;
+        }
+        .quant-details {
+            display: none;
+            margin-bottom: 8px;
+        }
+        .quant-details.open {
+            display: block;
+        }
+
+        /* ── Quick-Size & TP/SL Preset Chips ──────────────────────── */
+        .preset-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 7px;
+            flex-wrap: wrap;
+        }
+        .chip-group {
+            display: inline-flex;
+            gap: 4px;
+        }
+        .chip-btn {
+            background: #161e2c;
+            border: 1px solid var(--border-dim);
+            color: var(--text-dim);
+            font-size: 10px;
+            font-family: var(--mono-font);
+            font-weight: 600;
+            padding: 2px 7px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .chip-btn:hover, .chip-btn.active {
+            background: rgba(56, 189, 248, 0.18);
+            border-color: #38bdf8;
+            color: #38bdf8;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Header Navigation & Status -->
+    <header>
+        <div class="header-title">
+            <h1>⚡ Kalshi Pro Terminal</h1>
+            <span class="badge mode" id="term-mode">PAPER MODE</span>
+            <span class="badge armed" id="term-ks-badge">KILL SWITCH: ARMED</span>
+            <span class="badge ws-ok" id="term-ws-badge">WS FEED: CONNECTED</span>
+        </div>
+
+        <div class="header-stats">
+            <div class="stat-item">
+                <span class="label">Total Equity</span>
+                <span class="val highlight" id="term-equity">$100.00</span>
+            </div>
+            <div class="stat-item">
+                <span class="label">Realized PnL</span>
+                <span class="val up" id="term-pnl">+$0.00</span>
+            </div>
+            <div class="stat-item">
+                <span class="label">Win Rate</span>
+                <span class="val" id="term-winrate">0.0% (0)</span>
+            </div>
+            <div class="stat-item">
+                <span class="label">Active Margin</span>
+                <span class="val" id="term-cash">$100.00 cash</span>
+            </div>
+        </div>
+
+        <div class="header-actions">
+            <div class="view-tabs" role="group" aria-label="View Mode">
+                <button class="view-tab active" id="tab-split" onclick="setFocusMode('SPLIT')">SPLIT</button>
+                <button class="view-tab" id="tab-btc" onclick="setFocusMode('BTC')">₿ BTC</button>
+                <button class="view-tab" id="tab-eth" onclick="setFocusMode('ETH')">Ξ ETH</button>
+            </div>
+            <a href="/dashboard" style="color: var(--text-dim); text-decoration: none; font-size: 12px; margin-right: 4px; border: 1px solid var(--border); padding: 5px 10px; border-radius: 4px; font-weight: 500;">📊 Cockpit</a>
+            <button class="btn btn-danger" onclick="tripKillSwitch()">TRIP KILL</button>
+            <button class="btn btn-success" onclick="resetKillSwitch()">RESET</button>
+            <button class="btn btn-danger" onclick="cancelAllOrders()">PANIC CLOSE</button>
+        </div>
+    </header>
+
+    <div class="workspace-grid">
+    <!-- Live 10M Rolling Trajectory (-5m History -> NOW -> +5m Forecast Cone) -->
+    <div class="chart-grid">
+        <div class="chart-card" id="chart-card-btc">
+            <div class="chart-header">
+                <div><strong style="color:#f7931a;">₿ BTC</strong> <span class="dim">5m History ➔ 5m Forecast</span></div>
+                <div class="chart-legend">
+                    <span><i class="legend-dot" style="background:#38bdf8;"></i>CF Spot</span>
+                    <span><i class="legend-dot" style="background:#f472b6;"></i>Kalshi Implied</span>
+                    <span><i class="legend-dot" style="background:#a78bfa;"></i>HL Perp</span>
+                    <span><i class="legend-dot" style="background:#fbbf24;"></i>15m Strike</span>
+                    <span><i class="legend-dot" style="background:#10b981;"></i>+5m Pred (±1σ/2σ)</span>
+                </div>
+            </div>
+            <div class="chart-canvas-wrap">
+                <canvas id="chart-btc"></canvas>
+            </div>
+        </div>
+        <div class="chart-card" id="chart-card-eth">
+            <div class="chart-header">
+                <div><strong style="color:#627eea;">Ξ ETH</strong> <span class="dim">5m History ➔ 5m Forecast</span></div>
+                <div class="chart-legend">
+                    <span><i class="legend-dot" style="background:#38bdf8;"></i>CF Spot</span>
+                    <span><i class="legend-dot" style="background:#f472b6;"></i>Kalshi Implied</span>
+                    <span><i class="legend-dot" style="background:#a78bfa;"></i>HL Perp</span>
+                    <span><i class="legend-dot" style="background:#fbbf24;"></i>15m Strike</span>
+                    <span><i class="legend-dot" style="background:#10b981;"></i>+5m Pred (±1σ/2σ)</span>
+                </div>
+            </div>
+            <div class="chart-canvas-wrap">
+                <canvas id="chart-eth"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cockpit Grid: BTC & ETH Side-by-Side -->
+    <div class="cockpit-grid">
+        
+        <!-- BTC Card -->
+        <div class="card" id="card-btc">
+            <div class="card-header">
+                <div class="card-title">
+                    <span style="color: #f7931a;">₿</span> BTC / USD 15M
+                    <span class="mono dim" id="btc-ticker">KXBTC15M</span>
+                </div>
+                <div>
+                    <span class="expiry-badge" id="btc-exp-badge">EXP: --s</span>
+                    <span class="badge" id="btc-action-badge">HOLD</span>
+                </div>
+            </div>
+
+            <!-- Hero Dislocation & Action Banner -->
+            <div class="hero-banner">
+                <div>
+                    <div class="lbl" style="font-size: 9px; color: var(--text-dim);">STRIKE POSITION</div>
+                    <div class="hero-delta" id="btc-hero-delta">--</div>
+                </div>
+                <div class="hero-lag-pill" id="btc-lag-pill">KALSHI: --</div>
+            </div>
+
+            <!-- 15M Candle Window Timeline Bar -->
+            <div class="candle-timeline">
+                <div class="timeline-meta">
+                    <span id="btc-tl-status">WAITING FOR CANDLE...</span>
+                    <span>900s ➔ 0s</span>
+                </div>
+                <div class="timeline-track">
+                    <div class="tl-zone-early" title="Early Warmup (900s–660s)"></div>
+                    <div class="tl-zone-entry" title="Active Entry Sweet Spot (660s–90s)"></div>
+                    <div class="tl-zone-lock" title="Cutoff Lockout (90s–60s)"></div>
+                    <div class="tl-zone-rti" title="60s RTI Settlement Window (60s–0s)"></div>
+                    <div class="tl-cursor" id="btc-tl-cursor" style="left: 0%;"></div>
+                </div>
+            </div>
+
+            <!-- Core Price & Dislocation Row -->
+            <div class="metric-row">
+                <div class="metric-cell">
+                    <span class="lbl">CF Spot</span>
+                    <span class="val" id="btc-spot">--</span>
+                </div>
+                <div class="metric-cell">
+                    <span class="lbl">15m Strike</span>
+                    <span class="val" id="btc-strike">--</span>
+                </div>
+                <div class="metric-cell">
+                    <span class="lbl">Kalshi Implied</span>
+                    <span class="val" style="color:#f472b6;" id="btc-kalshi-implied">--</span>
+                </div>
+                <div class="metric-cell">
+                    <span class="lbl">Kalshi vs Spot</span>
+                    <span class="val" id="btc-kalshi-diff">--</span>
+                </div>
+            </div>
+
+            <!-- Model Probability & Order Book Edge -->
+            <div class="z-prob-grid" style="margin-bottom: 8px;">
+                <div class="metric-cell">
+                    <div class="lbl">Model Fair Odds (<span id="btc-hypothesis">NEUTRAL_HOLD</span>)</div>
+                    <div class="prob-bar-container" style="margin-top: 6px;">
+                        <div class="prob-yes-fill" id="btc-prob-yes-fill" style="width: 50%;">Y 50%</div>
+                        <div class="prob-no-fill" id="btc-prob-no-fill" style="width: 50%;">N 50%</div>
+                    </div>
+                </div>
+                <div class="metric-cell">
+                    <div class="lbl">Kalshi Book (<span id="btc-spread">--</span> spd) & Net Edge</div>
+                    <div style="display:flex; justify-content:space-between; font-size: 12px; margin-top: 4px; font-family: var(--mono-font);">
+                        <span>YES <b class="up" id="btc-yes-quote">-- / --</b></span>
+                        <span>NO <b class="down" id="btc-no-quote">-- / --</b></span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; font-size: 10px; margin-top: 3px; font-family: var(--mono-font);" class="dim">
+                        <span>Net Edge:</span>
+                        <span>Y <b id="btc-edge-y">--</b> | N <b id="btc-edge-n">--</b></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- One-Click Manual Trading Execution Panel with Quick Presets -->
+            <div class="manual-trade-box" style="margin-top: 0; margin-bottom: 10px;">
+                <div class="trade-controls-header">
+                    <span style="font-weight: 700; color: #38bdf8;">⚡ ONE-CLICK BUY (AUTO TP/SL)</span>
+                    <div class="trade-inputs">
+                        <label>Qty: <input type="number" id="btc-trade-qty" value="10" min="1" max="100" oninput="updateBracketPreviews()"></label>
+                        <label>TP%: <input type="number" id="btc-trade-tp" value="25" min="5" max="200" oninput="updateBracketPreviews()"></label>
+                        <label>SL%: <input type="number" id="btc-trade-sl" value="20" min="5" max="80" oninput="updateBracketPreviews()"></label>
+                    </div>
+                </div>
+                <div class="preset-row">
+                    <div class="chip-group">
+                        <button class="chip-btn" onclick="setQtyPreset('btc', 5, this)">5x</button>
+                        <button class="chip-btn active" onclick="setQtyPreset('btc', 10, this)">10x</button>
+                        <button class="chip-btn" onclick="setQtyPreset('btc', 25, this)">25x</button>
+                        <button class="chip-btn" onclick="setQtyPreset('btc', 50, this)">50x</button>
+                    </div>
+                    <div class="chip-group">
+                        <button class="chip-btn" onclick="setTpSlPreset('btc', 15, 15, this)">Scalp 15/15</button>
+                        <button class="chip-btn active" onclick="setTpSlPreset('btc', 25, 20, this)">Bal 25/20</button>
+                        <button class="chip-btn" onclick="setTpSlPreset('btc', 50, 25, this)">Run 50/25</button>
+                    </div>
+                </div>
+                <div class="trade-buttons-row">
+                    <button class="btn btn-trade-yes" onclick="executeBracket('BTC', 'YES')">
+                        BUY YES <span class="trade-preview" id="btc-buy-yes-preview">Ask: --¢ ➔ TP: --¢ | SL: --¢</span>
+                    </button>
+                    <button class="btn btn-trade-no" onclick="executeBracket('BTC', 'NO')">
+                        BUY NO <span class="trade-preview" id="btc-buy-no-preview">Ask: --¢ ➔ TP: --¢ | SL: --¢</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Compact Early Alpha Summary Pill + Collapsible Quant Internals -->
+            <div class="alpha-summary-bar">
+                <span id="btc-alpha-summary">Early Alpha: --</span>
+                <button class="btn-details-toggle" id="btc-details-btn" onclick="toggleQuantDetails('btc')">Details ▾</button>
+            </div>
+            <div class="quant-details" id="btc-quant-details">
+                <div class="metric-row" style="margin-bottom: 8px;">
+                    <div class="metric-cell"><span class="lbl">Spot Delta</span><span class="val" id="btc-delta">--</span></div>
+                    <div class="metric-cell"><span class="lbl">Effective Vol</span><span class="val highlight" id="btc-vol">--</span></div>
+                    <div class="metric-cell"><span class="lbl">HL Perp Lead</span><span class="val" style="color:#a78bfa;" id="btc-hl-spot">--</span></div>
+                    <div class="metric-cell"><span class="lbl">Z_cf / Z_eff</span><span class="val"><span id="btc-z-cf">--</span> / <b class="highlight" id="btc-z-eff">--</b></span></div>
+                </div>
+                <div class="metric-row" style="margin-bottom: 8px;">
+                    <div class="metric-cell"><span class="lbl">Spot TFI (30s)</span><span class="val" id="btc-spot-tfi">--</span></div>
+                    <div class="metric-cell"><span class="lbl">L1 Book Skew</span><span class="val" id="btc-book-imb">--</span></div>
+                    <div class="metric-cell"><span class="lbl">3m Mom Z</span><span class="val" id="btc-mom-z">--</span></div>
+                    <div class="metric-cell"><span class="lbl">Alpha Z-Shift</span><span class="val" id="btc-alpha-z">--</span></div>
+                </div>
+                <div class="rti-box" style="margin-bottom: 8px;">
+                    <div class="rti-header">
+                        <span>60s RTI Settlement Engine (BRTI)</span>
+                        <span id="btc-rti-phase">PRE-WINDOW</span>
+                    </div>
+                    <div class="rti-progress-track"><div class="rti-progress-fill" id="btc-rti-bar"></div></div>
+                    <div class="rti-stats">
+                        <span>Projected μ_settle: <b class="highlight" id="btc-mu-settle">--</b></span>
+                        <span>Window: <span id="btc-rti-window">60s / 60s</span></span>
+                        <span>CF Blend: <span id="btc-rti-blend">0% elapsed</span></span>
+                    </div>
+                </div>
+                <div class="book-guards-box">
+                    <div class="guards-row dim">
+                        <span>40c Batch Fee: Y <span id="btc-fee-y">--</span> / N <span id="btc-fee-n">--</span></span>
+                        <span id="btc-action-reason">--</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ETH Card -->
+        <div class="card" id="card-eth">
+            <div class="card-header">
+                <div class="card-title">
+                    <span style="color: #627eea;">Ξ</span> ETH / USD 15M
+                    <span class="mono dim" id="eth-ticker">KXETH15M</span>
+                </div>
+                <div>
+                    <span class="expiry-badge" id="eth-exp-badge">EXP: --s</span>
+                    <span class="badge" id="eth-action-badge">HOLD</span>
+                </div>
+            </div>
+
+            <!-- Hero Dislocation & Action Banner -->
+            <div class="hero-banner">
+                <div>
+                    <div class="lbl" style="font-size: 9px; color: var(--text-dim);">STRIKE POSITION</div>
+                    <div class="hero-delta" id="eth-hero-delta">--</div>
+                </div>
+                <div class="hero-lag-pill" id="eth-lag-pill">KALSHI: --</div>
+            </div>
+
+            <!-- 15M Candle Window Timeline Bar -->
+            <div class="candle-timeline">
+                <div class="timeline-meta">
+                    <span id="eth-tl-status">WAITING FOR CANDLE...</span>
+                    <span>900s ➔ 0s</span>
+                </div>
+                <div class="timeline-track">
+                    <div class="tl-zone-early" title="Early Warmup (900s–660s)"></div>
+                    <div class="tl-zone-entry" title="Active Entry Sweet Spot (660s–90s)"></div>
+                    <div class="tl-zone-lock" title="Cutoff Lockout (90s–60s)"></div>
+                    <div class="tl-zone-rti" title="60s RTI Settlement Window (60s–0s)"></div>
+                    <div class="tl-cursor" id="eth-tl-cursor" style="left: 0%;"></div>
+                </div>
+            </div>
+
+            <!-- Core Price & Dislocation Row -->
+            <div class="metric-row">
+                <div class="metric-cell">
+                    <span class="lbl">CF Spot</span>
+                    <span class="val" id="eth-spot">--</span>
+                </div>
+                <div class="metric-cell">
+                    <span class="lbl">15m Strike</span>
+                    <span class="val" id="eth-strike">--</span>
+                </div>
+                <div class="metric-cell">
+                    <span class="lbl">Kalshi Implied</span>
+                    <span class="val" style="color:#f472b6;" id="eth-kalshi-implied">--</span>
+                </div>
+                <div class="metric-cell">
+                    <span class="lbl">Kalshi vs Spot</span>
+                    <span class="val" id="eth-kalshi-diff">--</span>
+                </div>
+            </div>
+
+            <!-- Model Probability & Order Book Edge -->
+            <div class="z-prob-grid" style="margin-bottom: 8px;">
+                <div class="metric-cell">
+                    <div class="lbl">Model Fair Odds (<span id="eth-hypothesis">NEUTRAL_HOLD</span>)</div>
+                    <div class="prob-bar-container" style="margin-top: 6px;">
+                        <div class="prob-yes-fill" id="eth-prob-yes-fill" style="width: 50%;">Y 50%</div>
+                        <div class="prob-no-fill" id="eth-prob-no-fill" style="width: 50%;">N 50%</div>
+                    </div>
+                </div>
+                <div class="metric-cell">
+                    <div class="lbl">Kalshi Book (<span id="eth-spread">--</span> spd) & Net Edge</div>
+                    <div style="display:flex; justify-content:space-between; font-size: 12px; margin-top: 4px; font-family: var(--mono-font);">
+                        <span>YES <b class="up" id="eth-yes-quote">-- / --</b></span>
+                        <span>NO <b class="down" id="eth-no-quote">-- / --</b></span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; font-size: 10px; margin-top: 3px; font-family: var(--mono-font);" class="dim">
+                        <span>Net Edge:</span>
+                        <span>Y <b id="eth-edge-y">--</b> | N <b id="eth-edge-n">--</b></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- One-Click Manual Trading Execution Panel with Quick Presets -->
+            <div class="manual-trade-box" style="margin-top: 0; margin-bottom: 10px;">
+                <div class="trade-controls-header">
+                    <span style="font-weight: 700; color: #38bdf8;">⚡ ONE-CLICK BUY (AUTO TP/SL)</span>
+                    <div class="trade-inputs">
+                        <label>Qty: <input type="number" id="eth-trade-qty" value="10" min="1" max="100" oninput="updateBracketPreviews()"></label>
+                        <label>TP%: <input type="number" id="eth-trade-tp" value="25" min="5" max="200" oninput="updateBracketPreviews()"></label>
+                        <label>SL%: <input type="number" id="eth-trade-sl" value="20" min="5" max="80" oninput="updateBracketPreviews()"></label>
+                    </div>
+                </div>
+                <div class="preset-row">
+                    <div class="chip-group">
+                        <button class="chip-btn" onclick="setQtyPreset('eth', 5, this)">5x</button>
+                        <button class="chip-btn active" onclick="setQtyPreset('eth', 10, this)">10x</button>
+                        <button class="chip-btn" onclick="setQtyPreset('eth', 25, this)">25x</button>
+                        <button class="chip-btn" onclick="setQtyPreset('eth', 50, this)">50x</button>
+                    </div>
+                    <div class="chip-group">
+                        <button class="chip-btn" onclick="setTpSlPreset('eth', 15, 15, this)">Scalp 15/15</button>
+                        <button class="chip-btn active" onclick="setTpSlPreset('eth', 25, 20, this)">Bal 25/20</button>
+                        <button class="chip-btn" onclick="setTpSlPreset('eth', 50, 25, this)">Run 50/25</button>
+                    </div>
+                </div>
+                <div class="trade-buttons-row">
+                    <button class="btn btn-trade-yes" onclick="executeBracket('ETH', 'YES')">
+                        BUY YES <span class="trade-preview" id="eth-buy-yes-preview">Ask: --¢ ➔ TP: --¢ | SL: --¢</span>
+                    </button>
+                    <button class="btn btn-trade-no" onclick="executeBracket('ETH', 'NO')">
+                        BUY NO <span class="trade-preview" id="eth-buy-no-preview">Ask: --¢ ➔ TP: --¢ | SL: --¢</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Compact Early Alpha Summary Pill + Collapsible Quant Internals -->
+            <div class="alpha-summary-bar">
+                <span id="eth-alpha-summary">Early Alpha: --</span>
+                <button class="btn-details-toggle" id="eth-details-btn" onclick="toggleQuantDetails('eth')">Details ▾</button>
+            </div>
+            <div class="quant-details" id="eth-quant-details">
+                <div class="metric-row" style="margin-bottom: 8px;">
+                    <div class="metric-cell"><span class="lbl">Spot Delta</span><span class="val" id="eth-delta">--</span></div>
+                    <div class="metric-cell"><span class="lbl">Effective Vol</span><span class="val highlight" id="eth-vol">--</span></div>
+                    <div class="metric-cell"><span class="lbl">HL Perp Lead</span><span class="val" style="color:#a78bfa;" id="eth-hl-spot">--</span></div>
+                    <div class="metric-cell"><span class="lbl">Z_cf / Z_eff</span><span class="val"><span id="eth-z-cf">--</span> / <b class="highlight" id="eth-z-eff">--</b></span></div>
+                </div>
+                <div class="metric-row" style="margin-bottom: 8px;">
+                    <div class="metric-cell"><span class="lbl">Spot TFI (30s)</span><span class="val" id="eth-spot-tfi">--</span></div>
+                    <div class="metric-cell"><span class="lbl">L1 Book Skew</span><span class="val" id="eth-book-imb">--</span></div>
+                    <div class="metric-cell"><span class="lbl">3m Mom Z</span><span class="val" id="eth-mom-z">--</span></div>
+                    <div class="metric-cell"><span class="lbl">Alpha Z-Shift</span><span class="val" id="eth-alpha-z">--</span></div>
+                </div>
+                <div class="rti-box" style="margin-bottom: 8px;">
+                    <div class="rti-header">
+                        <span>60s RTI Settlement Engine (ETHUSD_RTI)</span>
+                        <span id="eth-rti-phase">PRE-WINDOW</span>
+                    </div>
+                    <div class="rti-progress-track"><div class="rti-progress-fill" id="eth-rti-bar"></div></div>
+                    <div class="rti-stats">
+                        <span>Projected μ_settle: <b class="highlight" id="eth-mu-settle">--</b></span>
+                        <span>Window: <span id="eth-rti-window">60s / 60s</span></span>
+                        <span>CF Blend: <span id="eth-rti-blend">0% elapsed</span></span>
+                    </div>
+                </div>
+                <div class="book-guards-box">
+                    <div class="guards-row dim">
+                        <span>40c Batch Fee: Y <span id="eth-fee-y">--</span> / N <span id="eth-fee-n">--</span></span>
+                        <span id="eth-action-reason">--</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+    </div> <!-- end workspace-grid -->
+
+    <!-- Bottom Panels: Active Positions & Live Event Log -->
+    <div class="bottom-grid">
+        
+        <!-- Positions Panel -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">📊 Active Risk Positions</span>
+            </div>
+            <table class="tbl">
+                <thead>
+                    <tr>
+                        <th>Asset / Ticket</th>
+                        <th>Side</th>
+                        <th>Contracts</th>
+                        <th>Entry</th>
+                        <th>Auto TP</th>
+                        <th>Auto SL</th>
+                        <th>Status</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="positions-tbody">
+                    <tr><td colspan="7" class="dim" style="text-align: center; padding: 16px;">No open positions</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Event Log Panel -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">📜 Real-Time Prediction & Execution Logs</span>
+            </div>
+            <div class="log-box" id="terminal-logs">
+                <div class="dim">Connecting to event stream...</div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Client-Side Real-Time Streaming Script -->
+    <script>
+        function num(v) {
+            if (v === null || v === undefined || v === '') return null;
+            const n = parseFloat(v);
+            return isNaN(n) ? null : n;
+        }
+
+        function fmtMoney(v) {
+            const n = num(v);
+            if (n === null) return '--';
+            return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2);
+        }
+
+        function fmtCents(v) {
+            const n = num(v);
+            if (n === null) return '--';
+            return (n * 100).toFixed(1) + '¢';
+        }
+
+        const lastSpots = { BTC: null, ETH: null };
+
+        function updateElement(id, text, className, flash) {
+            const el = document.getElementById(id);
+            if (el) {
+                if (text !== undefined && el.textContent !== text) {
+                    el.textContent = text;
+                    if (flash) {
+                        el.classList.remove('pulse-up', 'pulse-down');
+                        void el.offsetWidth; // trigger reflow to replay animation
+                        el.classList.add(flash);
+                    }
+                }
+                if (className !== undefined && el.className !== className) {
+                    el.className = className;
+                }
+            }
+        }
+
+        function updateCoinCard(coin, m) {
+            const c = coin.toLowerCase();
+            if (!m) return;
+
+            const spot = num(m.spot);
+            const open_p = num(m.open);
+            const delta = num(m.delta);
+            const sec_left = num(m.seconds_left);
+            const mu_settle = num(m.mu_settle);
+            const z_cf = num(m.z_cf);
+            const z_eff = num(m.z_eff || m.z_score);
+            const prob_y = num(m.prob_yes_pct);
+            const prob_n = num(m.prob_no_pct);
+            const y_ask = num(m.yes_ask);
+            const y_bid = num(m.yes_bid);
+            const n_ask = num(m.no_ask) !== null ? num(m.no_ask) : (y_bid !== null ? (1.0 - y_bid) : null);
+            const n_bid = num(m.no_bid) !== null ? num(m.no_bid) : (y_ask !== null ? (1.0 - y_ask) : null);
+            const spread_c = num(m.spread_cents);
+            const fee_y = num(m.fee_y);
+            const fee_n = num(m.fee_n);
+            const edge_y = num(m.edge_y);
+            const edge_n = num(m.edge_n);
+            const hypo = m.hypothesis || 'NEUTRAL_HOLD';
+            const action = m.action || 'HOLD';
+            const reason = m.action_reason || '';
+
+            updateElement(`${c}-ticker`, m.ticker || `KX${coin}15M`);
+            updateElement(`${c}-exp-badge`, `EXP: ${sec_left !== null ? sec_left : '--'}s`);
+            
+            // Action badge
+            let actionClass = 'badge mode';
+            if (action.includes('BUY')) actionClass = 'badge armed';
+            else if (action.includes('IN_POSITION')) actionClass = 'badge mode';
+            updateElement(`${c}-action-badge`, action, actionClass);
+
+            // Real-time spot price with directional micro-pulse animation
+            let spotFlash = null;
+            if (spot !== null) {
+                const prev = lastSpots[coin];
+                if (prev !== null) {
+                    if (spot > prev) spotFlash = 'pulse-up';
+                    else if (spot < prev) spotFlash = 'pulse-down';
+                }
+                lastSpots[coin] = spot;
+            }
+            updateElement(`${c}-spot`, spot !== null ? spot.toLocaleString('en-US', {minimumFractionDigits: 2}) : '--', undefined, spotFlash);
+            updateElement(`${c}-strike`, open_p !== null ? open_p.toLocaleString('en-US', {minimumFractionDigits: 2}) : '--');
+            
+            const deltaStr = delta !== null ? (delta >= 0 ? `+${delta.toFixed(2)}` : delta.toFixed(2)) : '--';
+            updateElement(`${c}-delta`, deltaStr, `val ${delta >= 0 ? 'up' : 'down'}`);
+
+            const effVol = num(m.eff_vol_15m);
+            updateElement(`${c}-vol`, effVol !== null ? `$${effVol.toFixed(1)}` : '--');
+
+            const kImp = num(m.kalshi_implied);
+            const kDiff = num(m.kalshi_diff);
+            const hlSpot = num(m.hl_spot);
+            updateElement(`${c}-kalshi-implied`, kImp !== null ? kImp.toLocaleString('en-US', {minimumFractionDigits: 2}) : 'EXTREME');
+            if (kDiff !== null) {
+                const diffStr = (kDiff >= 0 ? '+$' : '-$') + Math.abs(kDiff).toFixed(2);
+                updateElement(`${c}-kalshi-diff`, diffStr, `val ${kDiff >= 0 ? 'up' : 'down'}`);
+            } else {
+                updateElement(`${c}-kalshi-diff`, '--', 'val dim');
+            }
+            updateElement(`${c}-hl-spot`, (hlSpot !== null && hlSpot > 0) ? hlSpot.toLocaleString('en-US', {minimumFractionDigits: 2}) : '--');
+
+            const sTfi = num(m.spot_tfi);
+            const bImb = num(m.book_imb);
+            const momZ = num(m.momentum_z);
+            const aZ = num(m.z_shift);
+            updateElement(`${c}-spot-tfi`, sTfi !== null ? `${sTfi >= 0 ? '+' : ''}${(sTfi * 100).toFixed(0)}%` : '--', `val ${sTfi > 0.1 ? 'up' : (sTfi < -0.1 ? 'down' : 'dim')}`);
+            updateElement(`${c}-book-imb`, bImb !== null ? `${bImb >= 0 ? '+' : ''}${(bImb * 100).toFixed(0)}%` : '--', `val ${bImb > 0.1 ? 'up' : (bImb < -0.1 ? 'down' : 'dim')}`);
+            updateElement(`${c}-mom-z`, momZ !== null ? `${momZ >= 0 ? '+' : ''}${momZ.toFixed(2)}` : '--', `val ${momZ > 0.15 ? 'up' : (momZ < -0.15 ? 'down' : 'dim')}`);
+            updateElement(`${c}-alpha-z`, aZ !== null ? `${aZ >= 0 ? '+' : ''}${aZ.toFixed(3)}` : '--', `val ${aZ > 0.03 ? 'up' : (aZ < -0.03 ? 'down' : 'dim')}`);
+
+            // Hero Dislocation & Action Banner
+            if (delta !== null) {
+                const absD = Math.abs(delta).toFixed(2);
+                const dirWord = delta >= 0 ? 'ABOVE STRIKE' : 'BELOW STRIKE';
+                updateElement(`${c}-hero-delta`, `${delta >= 0 ? '+$' : '-$'}${absD} ${dirWord}`, `hero-delta ${delta >= 0 ? 'up' : 'down'}`);
+            }
+            if (m.stale_impulse && m.stale_impulse !== 'NONE') {
+                const d5 = num(m.d_spot_5s) || 0;
+                updateElement(`${c}-lag-pill`, `⚡ STALE QUOTE: ${d5 >= 0 ? '+$' : '-$'}${Math.abs(d5).toFixed(1)} (5s)`, 'hero-lag-pill lag-hot');
+            } else if (kDiff !== null) {
+                const lagThresh = coin === 'BTC' ? 15.0 : 0.75;
+                const isLag = Math.abs(kDiff) >= lagThresh;
+                const lagText = kDiff < 0
+                    ? `KALSHI LAGGING -$${Math.abs(kDiff).toFixed(2)}`
+                    : `KALSHI RICH +$${Math.abs(kDiff).toFixed(2)}`;
+                updateElement(`${c}-lag-pill`, lagText, `hero-lag-pill ${isLag ? 'lag-hot' : ''}`);
+            } else {
+                updateElement(`${c}-lag-pill`, 'KALSHI: EXTREME', 'hero-lag-pill');
+            }
+
+            // 15M Candle Window Timeline
+            if (sec_left !== null) {
+                const elapsedPct = Math.max(0, Math.min(100, ((900 - sec_left) / 900) * 100));
+                const curEl = document.getElementById(`${c}-tl-cursor`);
+                if (curEl) curEl.style.left = `${elapsedPct.toFixed(1)}%`;
+                const mins = Math.floor(sec_left / 60);
+                const secs = Math.floor(sec_left % 60);
+                let tlLabel = `WARMUP (${mins}m ${secs}s left)`;
+                if (sec_left <= 60) tlLabel = `60s RTI SETTLEMENT (${secs}s left)`;
+                else if (sec_left <= 90) tlLabel = `LOCKOUT ZONE (${sec_left}s left)`;
+                else if (sec_left <= 660) tlLabel = `ENTRY WINDOW OPEN (${mins}m ${secs}s left)`;
+                updateElement(`${c}-tl-status`, tlLabel);
+            }
+
+            // Compact Early Alpha Summary Pill
+            const alphaBias = aZ > 0.04 ? 'BULLISH' : (aZ < -0.04 ? 'BEARISH' : 'NEUTRAL');
+            const alphaClr = aZ > 0.04 ? 'up' : (aZ < -0.04 ? 'down' : 'dim');
+            const tfiPct = sTfi !== null ? `${sTfi >= 0 ? '+' : ''}${(sTfi * 100).toFixed(0)}%` : '--';
+            const momStr = momZ !== null ? `${momZ >= 0 ? '+' : ''}${momZ.toFixed(2)}σ` : '--';
+            const aZStr = aZ !== null ? `${aZ >= 0 ? '+' : ''}${aZ.toFixed(2)}` : '--';
+            updateElement(`${c}-alpha-summary`, `Early Alpha: ${alphaBias} (${aZStr}) • TFI ${tfiPct} • Mom ${momStr}`, alphaClr);
+
+            // RTI Settlement
+            updateElement(`${c}-mu-settle`, mu_settle !== null ? mu_settle.toLocaleString('en-US', {minimumFractionDigits: 2}) : '--');
+            
+            const inWindow = (sec_left !== null && sec_left <= 60);
+            const wElapsed = inWindow ? Math.max(0, Math.min(1.0, (60.0 - sec_left) / 60.0)) : (sec_left === 0 ? 1.0 : 0.0);
+            const barEl = document.getElementById(`${c}-rti-bar`);
+            if (barEl) barEl.style.width = `${(wElapsed * 100).toFixed(0)}%`;
+
+            updateElement(`${c}-rti-phase`, inWindow ? 'ACCUMULATING' : (sec_left > 60 ? 'PRE-WINDOW' : 'SETTLED'));
+            updateElement(`${c}-rti-window`, `${sec_left !== null ? sec_left : '--'}s / 60s`);
+            updateElement(`${c}-rti-blend`, `${(wElapsed * 100).toFixed(0)}% elapsed`);
+
+            // Z-Scores & Probabilities
+            updateElement(`${c}-z-cf`, z_cf !== null ? (z_cf >= 0 ? `+${z_cf.toFixed(2)}` : z_cf.toFixed(2)) : '--');
+            updateElement(`${c}-z-eff`, z_eff !== null ? (z_eff >= 0 ? `+${z_eff.toFixed(2)}` : z_eff.toFixed(2)) : '--');
+            
+            let hypoClass = 'dim';
+            if (hypo.includes('BULLISH')) hypoClass = 'up';
+            else if (hypo.includes('BEARISH')) hypoClass = 'down';
+            updateElement(`${c}-hypothesis`, hypo, hypoClass);
+
+            const pyVal = prob_y !== null ? Math.max(5, Math.min(95, prob_y)) : 50;
+            const pnVal = 100 - pyVal;
+            const yFill = document.getElementById(`${c}-prob-yes-fill`);
+            const nFill = document.getElementById(`${c}-prob-no-fill`);
+            if (yFill && nFill) {
+                yFill.style.width = `${pyVal}%`;
+                yFill.textContent = `Y ${prob_y !== null ? prob_y.toFixed(1) : 50}%`;
+                nFill.style.width = `${pnVal}%`;
+                nFill.textContent = `N ${prob_n !== null ? prob_n.toFixed(1) : 50}%`;
+            }
+
+            // Orderbook & Guards
+            updateElement(`${c}-yes-quote`, `${fmtCents(y_bid)} / ${fmtCents(y_ask)}`);
+            updateElement(`${c}-no-quote`, `${fmtCents(n_bid)} / ${fmtCents(n_ask)}`);
+            updateElement(`${c}-spread`, `${spread_c !== null ? spread_c : '--'}¢`);
+            updateElement(`${c}-fee-y`, fee_y !== null ? (fee_y * 100).toFixed(2) + '¢' : '--');
+            updateElement(`${c}-fee-n`, fee_n !== null ? (fee_n * 100).toFixed(2) + '¢' : '--');
+            updateElement(`${c}-edge-y`, edge_y !== null ? (edge_y >= 0 ? '+' : '') + edge_y.toFixed(1) + '%' : '--', edge_y >= 4 ? 'up' : 'dim');
+            updateElement(`${c}-edge-n`, edge_n !== null ? (edge_n >= 0 ? '+' : '') + edge_n.toFixed(1) + '%' : '--', edge_n >= 4 ? 'up' : 'dim');
+            updateElement(`${c}-action-reason`, reason);
+        }
+
+        function renderPositions(positions, brackets) {
+            const tbody = document.getElementById('positions-tbody');
+            if (!tbody) return;
+            const bktList = brackets || [];
+            const posEntries = Object.entries(positions || {});
+
+            if (!posEntries.length && !bktList.length) {
+                tbody.innerHTML = '<tr><td colspan="8" class="dim" style="text-align: center; padding: 16px;">No open positions or active brackets. One-click Buy armed.</td></tr>';
+                return;
+            }
+
+            let html = '';
+            // Render active bracket tickets first
+            for (const b of bktList) {
+                const sideClr = b.side === 'YES' ? 'up' : 'down';
+                html += `<tr>
+                    <td><b>${b.coin}</b> <span class="mono dim" style="font-size: 10px;">${b.ticket_id}</span></td>
+                    <td class="${sideClr}"><b>${b.side}</b></td>
+                    <td><b>${b.filled_contracts}x</b></td>
+                    <td>${b.entry_cents}¢</td>
+                    <td class="up"><b>${b.tp_cents}¢</b> (+${b.tp_roi_pct}%)</td>
+                    <td class="down"><b>${b.sl_cents}¢</b> (-${b.sl_roi_pct}%)</td>
+                    <td><span class="badge armed">${b.status}</span></td>
+                    <td><button class="btn btn-danger" style="padding: 2px 8px; font-size: 10px; border-radius: 4px;" onclick="cancelBracket('${b.ticket_id}')">Flatten</button></td>
+                </tr>`;
+            }
+
+            // Render any other engine positions
+            for (const [coin, pos] of posEntries) {
+                const entry = num(pos.entry_price);
+                const cur = num(pos.current_bid || entry);
+                const contracts = pos.contracts || 0;
+                const roi = entry > 0 ? ((cur - entry) / entry) * 100.0 : 0.0;
+                const uPnl = (cur - entry) * contracts;
+                const roiClr = roi >= 0 ? 'up' : 'down';
+                html += `<tr>
+                    <td><b>${coin}</b></td>
+                    <td class="${pos.side === 'YES' ? 'up' : 'down'}"><b>${pos.side}</b></td>
+                    <td>${contracts}x</td>
+                    <td>${fmtCents(entry)}</td>
+                    <td class="up">Auto Maker</td>
+                    <td class="down">Dual SL</td>
+                    <td><span class="badge mode">ENGINE</span></td>
+                    <td><span class="dim" style="font-size: 10px;">Automated</span></td>
+                </tr>`;
+            }
+            tbody.innerHTML = html;
+        }
+
+        function renderLogs(logs) {
+            const container = document.getElementById('terminal-logs');
+            if (!container || !logs || !logs.length) return;
+            let html = '';
+            for (const l of logs.slice(-15)) {
+                html += `<div class="log-line">
+                    <span class="log-time">[${l.time || '--'}]</span>
+                    <span class="log-text">${l.text || ''}</span>
+                </div>`;
+            }
+            container.innerHTML = html;
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function handleStreamPayload(data) {
+            if (!data) return;
+
+            // Update dynamic bracket previews
+            window.latestMatrix = data.multicoin_matrix || {};
+            updateBracketPreviews();
+
+            // Portfolio strip
+            const pf = data.multicoin || {};
+            if (pf) {
+                updateElement('term-equity', `$${num(pf.total_equity || 100).toFixed(2)}`);
+                const pnl = num(pf.total_pnl || 0);
+                updateElement('term-pnl', fmtMoney(pnl), `val ${pnl >= 0 ? 'up' : 'down'}`);
+                updateElement('term-winrate', `${num(pf.overall_win_rate_pct || 0).toFixed(1)}% (${pf.total_trades || 0})`);
+                updateElement('term-cash', `$${num(pf.total_cash || 100).toFixed(2)} cash`);
+                renderPositions(pf.active_positions, data.active_brackets);
+            } else if (data.active_brackets) {
+                renderPositions(null, data.active_brackets);
+            }
+
+            // Coin cards
+            const matrix = data.multicoin_matrix || {};
+            if (matrix.BTC) {
+                updateCoinCard('BTC', matrix.BTC);
+                appendChartTick('BTC', matrix.BTC);
+            }
+            if (matrix.ETH) {
+                updateCoinCard('ETH', matrix.ETH);
+                appendChartTick('ETH', matrix.ETH);
+            }
+
+            // Logs
+            if (data.multicoin_brain_logs) {
+                renderLogs(data.multicoin_brain_logs);
+            }
+        }
+
+        // Real-Time Feed Connection (WebSocket 4-5 Hz primary with SSE fallback)
+        let liveWs = null;
+        let evtSource = null;
+        let isWsConnected = false;
+
+        function connectLiveFeed() {
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${proto}//${location.host}/ws/stream`;
+
+            try {
+                if (liveWs) {
+                    try { liveWs.close(); } catch(e) {}
+                }
+                liveWs = new WebSocket(wsUrl);
+
+                liveWs.onopen = function() {
+                    isWsConnected = true;
+                    updateElement('term-ws-badge', '● LIVE WS FEED (4 Hz)', 'badge ws-ok');
+                    if (evtSource) {
+                        try { evtSource.close(); } catch(e) {}
+                        evtSource = null;
+                    }
+                };
+
+                liveWs.onmessage = function(ev) {
+                    try {
+                        const msg = JSON.parse(ev.data);
+                        const payload = (msg.type === 'tick_stream' || msg.type === 'snapshot') ? msg.data : msg;
+                        if (payload) {
+                            if (payload.live_kalshi && payload.live_kalshi.ws_connected === false) {
+                                updateElement('term-ws-badge', 'EXCHANGE WS: RECONNECTING', 'badge ws-down');
+                            } else {
+                                updateElement('term-ws-badge', '● LIVE WS FEED (4 Hz)', 'badge ws-ok');
+                            }
+                            handleStreamPayload(payload);
+                        }
+                    } catch(err) {
+                        console.warn('Failed parsing WS payload:', err);
+                    }
+                };
+
+                liveWs.onerror = function(err) {
+                    console.debug('WebSocket error, falling back to SSE:', err);
+                    if (!isWsConnected && !evtSource) {
+                        connectSSE();
+                    }
+                };
+
+                liveWs.onclose = function() {
+                    isWsConnected = false;
+                    updateElement('term-ws-badge', 'WS RECONNECTING...', 'badge ws-down');
+                    if (!evtSource) {
+                        connectSSE();
+                    }
+                    setTimeout(connectLiveFeed, 2000);
+                };
+            } catch(e) {
+                console.warn('WebSocket init exception, falling back to SSE:', e);
+                connectSSE();
+            }
+        }
+
+        function connectSSE() {
+            if (evtSource) {
+                try { evtSource.close(); } catch(e) {}
+            }
+            evtSource = new EventSource('/api/stream');
+            
+            evtSource.onopen = function() {
+                if (!isWsConnected) {
+                    updateElement('term-ws-badge', '● LIVE SSE FEED (10 Hz)', 'badge ws-ok');
+                }
+            };
+
+            evtSource.onmessage = function(e) {
+                if (!e || typeof e.data !== 'string') return;
+                const raw = e.data.trim();
+                if (!raw || raw.charAt(0) !== '{') return;
+                try {
+                    const data = JSON.parse(raw);
+                    if (!isWsConnected) {
+                        if (data.live_kalshi && data.live_kalshi.ws_connected === false) {
+                            updateElement('term-ws-badge', 'EXCHANGE WS: RECONNECTING', 'badge ws-down');
+                        } else {
+                            updateElement('term-ws-badge', '● LIVE SSE FEED (10 Hz)', 'badge ws-ok');
+                        }
+                    }
+                    handleStreamPayload(data);
+                } catch(err) {
+                    console.warn('Failed parsing SSE payload:', err);
+                }
+            };
+
+            evtSource.onerror = function() {
+                if (!isWsConnected) {
+                    if (evtSource.readyState === EventSource.CONNECTING) {
+                        updateElement('term-ws-badge', 'FEED: RECONNECTING', 'badge ws-down');
+                    } else if (evtSource.readyState === EventSource.CLOSED) {
+                        updateElement('term-ws-badge', 'FEED: DISCONNECTED', 'badge ws-down');
+                    }
+                }
+            };
+        }
+
+        // View Mode, Collapsible Details & Quick Presets
+        function setFocusMode(mode) {
+            document.body.classList.remove('focus-btc', 'focus-eth');
+            document.querySelectorAll('.view-tab').forEach(b => b.classList.remove('active'));
+            if (mode === 'BTC') {
+                document.body.classList.add('focus-btc');
+                document.getElementById('tab-btc')?.classList.add('active');
+            } else if (mode === 'ETH') {
+                document.body.classList.add('focus-eth');
+                document.getElementById('tab-eth')?.classList.add('active');
+            } else {
+                document.getElementById('tab-split')?.classList.add('active');
+            }
+            setTimeout(() => { drawCoinChart('BTC'); drawCoinChart('ETH'); }, 40);
+        }
+
+        function toggleQuantDetails(c) {
+            const box = document.getElementById(`${c}-quant-details`);
+            const btn = document.getElementById(`${c}-details-btn`);
+            if (!box || !btn) return;
+            const open = box.classList.toggle('open');
+            btn.textContent = open ? 'Details ▴' : 'Details ▾';
+        }
+
+        function setQtyPreset(c, qty, btn) {
+            const inp = document.getElementById(`${c}-trade-qty`);
+            if (inp) inp.value = qty;
+            if (btn && btn.parentElement) {
+                btn.parentElement.querySelectorAll('.chip-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+            }
+            updateBracketPreviews();
+        }
+
+        function setTpSlPreset(c, tp, sl, btn) {
+            const tpInp = document.getElementById(`${c}-trade-tp`);
+            const slInp = document.getElementById(`${c}-trade-sl`);
+            if (tpInp) tpInp.value = tp;
+            if (slInp) slInp.value = sl;
+            if (btn && btn.parentElement) {
+                btn.parentElement.querySelectorAll('.chip-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+            }
+            updateBracketPreviews();
+        }
+
+        // Bracket Trading Actions
+        function updateBracketPreviews() {
+            for (const coin of ['BTC', 'ETH']) {
+                const c = coin.toLowerCase();
+                const m = window.latestMatrix?.[coin];
+                if (!m) continue;
+
+                const qty = Math.max(1, parseInt(document.getElementById(`${c}-trade-qty`)?.value || '10', 10));
+                const tpPct = parseFloat(document.getElementById(`${c}-trade-tp`)?.value || '25') / 100.0;
+                const slPct = parseFloat(document.getElementById(`${c}-trade-sl`)?.value || '20') / 100.0;
+
+                // YES Side: Entry is yes_ask
+                const yAskCents = m.yes_ask ? Math.round(m.yes_ask * 100) : null;
+                if (yAskCents && yAskCents >= 1 && yAskCents <= 98) {
+                    const tpC = Math.max(yAskCents + 1, Math.min(99, Math.round(yAskCents * (1 + tpPct))));
+                    const slC = Math.max(1, Math.min(yAskCents - 1, Math.round(yAskCents * (1 - slPct))));
+                    const win$ = (((tpC - yAskCents) / 100.0) * qty).toFixed(2);
+                    const loss$ = (((yAskCents - slC) / 100.0) * qty).toFixed(2);
+                    const el = document.getElementById(`${c}-buy-yes-preview`);
+                    if (el) el.textContent = `${qty}x @ ${yAskCents}¢ | TP ${tpC}¢ (+$${win$}) / SL ${slC}¢ (-$${loss$})`;
+                }
+
+                // NO Side: Entry is (100 - yes_bid)
+                const nAskCents = m.yes_bid ? Math.round((1.0 - m.yes_bid) * 100) : null;
+                if (nAskCents && nAskCents >= 1 && nAskCents <= 98) {
+                    const tpC = Math.max(nAskCents + 1, Math.min(99, Math.round(nAskCents * (1 + tpPct))));
+                    const slC = Math.max(1, Math.min(nAskCents - 1, Math.round(nAskCents * (1 - slPct))));
+                    const win$ = (((tpC - nAskCents) / 100.0) * qty).toFixed(2);
+                    const loss$ = (((nAskCents - slC) / 100.0) * qty).toFixed(2);
+                    const el = document.getElementById(`${c}-buy-no-preview`);
+                    if (el) el.textContent = `${qty}x @ ${nAskCents}¢ | TP ${tpC}¢ (+$${win$}) / SL ${slC}¢ (-$${loss$})`;
+                }
+            }
+        }
+
+        async function executeBracket(coin, side) {
+            const c = coin.toLowerCase();
+            const qty = parseInt(document.getElementById(`${c}-trade-qty`)?.value || '10', 10);
+            const tpPct = parseFloat(document.getElementById(`${c}-trade-tp`)?.value || '25');
+            const slPct = parseFloat(document.getElementById(`${c}-trade-sl`)?.value || '25');
+            
+            const m = window.latestMatrix?.[coin] || {};
+            const ticker = m.ticker;
+            if (!ticker) {
+                alert(`No active Kalshi market found for ${coin}`);
+                return;
+            }
+
+            const ask = (side === 'YES') ? m.yes_ask : (1.0 - (m.yes_bid || 0.5));
+            if (!confirm(`Execute 1-Click BUY ${qty}x ${side} on ${ticker} @ ~${Math.round(ask*100)}¢?\n\nAttached Auto TP: +${tpPct}%\nAttached Auto SL: -${slPct}%\nOCO Protection: Enabled`)) {
+                return;
+            }
+
+            try {
+                const resp = await fetch('/api/trade/bracket', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        ticker: ticker,
+                        coin: coin,
+                        side: side,
+                        contracts: qty,
+                        entry_price: ask,
+                        tp_pct: tpPct,
+                        sl_pct: slPct,
+                        dry_run: true
+                    })
+                });
+                const res = await resp.json();
+                if (res.status === 'success' || res.status === 'active') {
+                    const t = res.ticket;
+                    alert(`🚀 BUY ${side} ARMED!\nTicket: ${t.ticket_id}\nPosition: ${t.filled_contracts}x @ ${t.entry_cents}¢\nAuto TP: ${t.tp_cents}¢ (+${t.tp_roi_pct}%)\nAuto SL: ${t.sl_cents}¢ (-${t.sl_roi_pct}%)\nOCO Exits: Armed`);
+                } else {
+                    alert(`Execution Rejected: ${res.ticket?.logs?.[1] || res.message || 'Sanity bounds check failed'}`);
+                }
+            } catch(err) {
+                alert(`Order execution error: ${err.message}`);
+            }
+        }
+
+        async function cancelBracket(ticketId) {
+            if (!confirm(`Flatten active position & cancel TP/SL for ticket ${ticketId}?`)) return;
+            try {
+                const resp = await fetch('/api/trade/bracket/cancel', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ticket_id: ticketId })
+                });
+                const res = await resp.json();
+                if (res.status === 'success') {
+                    alert(`Position flattened and exits cancelled.`);
+                } else {
+                    alert(`Flatten notice: ${res.message || 'Error cancelling bracket'}`);
+                }
+            } catch(e) {
+                alert(`Error: ${e.message}`);
+            }
+        }
+
+        // Action Handlers
+        async function tripKillSwitch() {
+            if (confirm("TRIP EMERGENCY KILL SWITCH? This will immediately halt trading across all assets.")) {
+                await fetch('/api/kill-switch/trip', {method: 'POST'});
+                alert("Kill switch tripped.");
+            }
+        }
+
+        async function resetKillSwitch() {
+            await fetch('/api/kill-switch/reset', {method: 'POST'});
+            alert("Kill switch reset and re-armed.");
+        }
+
+        async function cancelAllOrders() {
+            if (confirm("Cancel all resting orders on Kalshi?")) {
+                await fetch('/api/live/cancel_all', {method: 'POST'});
+                alert("Cancellation request dispatched.");
+            }
+        }
+
+        // ── Live 10M Rolling Trajectory & 5M Forecast Engine ─────────────────
+        const chartState = {
+            BTC: { history: [], latest: null, hoverX: null },
+            ETH: { history: [], latest: null, hoverX: null },
+        };
+
+        async function fetchChartHistory() {
+            try {
+                const resp = await fetch('/api/chart/history');
+                if (!resp.ok) return;
+                const data = await resp.json();
+                for (const coin of ['BTC', 'ETH']) {
+                    if (Array.isArray(data[coin]) && data[coin].length > 0) {
+                        chartState[coin].history = data[coin].map(pt => ({
+                            ts: Number(pt[0]),
+                            spot: Number(pt[1]),
+                            hl: Number(pt[2] || 0),
+                            kImp: pt[3] ? Number(pt[3]) : null
+                        }));
+                        drawCoinChart(coin);
+                    }
+                }
+            } catch (e) {
+                console.debug('Chart history fetch skipped:', e);
+            }
+        }
+
+        function appendChartTick(coin, m) {
+            if (!m || !m.spot || m.spot <= 0) return;
+            const st = chartState[coin];
+            if (!st) return;
+            const ts = m.ts ? Number(m.ts) : (Date.now() / 1000.0);
+            const hl = m.hl_spot ? Number(m.hl_spot) : 0;
+            const kImp = (m.kalshi_implied !== null && m.kalshi_implied !== undefined) ? Number(m.kalshi_implied) : null;
+            const last = st.history.length ? st.history[st.history.length - 1] : null;
+            if (!last || (ts - last.ts) >= 0.8 || Math.abs(m.spot - last.spot) > 1e-6) {
+                st.history.push({ ts, spot: Number(m.spot), hl, kImp });
+            } else {
+                last.spot = Number(m.spot);
+                last.hl = hl;
+                last.kImp = kImp;
+            }
+            const cutoff = ts - 305.0;
+            while (st.history.length > 0 && st.history[0].ts < cutoff) {
+                st.history.shift();
+            }
+            st.latest = m;
+            drawCoinChart(coin);
+        }
+
+        function buildForecastPoints(m, nowTs) {
+            const spot = Number(m.spot || 0);
+            const effVol15m = Number(m.eff_vol_15m || (m.coin === 'BTC' ? 220 : 12));
+            const zShift = Number(m.z_shift || 0);
+            const hlSpot = Number(m.hl_spot || 0);
+
+            // 5-min volatility scale = eff_vol_15m * sqrt(300 / 900)
+            const vol5m = effVol15m * Math.sqrt(300.0 / 900.0);
+            // Combine gated z_shift drift with residual perp-basis lead if fresh
+            const perpPull = (hlSpot > 0 && spot > 0) ? Math.max(-vol5m * 0.35, Math.min(vol5m * 0.35, (hlSpot - spot) * 0.25)) : 0;
+            const drift5m = (zShift * vol5m) + perpPull;
+
+            const pts = [];
+            for (let dt = 0; dt <= 300; dt += 15) {
+                const sigma = effVol15m * Math.sqrt(dt / 900.0);
+                // Exponentially decaying orderflow/lead-lag impulse over 90s horizon
+                const decay = dt === 0 ? 0.0 : (1.0 - Math.exp(-dt / 90.0));
+                const mean = spot + drift5m * decay;
+                pts.push({
+                    ts: nowTs + dt,
+                    dt,
+                    mean,
+                    up1: mean + sigma,
+                    dn1: mean - sigma,
+                    up2: mean + 2.0 * sigma,
+                    dn2: mean - 2.0 * sigma,
+                });
+            }
+            return pts;
+        }
+
+        function drawCoinChart(coin) {
+            const canvas = document.getElementById(`chart-${coin.toLowerCase()}`);
+            if (!canvas) return;
+            const rect = canvas.getBoundingClientRect();
+            if (rect.width < 20 || rect.height < 20) return;
+
+            const dpr = window.devicePixelRatio || 1;
+            if (canvas.width !== Math.round(rect.width * dpr) || canvas.height !== Math.round(rect.height * dpr)) {
+                canvas.width = Math.round(rect.width * dpr);
+                canvas.height = Math.round(rect.height * dpr);
+            }
+
+            const ctx = canvas.getContext('2d');
+            ctx.save();
+            ctx.scale(dpr, dpr);
+
+            const W = rect.width;
+            const H = rect.height;
+            const padL = 10, padR = 66, padT = 14, padB = 22;
+            const plotW = W - padL - padR;
+            const plotH = H - padT - padB;
+
+            ctx.clearRect(0, 0, W, H);
+
+            const st = chartState[coin];
+            const m = st.latest;
+            const hist = st.history;
+            if (!m || !m.spot) {
+                ctx.fillStyle = '#8b9bb4';
+                ctx.font = '12px Inter, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('Waiting for live ticks...', W / 2, H / 2);
+                ctx.restore();
+                return;
+            }
+
+            const nowTs = hist.length ? hist[hist.length - 1].ts : (Date.now() / 1000.0);
+            const tMin = nowTs - 300.0;
+            const tMax = nowTs + 300.0;
+            const forecast = buildForecastPoints(m, nowTs);
+            const strike = Number(m.open || 0);
+            const muSettle = Number(m.mu_settle || 0);
+            const secLeft = Number(m.seconds_left || 0);
+
+            // Compute Y bounds from history + 1.5*sigma cone (include strike only if reasonably close)
+            const vals = [];
+            for (const p of hist) {
+                if (p.spot > 0) vals.push(p.spot);
+                if (p.hl > 0) vals.push(p.hl);
+                if (p.kImp && p.kImp > 0) vals.push(p.kImp);
+            }
+            for (const f of forecast) {
+                vals.push(f.up2, f.dn2);
+            }
+            if (muSettle > 0) vals.push(muSettle);
+
+            let yMin = Math.min(...vals);
+            let yMax = Math.max(...vals);
+            if (strike > 0 && Math.abs(strike - m.spot) <= (yMax - yMin) * 1.8) {
+                yMin = Math.min(yMin, strike);
+                yMax = Math.max(yMax, strike);
+            }
+            const span = Math.max(m.spot * 0.0005, yMax - yMin);
+            yMin -= span * 0.08;
+            yMax += span * 0.08;
+
+            const xOf = t => padL + ((t - tMin) / (tMax - tMin)) * plotW;
+            const yOf = p => padT + (1.0 - (p - yMin) / (yMax - yMin)) * plotH;
+            const nowX = xOf(nowTs);
+
+            // Background split: subtle tint on future half
+            ctx.fillStyle = 'rgba(16, 185, 129, 0.025)';
+            ctx.fillRect(nowX, padT, padL + plotW - nowX, plotH);
+
+            // Horizontal grid & right Y-axis labels
+            ctx.strokeStyle = 'rgba(38, 49, 68, 0.55)';
+            ctx.lineWidth = 1;
+            ctx.font = '10px JetBrains Mono, monospace';
+            ctx.fillStyle = '#8b9bb4';
+            ctx.textAlign = 'left';
+            const dec = m.spot > 5000 ? 0 : 2;
+            for (let i = 0; i <= 4; i++) {
+                const frac = i / 4.0;
+                const price = yMin + (1.0 - frac) * (yMax - yMin);
+                const y = padT + frac * plotH;
+                ctx.beginPath();
+                ctx.moveTo(padL, y);
+                ctx.lineTo(padL + plotW, y);
+                ctx.stroke();
+                ctx.fillText(price.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec }), padL + plotW + 6, y + 3);
+            }
+
+            // Vertical time grid (-5m, -2.5m, NOW, +2.5m, +5m)
+            const timeMarks = [
+                { dt: -300, lbl: '-5m' },
+                { dt: -150, lbl: '-2.5m' },
+                { dt: 0, lbl: 'NOW' },
+                { dt: 150, lbl: '+2.5m' },
+                { dt: 300, lbl: '+5m' },
+            ];
+            ctx.textAlign = 'center';
+            for (const tm of timeMarks) {
+                const x = xOf(nowTs + tm.dt);
+                ctx.strokeStyle = tm.dt === 0 ? 'rgba(56, 189, 248, 0.55)' : 'rgba(38, 49, 68, 0.45)';
+                ctx.setLineDash(tm.dt === 0 ? [3, 3] : []);
+                ctx.beginPath();
+                ctx.moveTo(x, padT);
+                ctx.lineTo(x, padT + plotH);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.fillStyle = tm.dt === 0 ? '#38bdf8' : '#8b9bb4';
+                ctx.fillText(tm.lbl, x, H - 6);
+            }
+
+            // ±2σ and ±1σ Forecast Cones
+            const isUpBias = forecast[forecast.length - 1].mean >= m.spot;
+            const coneRgb = isUpBias ? '16, 185, 129' : '239, 68, 68';
+
+            // ±2σ fill
+            ctx.beginPath();
+            forecast.forEach((f, idx) => idx === 0 ? ctx.moveTo(xOf(f.ts), yOf(f.up2)) : ctx.lineTo(xOf(f.ts), yOf(f.up2)));
+            for (let i = forecast.length - 1; i >= 0; i--) ctx.lineTo(xOf(forecast[i].ts), yOf(forecast[i].dn2));
+            ctx.closePath();
+            ctx.fillStyle = `rgba(${coneRgb}, 0.10)`;
+            ctx.fill();
+
+            // ±1σ fill
+            ctx.beginPath();
+            forecast.forEach((f, idx) => idx === 0 ? ctx.moveTo(xOf(f.ts), yOf(f.up1)) : ctx.lineTo(xOf(f.ts), yOf(f.up1)));
+            for (let i = forecast.length - 1; i >= 0; i--) ctx.lineTo(xOf(forecast[i].ts), yOf(forecast[i].dn1));
+            ctx.closePath();
+            ctx.fillStyle = `rgba(${coneRgb}, 0.22)`;
+            ctx.fill();
+
+            // 15m Strike reference line
+            if (strike > 0) {
+                const clampedStrike = Math.max(yMin, Math.min(yMax, strike));
+                const sy = yOf(clampedStrike);
+                ctx.strokeStyle = 'rgba(251, 191, 36, 0.8)';
+                ctx.lineWidth = 1.2;
+                ctx.setLineDash([5, 4]);
+                ctx.beginPath();
+                ctx.moveTo(padL, sy);
+                ctx.lineTo(padL + plotW, sy);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                ctx.fillStyle = '#fbbf24';
+                ctx.textAlign = 'left';
+                const strikePrefix = strike > yMax ? '▲ ' : (strike < yMin ? '▼ ' : '');
+                ctx.fillText(`${strikePrefix}STRIKE ${strike.toFixed(dec)}`, padL + 4, Math.max(padT + 10, sy - 4));
+            }
+
+            // Hyperliquid Perp Line (past 5m)
+            const hlPts = hist.filter(p => p.hl > 0);
+            if (hlPts.length > 1) {
+                ctx.beginPath();
+                hlPts.forEach((p, idx) => idx === 0 ? ctx.moveTo(xOf(p.ts), yOf(p.hl)) : ctx.lineTo(xOf(p.ts), yOf(p.hl)));
+                ctx.strokeStyle = 'rgba(167, 139, 250, 0.65)';
+                ctx.lineWidth = 1.2;
+                ctx.stroke();
+            }
+
+            // Kalshi Implied Price Line (past 5m)
+            const kPts = hist.filter(p => p.kImp && p.kImp > 0);
+            if (kPts.length > 1) {
+                ctx.beginPath();
+                kPts.forEach((p, idx) => idx === 0 ? ctx.moveTo(xOf(p.ts), yOf(p.kImp)) : ctx.lineTo(xOf(p.ts), yOf(p.kImp)));
+                ctx.strokeStyle = '#f472b6';
+                ctx.lineWidth = 1.6;
+                ctx.stroke();
+            }
+
+            // CF Spot Line + Area Fill (past 5m)
+            if (hist.length > 1) {
+                ctx.beginPath();
+                hist.forEach((p, idx) => idx === 0 ? ctx.moveTo(xOf(p.ts), yOf(p.spot)) : ctx.lineTo(xOf(p.ts), yOf(p.spot)));
+                ctx.strokeStyle = '#38bdf8';
+                ctx.lineWidth = 2.0;
+                ctx.stroke();
+
+                const grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
+                grad.addColorStop(0, 'rgba(56, 189, 248, 0.22)');
+                grad.addColorStop(1, 'rgba(56, 189, 248, 0.0)');
+                ctx.lineTo(xOf(hist[hist.length - 1].ts), padT + plotH);
+                ctx.lineTo(xOf(hist[0].ts), padT + plotH);
+                ctx.closePath();
+                ctx.fillStyle = grad;
+                ctx.fill();
+            }
+
+            // +5m Expected Forecast Path
+            ctx.beginPath();
+            forecast.forEach((f, idx) => idx === 0 ? ctx.moveTo(xOf(f.ts), yOf(f.mean)) : ctx.lineTo(xOf(f.ts), yOf(f.mean)));
+            ctx.strokeStyle = isUpBias ? '#10b981' : '#ef4444';
+            ctx.lineWidth = 2.0;
+            ctx.setLineDash([5, 4]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // 60s RTI μ_settle marker (when expiry <= 300s)
+            if (muSettle > 0 && secLeft > 0 && secLeft <= 300) {
+                const mx = xOf(nowTs + secLeft);
+                const my = yOf(muSettle);
+                ctx.fillStyle = '#f8fafc';
+                ctx.beginPath();
+                ctx.moveTo(mx, my - 5);
+                ctx.lineTo(mx + 5, my);
+                ctx.lineTo(mx, my + 5);
+                ctx.lineTo(mx - 5, my);
+                ctx.closePath();
+                ctx.fill();
+                ctx.font = '10px JetBrains Mono, monospace';
+                ctx.fillStyle = '#f8fafc';
+                ctx.textAlign = 'left';
+                ctx.fillText(`μ ${muSettle.toFixed(dec)}`, Math.min(padL + plotW - 55, mx + 7), my + 3);
+            }
+
+            // Glowing NOW dot
+            const nowY = yOf(m.spot);
+            ctx.fillStyle = '#38bdf8';
+            ctx.beginPath();
+            ctx.arc(nowX, nowY, 4.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // Hover crosshair & tooltip
+            if (st.hoverX !== null && st.hoverX >= padL && st.hoverX <= padL + plotW) {
+                const hoverTs = tMin + ((st.hoverX - padL) / plotW) * (tMax - tMin);
+                const dtRel = Math.round(hoverTs - nowTs);
+                ctx.strokeStyle = 'rgba(226, 232, 240, 0.35)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(st.hoverX, padT);
+                ctx.lineTo(st.hoverX, padT + plotH);
+                ctx.stroke();
+
+                let label = '';
+                if (dtRel <= 0 && hist.length > 0) {
+                    let best = hist[0];
+                    for (const p of hist) {
+                        if (Math.abs(p.ts - hoverTs) < Math.abs(best.ts - hoverTs)) best = p;
+                    }
+                    const kStr = (best.kImp && best.kImp > 0) ? ` | Kalshi: $${best.kImp.toFixed(dec)} (${(best.kImp - best.spot) >= 0 ? '+' : ''}${(best.kImp - best.spot).toFixed(2)})` : '';
+                    label = `${dtRel}s | Spot: $${best.spot.toFixed(dec)}${kStr}${best.hl > 0 ? ` | Perp: $${best.hl.toFixed(dec)}` : ''}`;
+                } else if (dtRel > 0) {
+                    let best = forecast[0];
+                    for (const f of forecast) {
+                        if (Math.abs(f.ts - hoverTs) < Math.abs(best.ts - hoverTs)) best = f;
+                    }
+                    label = `+${dtRel}s | Pred: $${best.mean.toFixed(dec)} (±1σ: $${best.dn1.toFixed(dec)}–$${best.up1.toFixed(dec)})`;
+                }
+                if (label) {
+                    ctx.font = '10px JetBrains Mono, monospace';
+                    const tw = ctx.measureText(label).width + 12;
+                    const tx = Math.min(padL + plotW - tw, Math.max(padL + 4, st.hoverX - tw / 2));
+                    ctx.fillStyle = 'rgba(11, 15, 25, 0.9)';
+                    ctx.fillRect(tx, padT + 2, tw, 18);
+                    ctx.strokeStyle = '#38bdf8';
+                    ctx.strokeRect(tx, padT + 2, tw, 18);
+                    ctx.fillStyle = '#e2e8f0';
+                    ctx.textAlign = 'left';
+                    ctx.fillText(label, tx + 6, padT + 14);
+                }
+            }
+
+            ctx.restore();
+        }
+
+        function initChartHover() {
+            for (const coin of ['BTC', 'ETH']) {
+                const canvas = document.getElementById(`chart-${coin.toLowerCase()}`);
+                if (!canvas) continue;
+                canvas.addEventListener('mousemove', e => {
+                    const rect = canvas.getBoundingClientRect();
+                    chartState[coin].hoverX = e.clientX - rect.left;
+                    drawCoinChart(coin);
+                });
+                canvas.addEventListener('mouseleave', () => {
+                    chartState[coin].hoverX = null;
+                    drawCoinChart(coin);
+                });
+            }
+            window.addEventListener('resize', () => {
+                drawCoinChart('BTC');
+                drawCoinChart('ETH');
+            });
+        }
+
+        let lastFrameTs = 0;
+
+        async function primeInitialState() {
+            try {
+                const r = await fetch('/api/scan', { cache: 'no-store' });
+                if (r.ok) {
+                    const data = await r.json();
+                    lastFrameTs = Date.now();
+                    handleStreamPayload(data);
+                }
+            } catch (e) {
+                console.debug('Initial /api/scan prime skipped:', e);
+            }
+        }
+
+        // Watchdog: if WS/SSE stops delivering frames (e.g. after background tab throttling), poll & reconnect
+        setInterval(function() {
+            if (Date.now() - lastFrameTs > 4500) {
+                primeInitialState();
+                if (!liveWs || liveWs.readyState !== WebSocket.OPEN) {
+                    connectLiveFeed();
+                }
+            }
+        }, 3000);
+
+        const _origHandleStream = handleStreamPayload;
+        handleStreamPayload = function(data) {
+            lastFrameTs = Date.now();
+            return _origHandleStream(data);
+        };
+
+        document.addEventListener('DOMContentLoaded', function() {
+            initChartHover();
+            primeInitialState();
+            fetchChartHistory();
+            connectLiveFeed();
+        });
+    </script>
+</body>
+</html>

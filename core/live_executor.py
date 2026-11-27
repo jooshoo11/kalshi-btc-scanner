@@ -166,48 +166,60 @@ class L2OrderBook:
         self.ticker = ticker
         self.bids: Dict[int, int] = {}  # YES bids: price_cents -> quantity
         self.asks: Dict[int, int] = {}  # YES asks (100 - NO bid): price_cents -> quantity
+        self._bids_fp: Dict[int, float] = {}
+        self._asks_fp: Dict[int, float] = {}
         self.last_update_ts: float = 0.0
         self.stale: bool = False  # FINDING #7: set when a delta fails to parse or seq gap / REST divergence
         self.last_seq: Optional[int] = None
 
     @staticmethod
-    def parse_price_cents(raw_price: Any) -> int:
+    def parse_price_cents(raw_price: Any, is_bid: Optional[bool] = None) -> int:
         """
         Convert Kalshi price (dollar string like '0.4700', sub-cent '0.0010', or integer cents)
         into integer cents [1..99]. Sub-cent dust (< 0.005 dollars = 0.5c) returns 0 and is filtered out.
+        When is_bid=True (YES bid or NO bid), floor fractional cents so 39.9c bid + 40.1c ask never cross at 40c.
         """
         if raw_price is None:
             return 0
         s = str(raw_price).strip()
         if "." in s:
             val = float(s)
-            if val <= 1.0:
-                return int(round(val * 100.0))
-            return int(round(val))
+            cents_f = (val * 100.0) if val <= 1.0 else val
+            if cents_f < 0.5:
+                return 0
+            if is_bid is True:
+                return int(math.floor(cents_f + 1e-6))
+            if is_bid is False:
+                return int(math.ceil(cents_f - 1e-6))
+            return int(round(cents_f))
         val_i = int(s)
         return val_i
 
-    def apply_snapshot(self, bids: List[List[int]], asks: List[List[int]], seq: Optional[int] = None):
-        """Initialize book from full snapshot [[price_cents, qty], ...]"""
-        new_bids: Dict[int, int] = {}
+    def apply_snapshot(self, bids: List[List[Any]], asks: List[List[Any]], seq: Optional[int] = None):
+        """Initialize book from full snapshot [[price_cents, qty], ...] preserving fractional quantities."""
+        new_bids_fp: Dict[int, float] = {}
         for p, q in bids:
-            pc, qc = int(p), int(q)
-            if 1 <= pc <= 99 and qc > 0:
-                new_bids[pc] = new_bids.get(pc, 0) + qc
-        new_asks: Dict[int, int] = {}
+            pc, qf = int(p), float(q)
+            if 1 <= pc <= 99 and qf > 0:
+                new_bids_fp[pc] = round(new_bids_fp.get(pc, 0.0) + qf, 4)
+        new_asks_fp: Dict[int, float] = {}
         for p, q in asks:
-            pc, qc = int(p), int(q)
-            if 1 <= pc <= 99 and qc > 0:
-                new_asks[pc] = new_asks.get(pc, 0) + qc
-        self.bids = new_bids
-        self.asks = new_asks
+            pc, qf = int(p), float(q)
+            if 1 <= pc <= 99 and qf > 0:
+                new_asks_fp[pc] = round(new_asks_fp.get(pc, 0.0) + qf, 4)
+        self._bids_fp = new_bids_fp
+        self._asks_fp = new_asks_fp
+        self.bids = {pc: int(round(qf)) for pc, qf in new_bids_fp.items() if qf >= 0.5}
+        self.asks = {pc: int(round(qf)) for pc, qf in new_asks_fp.items() if qf >= 0.5}
         self.last_update_ts = time.time()
         self.stale = False  # fresh full snapshot clears the stale flag
-        self.last_seq = int(seq) if seq is not None else None
+        if seq is not None:
+            self.last_seq = int(seq)
 
-    def apply_delta(self, side: str, price_cents: int, delta_qty: int, seq: Optional[int] = None) -> bool:
+    def apply_delta(self, side: str, price_cents: int, delta_qty: float, seq: Optional[int] = None) -> bool:
         """
-        Update price level from orderbook_delta stream.
+        Update price level from orderbook_delta stream with exact float tracking so
+        fractional Kalshi V2 delta_fp cancellations never leave ghost crossed levels.
         Returns False (and marks book stale) if a sequence gap is detected.
         """
         if seq is not None:
@@ -226,20 +238,29 @@ class L2OrderBook:
             else:
                 return True
             book = self.asks
+            fp_book = self._asks_fp
         elif s in ("yes_bid", "bid", "yes"):
             if not (1 <= p <= 99):
                 return True
             book = self.bids
+            fp_book = self._bids_fp
         else:
             if not (1 <= p <= 99):
                 return True
             book = self.asks
+            fp_book = self._asks_fp
 
-        new_qty = book.get(p, 0) + int(delta_qty)
-        if new_qty <= 0:
+        base_fp = fp_book.get(p, float(book.get(p, 0)))
+        new_fp = round(base_fp + float(delta_qty), 4)
+        if new_fp <= 0.0005:
+            fp_book.pop(p, None)
+            book.pop(p, None)
+        elif new_fp < 0.5:
+            fp_book[p] = new_fp
             book.pop(p, None)
         else:
-            book[p] = new_qty
+            fp_book[p] = new_fp
+            book[p] = int(round(new_fp))
         self.last_update_ts = time.time()
         return True
 
@@ -599,8 +620,8 @@ class KalshiWebSocketClient:
                     yes_levels = []
                     for item in raw_yes:
                         try:
-                            p_cents = L2OrderBook.parse_price_cents(item[0])
-                            qty = int(round(float(item[1])))
+                            p_cents = L2OrderBook.parse_price_cents(item[0], is_bid=True)
+                            qty = float(item[1])
                             if 1 <= p_cents <= 99 and qty > 0:
                                 yes_levels.append([p_cents, qty])
                         except Exception:
@@ -609,8 +630,8 @@ class KalshiWebSocketClient:
                     asks_from_no = []
                     for item in raw_no:
                         try:
-                            p_cents = L2OrderBook.parse_price_cents(item[0])
-                            qty = int(round(float(item[1])))
+                            p_cents = L2OrderBook.parse_price_cents(item[0], is_bid=True)
+                            qty = float(item[1])
                             if 1 <= p_cents <= 99 and qty > 0:
                                 asks_from_no.append([100 - p_cents, qty])
                         except Exception:
@@ -668,8 +689,8 @@ class KalshiWebSocketClient:
                     yes_levels = []
                     for item in raw_yes:
                         try:
-                            p_cents = L2OrderBook.parse_price_cents(item[0])
-                            qty = int(round(float(item[1])))
+                            p_cents = L2OrderBook.parse_price_cents(item[0], is_bid=True)
+                            qty = float(item[1])
                             if 1 <= p_cents <= 99 and qty > 0:
                                 yes_levels.append([p_cents, qty])
                         except Exception:
@@ -680,8 +701,8 @@ class KalshiWebSocketClient:
                     if raw_asks is not None:
                         for item in raw_asks:
                             try:
-                                p_cents = L2OrderBook.parse_price_cents(item[0])
-                                qty = int(round(float(item[1])))
+                                p_cents = L2OrderBook.parse_price_cents(item[0], is_bid=False)
+                                qty = float(item[1])
                                 if 1 <= p_cents <= 99 and qty > 0:
                                     asks_from_no.append([p_cents, qty])
                             except Exception:
@@ -689,8 +710,8 @@ class KalshiWebSocketClient:
                     else:
                         for item in raw_no:
                             try:
-                                p_cents = L2OrderBook.parse_price_cents(item[0])
-                                qty = int(round(float(item[1])))
+                                p_cents = L2OrderBook.parse_price_cents(item[0], is_bid=True)
+                                qty = float(item[1])
                                 if 1 <= p_cents <= 99 and qty > 0:
                                     asks_from_no.append([100 - p_cents, qty])
                             except Exception:
@@ -707,9 +728,10 @@ class KalshiWebSocketClient:
 
                     try:
                         raw_price = msg_data.get("price_dollars", msg_data.get("price", 0))
-                        price = L2OrderBook.parse_price_cents(raw_price)
+                        is_bid_side = False if raw_side in ("ask", "yes_ask") else True
+                        price = L2OrderBook.parse_price_cents(raw_price, is_bid=is_bid_side)
                         raw_delta = msg_data.get("delta_fp", msg_data.get("delta", 0))
-                        delta = int(round(float(raw_delta)))
+                        delta = float(raw_delta)
 
                         # When sid is present, Kalshi increments seq per subscription (sid) across all tickers on that sid
                         sid_ok = True

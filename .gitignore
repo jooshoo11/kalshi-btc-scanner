@@ -31,3 +31,9 @@ archive/
 *.db-shm
 .freebuff/
 .gemini/
+KILL
+.eth_prod_book_validated
+cohort_analysis_results.json
+cross_check_report.json
+
+.github/

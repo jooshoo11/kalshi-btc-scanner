@@ -1,0 +1,51 @@
+{
+  "coin": "ETH",
+  "initial_equity": 50.0,
+  "final_equity": 72.19,
+  "net_pnl": 22.19,
+  "total_trades": 11,
+  "wins": 9,
+  "losses": 2,
+  "win_rate_pct": 81.82,
+  "metrics": {
+    "initial_equity": 50.0,
+    "final_equity": 72.19,
+    "total_return_pct": 44.38,
+    "max_drawdown_pct": 7.97,
+    "sharpe_ratio": 83.83
+  },
+  "equity_curve": [
+    50.0,
+    50.0,
+    50.0,
+    50.0,
+    53.43,
+    53.43,
+    56.09,
+    58.68,
+    62.3,
+    58.48,
+    61.1,
+    63.72,
+    58.64,
+    62.88,
+    62.88,
+    66.2,
+    66.2,
+    66.2,
+    66.2,
+    72.19,
+    72.19
+  ],
+  "windows": [
+    {
+      "coin": "ETH",
+      "window": 1,
+      "train_span": "[0:60]",
+      "test_span": "[60:80]",
+      "chosen_strategy": "S5_REC_LEADLAG_ENSEMBLE",
+      "oos_return_pct": 0.0,
+      "oos_trades": 11
+    }
+  ]
+}
